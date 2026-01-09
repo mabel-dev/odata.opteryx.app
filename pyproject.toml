@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "opteryx-odata"
+version = "0.0.1"
+description = "Opteryx OData Service"
+requires-python = '>=3.13'
+dependencies = [
+    "brotli-asgi==1.6.0",
+    "cryptography==46.0.3",
+    "fastapi==0.128.0",
+    "google-cloud-firestore==2.22.0",
+    "google-cloud-secret-manager==2.26.0",
+    "google-cloud-storage==3.7.0",
+    "orjson==3.11.5",
+    "orso==0.0.226",
+    "opteryx-catalog==0.4.*",
+    "opteryx-core==0.5.*",
+    "python-jose[cryptography]==3.5.0",
+    "python-multipart==0.0.21",
+    "requests==2.32.5",
+    "uvicorn[standard]==0.38.0",
+]
+
+[tool.isort]
+profile = "black"
+extend_skip_glob = ["tests/**"]
+skip_gitignore = true
+line_length = 100
+multi_line_output = 9
+force_single_line = true
+float_to_top = true
+ensure_newline_before_comments = true
+
+[tool.ruff]
+line-length = 100
+indent-width = 4
+target-version = 'py313'
+
+[tool.ruff.format]
+docstring-code-format = true
+docstring-code-line-length = 100
