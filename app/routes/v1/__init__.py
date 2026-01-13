@@ -1,6 +1,8 @@
 from fastapi import APIRouter
 
+from .interface import router as interface_router
+
 router = APIRouter()
-# OData routes will be added here
+router.include_router(interface_router)
 
 __all__ = ["router"]

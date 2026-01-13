@@ -1,11 +1,9 @@
 .PHONY: install run
 
 # Virtual environment directory
-VENV ?= .venv
 PYTHON := python
 PIP := $(PYTHON) -m pip
-UV := $(VENV)/bin/uv
-UVICORN := $(VENV)/bin/uvicorn
+UVICORN := uvicorn
 
 install:
 	@# Ensure Python version is sufficient
@@ -37,4 +35,4 @@ lint: ## Run all linting tools
 	@echo "Linting complete!"
 
 run:
-	"$(VENV)/bin/uvicorn" app.main:service --host 0.0.0.0 --port 8890
+	"$(UVICORN)" app.main:service --host 0.0.0.0 --port 8890

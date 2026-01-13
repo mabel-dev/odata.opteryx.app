@@ -9,4 +9,3 @@ router.include_router(v1_router)
 router.include_router(health_router)
 
 __all__ = ["router"]
-
