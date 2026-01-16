@@ -29,12 +29,36 @@ def root():
     """Return a minimal OData Service Document so clients can discover the
     service and metadata.
     """
-    from fastapi.responses import ORJSONResponse
+    # Dynamically discover available datasets from the catalog
+    datasets = []
+    try:
+        # Query the catalog for available tables
+        result = opteryx.query("SHOW TABLES")
+        for row in result:
+            # Parse table name (format: workstream.collection.dataset)
+            if hasattr(row, "_asdict"):
+                table_name = dict(row._asdict()).get("table_name") or dict(row._asdict()).get(
+                    "name"
+                )
+            elif isinstance(row, dict):
+                table_name = row.get("table_name") or row.get("name")
+            else:
+                table_name = row[0] if len(row) > 0 else None
 
-    # Advertise the example `planets` EntitySet so clients can discover it
+            if table_name:
+                # Split into parts for URL construction
+                parts = table_name.split(".")
+                if len(parts) >= 3:
+                    workstream, collection, dataset = parts[0], parts[1], ".".join(parts[2:])
+                    datasets.append(
+                        {"name": dataset, "url": f"api/v1/{workstream}/{collection}/{dataset}"}
+                    )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to list datasets: %s", exc)
+
     body = {
         "@odata.context": "/$metadata",
-        "value": [{"name": "planets", "url": "api/v1/opteryx/test/planets"}],
+        "value": datasets,
     }
     return ORJSONResponse(content=body, headers={"OData-Version": "4.0"})
 
@@ -47,9 +71,41 @@ def root_metadata():
     EntityContainer so OData-aware clients can detect the service. More
     complete metadata can be implemented later.
     """
-    # Emit an EDMX that exposes the example `planets` EntitySet at the
-    # service root so clients (like Excel) can resolve entity types.
-    table_name = "opteryx.test.planets"
+    # Try to get the first available dataset for metadata generation
+    table_name = None
+    try:
+        result = opteryx.query("SHOW TABLES")
+        for row in result:
+            if hasattr(row, "_asdict"):
+                table_name = dict(row._asdict()).get("table_name") or dict(row._asdict()).get(
+                    "name"
+                )
+            elif isinstance(row, dict):
+                table_name = row.get("table_name") or row.get("name")
+            else:
+                table_name = row[0] if len(row) > 0 else None
+            if table_name:
+                break
+    except Exception:  # noqa: BLE001
+        pass
+
+    if not table_name:
+        # Fallback to empty metadata if no datasets available
+        xml = (
+            '<?xml version="1.0" encoding="utf-8"?>\n'
+            '<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">\n'
+            "  <edmx:DataServices>\n"
+            '    <Schema Namespace="Default" xmlns="http://docs.oasis-open.org/odata/ns/edm">\n'
+            '      <EntityContainer Name="Container">\n'
+            "      </EntityContainer>\n"
+            "    </Schema>\n"
+            "  </edmx:DataServices>\n"
+            "</edmx:Edmx>"
+        )
+        from fastapi.responses import Response
+
+        return Response(content=xml, media_type="application/xml", headers={"OData-Version": "4.0"})
+
     sql = f'SELECT * FROM "{table_name}" LIMIT 1'
     col_names = []
     col_types = []
@@ -110,8 +166,17 @@ def root_metadata():
 
         return Response(content=xml, media_type="application/xml", headers={"OData-Version": "4.0"})
 
-    schema_ns = "test"
-    entity_name = "test_planets"
+    # Parse table name to build schema namespace and entity name
+    parts = table_name.split(".")
+    if len(parts) >= 3:
+        schema_ns = parts[1]  # collection
+        dataset_name = ".".join(parts[2:])  # dataset
+        entity_name = f"{parts[1]}_{parts[2]}"
+    else:
+        schema_ns = "Default"
+        dataset_name = table_name
+        entity_name = table_name.replace(".", "_")
+
     lines = [
         '<?xml version="1.0" encoding="utf-8"?>',
         '<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">',
@@ -133,7 +198,7 @@ def root_metadata():
         [
             "      </EntityType>",
             '      <EntityContainer Name="Container">',
-            f'        <EntitySet Name="planets" EntityType="{schema_ns}.{entity_name}" />',
+            f'        <EntitySet Name="{dataset_name}" EntityType="{schema_ns}.{entity_name}" />',
             "      </EntityContainer>",
             "    </Schema>",
             "  </edmx:DataServices>",
@@ -150,24 +215,79 @@ def root_metadata():
 # API v1 service document and metadata so clients can discover the v1 endpoint
 @service.get("/api/v1", include_in_schema=False)
 def api_v1_root():
-    from fastapi.responses import ORJSONResponse
+    # Dynamically discover available datasets from the catalog
+    datasets = []
+    try:
+        result = opteryx.query("SHOW TABLES")
+        for row in result:
+            if hasattr(row, "_asdict"):
+                table_name = dict(row._asdict()).get("table_name") or dict(row._asdict()).get(
+                    "name"
+                )
+            elif isinstance(row, dict):
+                table_name = row.get("table_name") or row.get("name")
+            else:
+                table_name = row[0] if len(row) > 0 else None
 
-    # Provide a service document listing available EntitySets. For now we
-    # expose the example dataset `opteryx.test.planets` so clients can
-    # discover it.
+            if table_name:
+                parts = table_name.split(".")
+                if len(parts) >= 3:
+                    workstream, collection, dataset = parts[0], parts[1], ".".join(parts[2:])
+                    datasets.append(
+                        {
+                            "name": dataset,
+                            "kind": "EntitySet",
+                            "url": f"{workstream}/{collection}/{dataset}",
+                        }
+                    )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to list datasets: %s", exc)
+
     body = {
         "@odata.context": "/api/v1/$metadata",
-        "value": [{"name": "planets", "kind": "EntitySet", "url": "opteryx/test/planets"}],
+        "value": datasets,
     }
     return ORJSONResponse(content=body, headers={"OData-Version": "4.0"})
 
 
 @service.get("/api/v1/$metadata", include_in_schema=False)
 def api_v1_metadata():
-    # Build a minimal EDMX that exposes the example EntitySet for
-    # `opteryx.test.planets`. We inspect the dataset (LIMIT 1) to learn
-    # its column names and types.
-    table_name = "opteryx.test.planets"
+    # Build a minimal EDMX that discovers available datasets dynamically
+    # Try to get the first available dataset for metadata generation
+    table_name = None
+    try:
+        result = opteryx.query("SHOW TABLES")
+        for row in result:
+            if hasattr(row, "_asdict"):
+                table_name = dict(row._asdict()).get("table_name") or dict(row._asdict()).get(
+                    "name"
+                )
+            elif isinstance(row, dict):
+                table_name = row.get("table_name") or row.get("name")
+            else:
+                table_name = row[0] if len(row) > 0 else None
+            if table_name:
+                break
+    except Exception:  # noqa: BLE001
+        pass
+
+    if not table_name:
+        # Fallback to empty metadata if no datasets available
+        xml = (
+            '<?xml version="1.0" encoding="utf-8"?>\n'
+            '<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">\n'
+            "  <edmx:DataServices>\n"
+            '    <Schema Namespace="ApiV1" xmlns="http://docs.oasis-open.org/odata/ns/edm">\n'
+            '      <EntityContainer Name="Container">\n'
+            "      </EntityContainer>\n"
+            "    </Schema>\n"
+            "  </edmx:DataServices>\n"
+            "</edmx:Edmx>"
+        )
+        from fastapi.responses import Response
+
+        return Response(content=xml, media_type="application/xml", headers={"OData-Version": "4.0"})
+
     sql = f'SELECT * FROM "{table_name}" LIMIT 1'
     col_names = []
     col_types = []
@@ -229,9 +349,17 @@ def api_v1_metadata():
 
         return Response(content=xml, media_type="application/xml", headers={"OData-Version": "4.0"})
 
-    # Compose EDMX
-    schema_ns = "test"
-    entity_name = "test_planets"
+    # Compose EDMX with dynamic dataset name
+    parts = table_name.split(".")
+    if len(parts) >= 3:
+        schema_ns = parts[1]  # collection
+        dataset_name = ".".join(parts[2:])  # dataset
+        entity_name = f"{parts[1]}_{parts[2]}"
+    else:
+        schema_ns = "ApiV1"
+        dataset_name = table_name
+        entity_name = table_name.replace(".", "_")
+
     lines = [
         '<?xml version="1.0" encoding="utf-8"?>',
         '<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">',
@@ -253,7 +381,7 @@ def api_v1_metadata():
         [
             "      </EntityType>",
             '      <EntityContainer Name="Container">',
-            f'        <EntitySet Name="planets" EntityType="{schema_ns}.{entity_name}" />',
+            f'        <EntitySet Name="{dataset_name}" EntityType="{schema_ns}.{entity_name}" />',
             "      </EntityContainer>",
             "    </Schema>",
             "  </edmx:DataServices>",
