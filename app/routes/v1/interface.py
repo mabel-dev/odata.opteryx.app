@@ -120,19 +120,16 @@ def read_dataset(
     # Prefer doing paging in SQL. When $top is provided use LIMIT (and OFFSET
     # when present). When only $skip is provided append an `OFFSET` clause to
     # the SQL so the engine can avoid materializing skipped rows.
-    used_sql_paging = False
     append_offset = False
     if top is not None:
         if skip is not None:
             qb.LIMIT(f"{top} OFFSET {skip}")
         else:
             qb.LIMIT(str(top))
-        used_sql_paging = True
     elif skip is not None:
         # No top provided, but we have a skip — we'll append OFFSET to the SQL
         # string below so the engine can apply it.
         append_offset = True
-        used_sql_paging = True
 
     sql = str(qb)
     if append_offset:
@@ -233,18 +230,7 @@ def read_dataset(
     if col_names:
         for idx, name in enumerate(col_names):
             edm_type = None
-            # try to read type from result.columns objects if they expose it
-            try:
-                col_obj = result.columns[idx]
-                if hasattr(col_obj, "py_type"):
-                    edm_type = _map_py_type_to_edm(col_obj.py_type)
-                elif hasattr(col_obj, "type"):
-                    edm_type = _map_py_type_to_edm(col_obj.type)
-                elif hasattr(col_obj, "dtype"):
-                    edm_type = _map_py_type_to_edm(col_obj.dtype)
-            except Exception:
-                edm_type = None
-
+            # Infer type from first non-null value in rows
             if edm_type is None:
                 for r in rows:
                     if isinstance(r, dict) and name in r:
