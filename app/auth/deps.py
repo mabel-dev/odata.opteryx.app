@@ -1,3 +1,4 @@
+import base64
 import os
 from typing import Any
 from typing import Dict
@@ -171,3 +172,115 @@ async def require_bearer_token(authorization: Optional[str] = Header(None)) -> D
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden caller")
         # Accept Google claims as valid
         return google_claims
+
+
+def _verify_basic_auth_credentials(username: str, password: str) -> bool:
+    """Verify basic authentication credentials against password store.
+    
+    Implement your credential validation here:
+    - Check against a database of users
+    - Validate against an external auth service
+    - Compare hashed passwords
+    
+    Returns True if credentials are valid, False otherwise.
+    """
+    if not username or not password:
+        return False
+    
+    # TODO: Implement actual credential verification
+    # Example: bcrypt.checkpw(password.encode(), user.password_hash)
+    # Example: external_auth_service.verify(username, password)
+    
+    # Stub: accept any non-empty credentials
+    return True
+
+
+def _get_user_permissions(username: str) -> list[str]:
+    """Get permissions for a user from the permissions store.
+    
+    Implement your permissions lookup here:
+    - Query a database
+    - Fetch from an external service
+    - Use a permissions cache
+    
+    Returns a list of permission strings.
+    """
+    # TODO: Implement actual permissions lookup
+    # Example: return db.query(Permission).filter(Permission.username == username)
+    # Example: return external_service.get_permissions(username)
+    
+    # Stub: return empty permissions
+    return []
+
+
+def _verify_basic_auth(username: str, password: str) -> Dict[str, Any]:
+    """Verify basic authentication and fetch user permissions.
+    
+    For basic auth:
+    1. Verify the password is correct
+    2. Fetch the user's permissions from the permissions store
+    3. Return claims dict with username and permissions
+    
+    Returns claims dict on success.
+    """
+    # Verify credentials
+    if not _verify_basic_auth_credentials(username, password):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid username or password"
+        )
+    
+    # Fetch permissions for the user
+    permissions = _get_user_permissions(username)
+    
+    # Return claims with username and permissions
+    return {
+        "sub": username,
+        "preferred_username": username,
+        "auth_method": "basic",
+        "permissions": permissions,
+    }
+
+
+async def require_authentication(
+    authorization: Optional[str] = Header(None),
+) -> Dict[str, Any]:
+    """Require and verify either bearer token or basic authentication.
+    
+    Tries authentication methods in order:
+    1. Bearer token (JWT)
+    2. Basic authentication (username:password in base64)
+    
+    Returns the decoded claims on success.
+    """
+    if not authorization:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing or invalid credentials",
+        )
+    
+    # Try bearer token first
+    if authorization.lower().startswith("bearer "):
+        try:
+            return await require_bearer_token(authorization)
+        except HTTPException as exc:
+            # If bearer fails, we'll try basic auth next
+            logger.debug("Bearer token authentication failed: %s", exc.detail)
+    
+    # Try basic authentication
+    if authorization.lower().startswith("basic "):
+        try:
+            encoded_credentials = authorization.split(" ", 1)[1]
+            decoded_credentials = base64.b64decode(encoded_credentials).decode("utf-8")
+            username, password = decoded_credentials.split(":", 1)
+            return _verify_basic_auth(username, password)
+        except (ValueError, IndexError, TypeError) as exc:
+            logger.debug("Basic authentication parsing failed: %s", exc)
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid basic credentials"
+            ) from exc
+    
+    # No recognized auth scheme
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Missing or invalid credentials",
+    )
