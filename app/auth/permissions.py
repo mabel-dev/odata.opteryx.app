@@ -49,9 +49,7 @@ def convert_permissions_for_opteryx(
         access_policies = [{"pattern": workspace, "role": role} for role, workspace in permissions]
 
         logger.debug(
-            "Converted %d permissions to Opteryx format: %s",
-            len(access_policies),
-            access_policies,
+            f"Converted {len(access_policies)} permissions to Opteryx format: {access_policies}"
         )
 
         return access_policies
@@ -59,9 +57,7 @@ def convert_permissions_for_opteryx(
     except (TypeError, ValueError) as exc:
         # Handle malformed permissions gracefully
         logger.warning(
-            "Failed to convert permissions to Opteryx format: %s. Permissions: %s",
-            exc,
-            permissions,
+            f"Failed to convert permissions to Opteryx format: {exc}. Permissions: {permissions}"
         )
         return []
 

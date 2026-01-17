@@ -145,10 +145,7 @@ def read_dataset(
     access_policies = get_access_policies_from_claims(claims)
 
     logger.debug(
-        "Executing query for table=%s with %d access policies for identity=%s",
-        table_name,
-        len(access_policies),
-        claims.get("identity", "unknown"),
+        f"Executing query for table={table_name} with {len(access_policies)} access policies for identity={claims.get('identity', 'unknown')}"
     )
 
     try:
@@ -190,9 +187,7 @@ def read_dataset(
             or "forbidden" in str(exc).lower()
         ):
             logger.warning(
-                "Access denied to dataset %s for identity %s",
-                table_name,
-                claims.get("identity", "unknown"),
+                f"Access denied to dataset {table_name} for identity {claims.get('identity', 'unknown')}"
             )
             raise HTTPException(status_code=403, detail=f"Access denied to dataset {table_name}")
 
