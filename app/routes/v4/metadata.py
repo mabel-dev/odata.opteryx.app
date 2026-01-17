@@ -1,5 +1,7 @@
 """OData v4 EDMX metadata endpoint."""
 
+# Get catalog configuration from environment
+import os
 import xml.etree.ElementTree as ET
 from typing import Any
 
@@ -10,8 +12,8 @@ from fastapi import Request
 from fastapi import Response
 from fastapi import status
 from google.cloud.firestore_v1.base_query import FieldFilter
-from orso.logging import get_logger
 from opteryx_catalog import OpteryxCatalog
+from orso.logging import get_logger
 
 from app.auth.deps import require_authentication
 from app.core import _get_firestore_client
@@ -19,8 +21,6 @@ from app.core import _get_firestore_client
 logger = get_logger()
 router = APIRouter(prefix="/api/v4")
 
-# Get catalog configuration from environment
-import os
 
 FIRESTORE_DATABASE = os.environ.get("FIRESTORE_DATABASE")
 BUCKET_NAME = os.environ.get("GCS_BUCKET")
@@ -241,10 +241,10 @@ def _map_py_type_to_edm(py_type: type) -> str:
 
 def _get_dataset_schema(dataset_info: DatasetInfo) -> list[tuple[str, str]]:
     """Get dataset schema from catalog instead of querying Opteryx.
-    
+
     Args:
         dataset_info: DatasetInfo with workspace, collection, name
-        
+
     Returns:
         List of (column_name, edm_type) tuples
     """
@@ -256,23 +256,23 @@ def _get_dataset_schema(dataset_info: DatasetInfo) -> list[tuple[str, str]]:
             firestore_database=FIRESTORE_DATABASE,
             gcs_bucket=BUCKET_NAME,
         )
-        
+
         # Load dataset from catalog (namespace.table_name format)
         dataset_path = f"{dataset_info.collection}.{dataset_info.name}"
         dataset = catalog.load_dataset(dataset_path)
-        
+
         # Get schema from catalog
         schema = dataset.schema()
-        
+
         columns = []
-        for field in schema.fields:
-            col_name = field.name
-            # Map Arrow/Iceberg type to EDM type
-            edm_type = _map_py_type_to_edm(field.type)
+        for column in schema.columns:
+            col_name = column.name
+            # Map Opteryx type to EDM type
+            edm_type = _map_py_type_to_edm(column.type)
             columns.append((col_name, edm_type))
-        
+
         return columns
-        
+
     except Exception as exc:
         logger.warning(f"Failed to get schema from catalog for {dataset_info.resource}: {exc}")
         return []
@@ -398,9 +398,7 @@ def get_edmx_metadata(
 
         # Add Key element (use first column as key - OData requires a key)
         key = ET.SubElement(entity_type, "{" + NS_EDM + "}Key")
-        ET.SubElement(
-            key, "{" + NS_EDM + "}PropertyRef", attrib={"Name": columns[0][0]}
-        )
+        ET.SubElement(key, "{" + NS_EDM + "}PropertyRef", attrib={"Name": columns[0][0]})
 
         # Add properties
         for col_name, edm_type in columns:
