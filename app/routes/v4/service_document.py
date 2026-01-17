@@ -129,11 +129,7 @@ def _query_collection_group(
                 continue
     except Exception as exc:
         logger.debug(
-            "Failed to fetch %s for workspace %s: %s %s",
-            collection,
-            workspace_filter,
-            type(exc),
-            exc,
+            f"Failed to fetch {collection} for workspace {workspace_filter}: {type(exc)} {exc}"
         )
 
     return results
