@@ -1,27 +1,19 @@
-"""OData metadata endpoints for discovering datasets."""
+"""OData v4 service document endpoint."""
 
 from fastapi import APIRouter
 from fastapi import Depends
 from fastapi import HTTPException
+from fastapi import Request
+from fastapi import Response
 from fastapi import status
 from google.cloud.firestore_v1.base_query import FieldFilter
 from orso.logging import get_logger
 
-from app.auth.deps import require_bearer_token
+from app.auth.deps import require_authentication
 from app.core import _get_firestore_client
 
 logger = get_logger()
-router = APIRouter(prefix="/v1")
-
-
-def _extract_identity_from_claims(claims: dict) -> str:
-    """Extract user identity from JWT claims."""
-    identity = claims.get("sub") or claims.get("email") or claims.get("preferred_username")
-    if not identity:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing token subject"
-        )
-    return identity
+router = APIRouter(prefix="/api/v4")
 
 
 def _normalize_resource_name(resource: str) -> str:
@@ -38,59 +30,6 @@ def _normalize_resource_name(resource: str) -> str:
         resource = resource[:-1]
 
     return resource
-
-
-def _extract_workspace_from_pattern(pattern: str) -> str | None:
-    """Return the workspace id embedded in a policy pattern."""
-    if not pattern or not isinstance(pattern, str):
-        return None
-
-    # Use the portion before the first dot/wildcard as the workspace identifier
-    first_segment = pattern.strip(".")
-    first_segment = first_segment.split(".", 1)[0]
-    workspace = first_segment.replace("*", "").strip()
-
-    return workspace or None
-
-
-def _extract_policies_from_claims(claims: dict) -> list[tuple[str, str, str]]:
-    """Normalize policy triplets from JWT claims.
-
-    Returns a list of (policy_id, role, pattern) tuples.
-    """
-    normalized: list[tuple[str, str, str]] = []
-    for entry in claims.get("policies", []) or []:
-        policy_id: str | None = None
-        role: str | None = None
-        pattern: str | None = None
-
-        if isinstance(entry, (list, tuple)) and len(entry) == 3:
-            policy_id, role, pattern = entry
-        elif isinstance(entry, dict):
-            policy_id = entry.get("id") or entry.get("policy_id")
-            role = entry.get("role")
-            pattern = entry.get("pattern") or entry.get("path")
-
-        if not (policy_id and isinstance(role, str) and isinstance(pattern, str)):
-            continue
-
-        normalized.append((str(policy_id), role, pattern))
-
-    return normalized
-
-
-def _group_policies_by_workspace(
-    policies: list[tuple[str, str, str]],
-) -> dict[str, list[tuple[str, str, str]]]:
-    """Organize policy triplets by workspace for quick lookups."""
-    grouped: dict[str, list[tuple[str, str, str]]] = {}
-    for policy_id, role, pattern in policies:
-        workspace = _extract_workspace_from_pattern(pattern)
-        if not workspace:
-            continue
-        grouped.setdefault(workspace, []).append((pattern, role, policy_id))
-
-    return grouped
 
 
 def _parse_path_segments(path: str) -> tuple[str | None, str | None, str | None]:
@@ -186,11 +125,15 @@ def _query_collection_group(
                     )
                 )
             except Exception:
-                logger.debug(f"Skipping malformed dataset document: {doc.id}")
+                logger.debug("Skipping malformed dataset document: %s", doc.id)
                 continue
     except Exception as exc:
         logger.debug(
-            f"Failed to fetch {collection} for workspace {workspace_filter}: {type(exc)} {exc}"
+            "Failed to fetch %s for workspace %s: %s %s",
+            collection,
+            workspace_filter,
+            type(exc),
+            exc,
         )
 
     return results
@@ -199,7 +142,7 @@ def _query_collection_group(
 def _get_personal_datasets(db, identity: str) -> list[DatasetInfo]:
     """Retrieve datasets from user's personal collection."""
     results = []
-    logger.debug(f"Getting personal datasets for {identity}")
+    logger.debug("Getting personal datasets for %s", identity)
 
     try:
         # Query personal datasets from the top-level 'personal' collection
@@ -223,10 +166,10 @@ def _get_personal_datasets(db, identity: str) -> list[DatasetInfo]:
                     )
                 )
             except Exception:
-                logger.debug(f"Skipping malformed personal dataset: {doc.id}")
+                logger.debug("Skipping malformed personal dataset: %s", doc.id)
                 continue
     except Exception as exc:
-        logger.error(f"Failed to retrieve personal datasets for {identity}: {type(exc)} {exc}")
+        logger.error("Failed to retrieve personal datasets for %s: %s %s", identity, type(exc), exc)
 
     return results
 
@@ -245,7 +188,7 @@ def _get_workspace_datasets(db, workspace_ids: set[str]) -> list[DatasetInfo]:
             )
             results.extend(datasets)
     except Exception as exc:
-        logger.error(f"Failed to retrieve datasets: {type(exc)} {exc}")
+        logger.error("Failed to retrieve datasets: %s %s", type(exc), exc)
         raise HTTPException(
             status_code=status.HTTP_504_GATEWAY_TIMEOUT,
             detail="failed to read datasets from firestore",
@@ -263,25 +206,40 @@ def _role_allows_read(role: str | None) -> bool:
 
 
 @router.get(
-    "/datasets",
+    "/",
     status_code=status.HTTP_200_OK,
-    summary="Get accessible datasets for user",
-    description="Returns all datasets that the user can read.",
+    summary="OData v4 Service Document",
+    description="Returns the OData v4 service document with accessible EntitySets.",
+    dependencies=[Depends(require_authentication)],
 )
-def get_accessible_datasets(
-    claims: dict = Depends(require_bearer_token),
+def get_service_document(
+    request: Request,
+    response: Response,
 ) -> dict:
     """
-    Query Firestore for datasets the user can read.
+    Return OData v4 service document listing all accessible EntitySets.
 
-    Returns a list of datasets organized by workspace and collection that the user
-    has read access to through their assigned policies and personal collections.
+    The service document provides a list of all EntitySets (datasets) that the
+    authenticated user has permission to access.
     """
-    identity = _extract_identity_from_claims(claims)
+    # Add OData-Version header
+    response.headers["OData-Version"] = "4.0"
 
-    # Extract policy triplets from the JWT and group them by workspace
-    policies = _extract_policies_from_claims(claims)
-    access_policies = _group_policies_by_workspace(policies)
+    # Get claims from request state (set by require_authentication dependency)
+    claims = request.state.claims
+    identity = claims.get("identity")
+    if not identity:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing token identity"
+        )
+
+    # Get normalized permissions: list of (role, workspace) tuples
+    permissions = claims.get("permissions", [])
+
+    # Group permissions by workspace
+    access_policies: dict[str, list[str]] = {}  # workspace -> [roles]
+    for role, workspace in permissions:
+        access_policies.setdefault(workspace, []).append(role)
 
     db = _get_firestore_client(database="catalogs")
     if db is None:
@@ -298,9 +256,7 @@ def get_accessible_datasets(
     all_datasets.extend(_get_personal_datasets(db, identity))
     all_datasets.extend(_get_workspace_datasets(db, workspace_ids))
 
-    # Filter datasets by read permission and access policy patterns
-    import fnmatch
-
+    # Filter datasets by read permission
     filtered_datasets: list[DatasetInfo] = []
 
     for dataset in all_datasets:
@@ -315,32 +271,30 @@ def get_accessible_datasets(
         if dataset.resource.startswith("personal."):
             continue
 
-        # Public datasets - read-only
+        # Public datasets - read-only for all users
         if dataset.resource.startswith("public."):
             filtered_datasets.append(dataset)
             continue
 
-        # Workspace datasets - check role permissions
+        # Workspace datasets - check if user has any read role for this workspace
         workspace = dataset.resource.split(".")[0]
-        policies_for_workspace = access_policies.get(workspace, [])
-        allowed = False
-        for pattern, role, _policy_id in policies_for_workspace:
-            if fnmatch.fnmatch(dataset.resource, pattern) and _role_allows_read(role):
-                allowed = True
-                break
-
-        if allowed:
+        roles = access_policies.get(workspace, [])
+        if any(_role_allows_read(role) for role in roles):
             filtered_datasets.append(dataset)
 
-    # Format response
-    datasets_by_workspace: dict[str, dict[str, list[str]]] = {}
+    # Build OData service document
+    entity_sets = []
     for dataset in filtered_datasets:
-        workspace = datasets_by_workspace.setdefault(dataset.workspace, {})
-        collection_list = workspace.setdefault(dataset.collection, [])
-        collection_list.append(dataset.name)
+        # EntitySet name: workspace.collection.dataset (dots)
+        name = dataset.resource
+        # EntitySet url: workspace/collection/dataset (path segments)
+        url = f"{dataset.workspace}/{dataset.collection}/{dataset.name}"
+
+        entity_sets.append({"name": name, "kind": "EntitySet", "url": url})
 
     return {
-        "datasets": datasets_by_workspace,
+        "@odata.context": "/api/v4/$metadata",
+        "value": entity_sets,
     }
 
 
