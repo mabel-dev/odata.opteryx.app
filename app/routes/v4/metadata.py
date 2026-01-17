@@ -3,7 +3,6 @@
 import xml.etree.ElementTree as ET
 from typing import Any
 
-import opteryx
 from fastapi import APIRouter
 from fastapi import Depends
 from fastapi import HTTPException
@@ -12,13 +11,20 @@ from fastapi import Response
 from fastapi import status
 from google.cloud.firestore_v1.base_query import FieldFilter
 from orso.logging import get_logger
+from opteryx_catalog import OpteryxCatalog
 
 from app.auth.deps import require_authentication
-from app.auth.permissions import get_access_policies_from_claims
 from app.core import _get_firestore_client
 
 logger = get_logger()
 router = APIRouter(prefix="/api/v4")
+
+# Get catalog configuration from environment
+import os
+
+FIRESTORE_DATABASE = os.environ.get("FIRESTORE_DATABASE")
+BUCKET_NAME = os.environ.get("GCS_BUCKET")
+GCP_PROJECT_ID = os.environ.get("GCP_PROJECT_ID")
 
 
 def _normalize_resource_name(resource: str) -> str:
@@ -233,26 +239,42 @@ def _map_py_type_to_edm(py_type: type) -> str:
     return "Edm.String"
 
 
-def _get_dataset_schema(table_name: str, access_policies: list[dict]) -> list[tuple[str, str]]:
-    """Query Opteryx for dataset schema and return (column_name, edm_type) tuples."""
+def _get_dataset_schema(dataset_info: DatasetInfo) -> list[tuple[str, str]]:
+    """Get dataset schema from catalog instead of querying Opteryx.
+    
+    Args:
+        dataset_info: DatasetInfo with workspace, collection, name
+        
+    Returns:
+        List of (column_name, edm_type) tuples
+    """
     try:
-        # Query schema without reading data
-        result = opteryx.query(
-            f"SELECT * FROM {table_name} LIMIT 0", access_policies=access_policies
+        # Initialize catalog for this workspace
+        catalog = OpteryxCatalog(
+            dataset_info.workspace,
+            firestore_project=GCP_PROJECT_ID,
+            firestore_database=FIRESTORE_DATABASE,
+            gcs_bucket=BUCKET_NAME,
         )
-        arrow_table = result.arrow()
-
+        
+        # Load dataset from catalog (namespace.table_name format)
+        dataset_path = f"{dataset_info.collection}.{dataset_info.name}"
+        dataset = catalog.load_dataset(dataset_path)
+        
+        # Get schema from catalog
+        schema = dataset.schema()
+        
         columns = []
-        for field in arrow_table.schema:
+        for field in schema.fields:
             col_name = field.name
-            # Map Arrow type to Python type to EDM type
-            py_type = field.type.to_pandas_dtype()
-            edm_type = _map_py_type_to_edm(type(py_type))
+            # Map Arrow/Iceberg type to EDM type
+            edm_type = _map_py_type_to_edm(field.type)
             columns.append((col_name, edm_type))
-
+        
         return columns
+        
     except Exception as exc:
-        logger.warning(f"Failed to get schema for {table_name}: {exc}")
+        logger.warning("Failed to get schema from catalog for %s: %s", dataset_info.resource, exc)
         return []
 
 
@@ -287,9 +309,6 @@ def get_edmx_metadata(
 
     # Get normalized permissions: list of (role, workspace) tuples
     permissions = claims.get("permissions", [])
-
-    # Get access policies for Opteryx queries
-    access_policies = get_access_policies_from_claims(claims)
 
     # Group permissions by workspace
     workspace_roles: dict[str, list[str]] = {}  # workspace -> [roles]
@@ -365,12 +384,11 @@ def get_edmx_metadata(
             continue
 
         # Get schema for this dataset
-        table_name = dataset.resource
-        columns = _get_dataset_schema(table_name, access_policies)
+        columns = _get_dataset_schema(dataset)
 
         if not columns:
             # Skip datasets with no accessible schema
-            logger.debug(f"Skipping dataset with no schema: {table_name}")
+            logger.debug("Skipping dataset with no schema: %s", dataset.resource)
             continue
 
         # Create EntityType
@@ -380,7 +398,7 @@ def get_edmx_metadata(
 
         # Add Key element (use first column as key - OData requires a key)
         key = ET.SubElement(entity_type, "{" + NS_EDM + "}Key")
-        property_ref = ET.SubElement(
+        ET.SubElement(
             key, "{" + NS_EDM + "}PropertyRef", attrib={"Name": columns[0][0]}
         )
 
