@@ -42,6 +42,68 @@ opteryx.set_default_connector(
 )
 
 
+def _sanitize_value_for_odata(value: Any) -> Any:
+    """
+    Aggressively normalize values for OData/JSON compatibility.
+
+    OData clients are strict about type matching. We prioritize compatibility
+    over precision, converting everything to basic JSON-compatible primitives.
+
+    Returns: int, float, str, bool, or None only
+    """
+    import datetime as dt
+    import decimal
+
+    if value is None:
+        return None
+
+    # Boolean - check first since bool is subclass of int in Python
+    if isinstance(value, bool):
+        return value
+
+    # Numeric types -> int or float
+    if isinstance(value, int):
+        return value
+
+    if isinstance(value, (float, decimal.Decimal)):
+        # Convert Decimal to float, handle NaN/Infinity
+        f = float(value)
+        # OData doesn't handle NaN/Infinity well, convert to None
+        if not (f == f):  # NaN check (NaN != NaN)
+            return None
+        if f == float("inf") or f == float("-inf"):
+            return None
+        return f
+
+    # Datetime types -> ISO 8601 string (OData expects strings for dates)
+    if isinstance(value, dt.datetime):
+        return value.isoformat()
+    if isinstance(value, dt.date):
+        return value.isoformat()
+    if isinstance(value, dt.time):
+        return value.isoformat()
+
+    # Binary data -> None (OData clients struggle with binary in JSON)
+    if isinstance(value, (bytes, bytearray)):
+        return None
+
+    # Lists/arrays -> stringify for compatibility
+    # (OData collections are complex and have poor client support)
+    if isinstance(value, (list, tuple)):
+        return str(value)
+
+    # Dicts/structs -> stringify
+    if isinstance(value, dict):
+        return str(value)
+
+    # Everything else -> convert to string as fallback
+    # This handles UUIDs, enums, custom objects, etc.
+    if not isinstance(value, str):
+        return str(value)
+
+    return value
+
+
 def _map_py_type_to_edm(py_type: type) -> str:
     import datetime as _dt
     import decimal as _dec
@@ -167,7 +229,11 @@ def read_dataset(
 
         rows = []
         for i in range(arrow_table.num_rows):
-            row_dict = {col: columns_dict[col][i] for col in col_names}
+            row_dict = {}
+            for col in col_names:
+                value = columns_dict[col][i]
+                # Sanitize values to ensure OData compatibility
+                row_dict[col] = _sanitize_value_for_odata(value)
             rows.append(row_dict)
 
         logger.info(f"Created {len(rows)} rows with {len(rows[0].keys()) if rows else 0} keys")
@@ -176,24 +242,28 @@ def read_dataset(
         logger.exception(f"failed to query dataset {table_name}")
         exc_name = exc.__class__.__name__
         exc_str = str(exc)
-        
+
         # Check for UTF-8 decode errors in the exception chain
         current_exc = exc
         while current_exc is not None:
             if isinstance(current_exc, UnicodeDecodeError):
                 logger.warning(f"Dataset {table_name} contains binary data: {exc}")
                 raise HTTPException(
-                    status_code=400, 
-                    detail="Dataset contains binary data that cannot be read as text"
+                    status_code=400,
+                    detail="Dataset contains binary data that cannot be read as text",
                 )
-            if "codec can't decode" in str(current_exc).lower() or "utf-8" in str(current_exc).lower():
+            if (
+                "codec can't decode" in str(current_exc).lower()
+                or "utf-8" in str(current_exc).lower()
+            ):
                 logger.warning(f"Dataset {table_name} has encoding issue: {exc}")
                 raise HTTPException(
-                    status_code=400, 
-                    detail="Dataset has encoding issues and cannot be read as text"
+                    status_code=400, detail="Dataset has encoding issues and cannot be read as text"
                 )
             # Check chained exceptions
-            current_exc = getattr(current_exc, '__cause__', None) or getattr(current_exc, '__context__', None)
+            current_exc = getattr(current_exc, "__cause__", None) or getattr(
+                current_exc, "__context__", None
+            )
 
         # Handle specific error types
         if exc_name == "DatasetNotFoundError":

@@ -213,7 +213,13 @@ def _role_allows_read(role: str | None) -> bool:
 
 
 def _map_py_type_to_edm(py_type) -> str:
-    """Map Python type or Opteryx OrsoTypes to EDM type."""
+    """
+    Map Python type or Opteryx OrsoTypes to EDM type.
+
+    Uses a simplified, highly compatible set of EDM types to avoid
+    serialization and client compatibility issues. We prefer broader
+    types over precise types to maximize OData client compatibility.
+    """
     import datetime as _dt
     import decimal as _dec
 
@@ -223,45 +229,38 @@ def _map_py_type_to_edm(py_type) -> str:
         _uuid = None
 
     # Handle OrsoTypes enum (from Opteryx catalog)
-    if hasattr(py_type, 'name'):
+    if hasattr(py_type, "name"):
         type_str = str(py_type).upper()
-        
-        # Integer types
-        if type_str in ('INTEGER', 'BIGINT', 'TINYINT', 'SMALLINT'):
+
+        # Integer types -> Always Int64 for maximum range and compatibility
+        if type_str in ("INTEGER", "BIGINT", "TINYINT", "SMALLINT", "INT"):
             return "Edm.Int64"
-        if type_str == 'INT':
-            return "Edm.Int32"
-        
-        # Float types
-        if type_str in ('DOUBLE', 'FLOAT', 'REAL'):
+
+        # All numeric types -> Double (avoids Decimal IEEE754Compatible issues)
+        if type_str in ("DOUBLE", "FLOAT", "REAL", "DECIMAL", "NUMERIC"):
             return "Edm.Double"
-        if type_str == 'DECIMAL':
-            return "Edm.Decimal"
-            
+
         # Boolean
-        if type_str in ('BOOLEAN', 'BOOL'):
+        if type_str in ("BOOLEAN", "BOOL"):
             return "Edm.Boolean"
-            
+
         # String types
-        if type_str in ('VARCHAR', 'TEXT', 'CHAR', 'STRING'):
+        if type_str in ("VARCHAR", "TEXT", "CHAR", "STRING"):
             return "Edm.String"
-            
-        # Date/Time types
-        if type_str in ('TIMESTAMP', 'DATETIME'):
+
+        # Date/Time -> Use only DateTimeOffset for all temporal types
+        # This avoids Date/TimeOfDay serialization issues
+        if type_str in ("TIMESTAMP", "DATETIME", "DATE", "TIME"):
             return "Edm.DateTimeOffset"
-        if type_str == 'DATE':
-            return "Edm.Date"
-        if type_str == 'TIME':
-            return "Edm.TimeOfDay"
-            
-        # Binary
-        if type_str in ('BINARY', 'BLOB', 'VARBINARY'):
-            return "Edm.Binary"
-            
+
+        # Arrays, structs, binary -> serialize as String for compatibility
+        if type_str in ("ARRAY", "LIST", "STRUCT", "BINARY", "BLOB", "VARBINARY"):
+            return "Edm.String"
+
         # Default to string for unknown types
         return "Edm.String"
-    
-    # Handle Python types (legacy)
+
+    # Handle Python types (legacy path)
     if py_type is int:
         return "Edm.Int64"
     if py_type is float:
@@ -271,11 +270,13 @@ def _map_py_type_to_edm(py_type) -> str:
     if py_type is str:
         return "Edm.String"
     if _uuid and py_type is _uuid.UUID:
-        return "Edm.Guid"
+        return "Edm.String"  # Serialize UUIDs as strings
     if py_type is _dec.Decimal:
-        return "Edm.Double"
+        return "Edm.Double"  # Avoid Decimal type issues
     if py_type in (_dt.datetime, _dt.date, _dt.time):
         return "Edm.DateTimeOffset"
+
+    # Default fallback
     return "Edm.String"
 
 
