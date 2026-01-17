@@ -175,26 +175,35 @@ def read_dataset(
     except Exception as exc:
         logger.exception(f"failed to query dataset {table_name}")
         exc_name = exc.__class__.__name__
+        exc_str = str(exc)
+        
+        # Check for UTF-8 decode errors in the exception chain
+        current_exc = exc
+        while current_exc is not None:
+            if isinstance(current_exc, UnicodeDecodeError):
+                logger.warning(f"Dataset {table_name} contains binary data: {exc}")
+                raise HTTPException(
+                    status_code=400, 
+                    detail="Dataset contains binary data that cannot be read as text"
+                )
+            if "codec can't decode" in str(current_exc).lower() or "utf-8" in str(current_exc).lower():
+                logger.warning(f"Dataset {table_name} has encoding issue: {exc}")
+                raise HTTPException(
+                    status_code=400, 
+                    detail="Dataset has encoding issues and cannot be read as text"
+                )
+            # Check chained exceptions
+            current_exc = getattr(current_exc, '__cause__', None) or getattr(current_exc, '__context__', None)
 
         # Handle specific error types
         if exc_name == "DatasetNotFoundError":
             raise HTTPException(status_code=404, detail="dataset not found")
 
-        # Handle UTF-8 decode errors (binary data or corrupted files)
-        if isinstance(exc, UnicodeDecodeError) or "codec can't decode" in str(exc):
-            logger.warning(
-                f"Dataset {table_name} contains binary data or is corrupted: {exc}"
-            )
-            raise HTTPException(
-                status_code=500, 
-                detail=f"Dataset contains binary data that cannot be read as UTF-8"
-            )
-
         # Handle authorization/permission errors from Opteryx
         if (
-            "permission" in str(exc).lower()
-            or "access" in str(exc).lower()
-            or "forbidden" in str(exc).lower()
+            "permission" in exc_str.lower()
+            or "access" in exc_str.lower()
+            or "forbidden" in exc_str.lower()
         ):
             logger.warning(
                 f"Access denied to dataset {table_name} for identity {claims.get('identity', 'unknown')}"
