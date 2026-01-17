@@ -59,14 +59,16 @@ def _sanitize_value_for_odata(value: Any) -> Any:
 
     # Debug logging for datetime values to diagnose timezone issues
     if isinstance(value, (dt.datetime, dt.date, dt.time)):
-        logger.debug(f"Datetime value: {value}, type: {type(value)}, tzinfo: {getattr(value, 'tzinfo', 'N/A')}")
-    elif isinstance(value, str) and 'T' in value:
+        logger.debug(
+            f"Datetime value: {value}, type: {type(value)}, tzinfo: {getattr(value, 'tzinfo', 'N/A')}"
+        )
+    elif isinstance(value, str) and "T" in value:
         logger.debug(f"String with T (possible datetime): {value}")
-    
+
     # Boolean - check first since bool is subclass of int in Python
     if isinstance(value, bool):
         return value
-    
+
     # Numeric types -> int or float
     if isinstance(value, int):
         return value
@@ -85,27 +87,27 @@ def _sanitize_value_for_odata(value: Any) -> Any:
     if isinstance(value, dt.datetime):
         # If naive datetime (no timezone), assume UTC
         if value.tzinfo is None:
-            return value.isoformat() + 'Z'
+            return value.isoformat() + "Z"
         else:
             return value.isoformat()
-    
+
     if isinstance(value, dt.date):
         # Date -> convert to datetime at midnight UTC
-        return value.isoformat() + 'T00:00:00Z'
-    
+        return value.isoformat() + "T00:00:00Z"
+
     if isinstance(value, dt.time):
         # Time alone -> convert to today's date with that time in UTC
         return f"1970-01-01T{value.isoformat()}Z"
-    
+
     # String that looks like a datetime without timezone -> add Z suffix
     if isinstance(value, str):
         # Check if it's an ISO datetime string without timezone
         # Formats: "1988-10-01T04:00:00" (needs Z), "1988-10-01T04:00:00Z" (OK), "1988-10-01T04:00:00+00:00" (OK)
-        if 'T' in value and len(value) >= 19:
+        if "T" in value and len(value) >= 19:
             # Has time component
-            if not (value.endswith('Z') or '+' in value[-6:] or '-' in value[-6:]):
+            if not (value.endswith("Z") or "+" in value[-6:] or "-" in value[-6:]):
                 # No timezone indicator, add Z
-                return value + 'Z'
+                return value + "Z"
         return value
 
     # Binary data -> None (OData clients struggle with binary in JSON)
@@ -153,6 +155,65 @@ def _map_py_type_to_edm(py_type: type) -> str:
     if py_type in (_dt.datetime, _dt.date, _dt.time):
         return "Edm.DateTimeOffset"
     return "Edm.String"
+
+
+def _convert_odata_filter_to_sql(odata_filter: str) -> str:
+    """Convert OData filter syntax to SQL WHERE clause.
+
+    Supports basic OData operators:
+    - Comparison: eq, ne, gt, ge, lt, le
+    - Logical: and, or, not
+    - String functions: contains, startswith, endswith
+    - Other: null literal
+
+    Examples:
+        "name eq 'John'" -> "name = 'John'"
+        "age gt 25" -> "age > 25"
+        "contains(name, 'test')" -> "name LIKE '%test%'"
+    """
+    if not odata_filter:
+        return ""
+
+    # Replace OData operators with SQL equivalents
+    replacements = [
+        (" eq ", " = "),
+        (" ne ", " != "),
+        (" gt ", " > "),
+        (" ge ", " >= "),
+        (" lt ", " < "),
+        (" le ", " <= "),
+        (" and ", " AND "),
+        (" or ", " OR "),
+        (" not ", " NOT "),
+    ]
+
+    result = odata_filter
+    for odata_op, sql_op in replacements:
+        result = result.replace(odata_op, sql_op)
+
+    # Handle string functions
+    # contains(field, 'value') -> field LIKE '%value%'
+    import re
+
+    result = re.sub(
+        r"contains\(([^,]+),\s*'([^']*)'\)", r"\1 LIKE '%\2%'", result, flags=re.IGNORECASE
+    )
+
+    # startswith(field, 'value') -> field LIKE 'value%'
+    result = re.sub(
+        r"startswith\(([^,]+),\s*'([^']*)'\)", r"\1 LIKE '\2%'", result, flags=re.IGNORECASE
+    )
+
+    # endswith(field, 'value') -> field LIKE '%value'
+    result = re.sub(
+        r"endswith\(([^,]+),\s*'([^']*)'\)", r"\1 LIKE '%\2'", result, flags=re.IGNORECASE
+    )
+
+    # Handle null literal
+    result = result.replace(" null", " NULL")
+    result = result.replace("(null", "(NULL")
+
+    return result
 
 
 router = APIRouter(
@@ -207,8 +268,30 @@ def read_dataset(
         raise HTTPException(status_code=400, detail="$top must be between 1 and 10000")
     top = top_val
     qb = SQLQuery()
-    qb.SELECT("*")
+
+    # Handle $select (column projection)
+    if select:
+        # Parse comma-separated list of column names
+        columns = [col.strip() for col in select.split(",")]
+        for col in columns:
+            qb.SELECT(col)
+    else:
+        qb.SELECT("*")
+
     qb.FROM(table_name)
+
+    # Handle $filter (WHERE clause)
+    if filter:
+        # Convert OData filter to SQL WHERE clause
+        sql_filter = _convert_odata_filter_to_sql(filter)
+        qb.WHERE(sql_filter)
+
+    # Handle $orderby (ORDER BY clause)
+    if orderby:
+        # Parse orderby: "col1 asc, col2 desc" or "col1, col2"
+        order_parts = [part.strip() for part in orderby.split(",")]
+        for part in order_parts:
+            qb.ORDER_BY(part)
 
     # Prefer doing paging in SQL. When $top is provided use LIMIT (and OFFSET
     # when present). When only $skip is provided append an `OFFSET` clause to
