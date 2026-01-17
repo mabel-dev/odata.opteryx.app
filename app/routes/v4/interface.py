@@ -347,7 +347,7 @@ def read_dataset(
         logger.info(f"Created {len(rows)} rows with {len(rows[0].keys()) if rows else 0} keys")
 
     except Exception as exc:
-        logger.exception(f"failed to query dataset {table_name}")
+        logger.error(f"failed to query dataset {table_name}")
         exc_name = exc.__class__.__name__
         exc_str = str(exc)
 
@@ -541,7 +541,7 @@ def dataset_metadata(
         arrow_table = opteryx.query_to_arrow(sql, access_policies=access_policies)
         col_names = arrow_table.column_names
     except Exception as exc:
-        logger.exception(f"failed to query dataset for metadata {table_name}")
+        logger.error(f"failed to query dataset for metadata {table_name}")
         if exc.__class__.__name__ == "DatasetNotFoundError":
             raise HTTPException(status_code=404, detail="dataset not found")
         raise HTTPException(status_code=500, detail="failed to read dataset metadata")
