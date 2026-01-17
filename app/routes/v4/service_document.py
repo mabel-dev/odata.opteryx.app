@@ -229,12 +229,15 @@ def get_service_document(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing token identity"
         )
 
-    # Get normalized permissions: list of (role, workspace) tuples
+    # Get normalized permissions: list of (role, pattern) tuples
     permissions = claims.get("permissions", [])
 
-    # Group permissions by workspace
+    # Group permissions by workspace (extract workspace from patterns like "benchmarks.*")
     access_policies: dict[str, list[str]] = {}  # workspace -> [roles]
-    for role, workspace in permissions:
+    for role, pattern in permissions:
+        # Extract workspace from pattern (e.g., "benchmarks.*" -> "benchmarks")
+        # Pattern could be "workspace.*" or "workspace.collection.*"
+        workspace = pattern.split(".")[0] if "." in pattern else pattern
         access_policies.setdefault(workspace, []).append(role)
 
     db = _get_firestore_client(database="catalogs")
