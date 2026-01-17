@@ -301,8 +301,10 @@ def read_dataset(
         else:
             enriched_rows.append(row)
 
+    # Use full resource path for context URI to match EntitySet name in metadata
+    full_resource = f"{workstream}.{collection}.{dataset}"
     response = {
-        "@odata.context": f"/api/v4/$metadata#{dataset}",
+        "@odata.context": f"/api/v4/$metadata#{full_resource}",
         "value": enriched_rows,
     }
     if total_count is not None:
