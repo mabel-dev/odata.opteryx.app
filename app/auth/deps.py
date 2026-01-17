@@ -7,6 +7,7 @@ from typing import Optional
 import requests
 from fastapi import Header
 from fastapi import HTTPException
+from fastapi import Request
 from fastapi import status
 from google.api_core import exceptions as gcp_exceptions
 from google.auth.transport import requests as google_auth_requests
@@ -241,8 +242,8 @@ def _verify_basic_auth(username: str, password: str) -> Dict[str, Any]:
 
 
 async def require_authentication(
+    request: Request,
     authorization: Optional[str] = Header(None),
-    request: Any = None,
 ) -> Dict[str, Any]:
     """Require and verify either bearer token or basic authentication.
 
@@ -290,7 +291,6 @@ async def require_authentication(
         )
 
     # Store claims in request state for endpoint access
-    if request:
-        request.state.claims = claims
+    request.state.claims = claims
 
     return claims
