@@ -130,7 +130,7 @@ def _query_collection_group(
                     )
                 )
             except Exception:
-                logger.debug("Skipping malformed dataset document: %s", doc.id)
+                logger.debug(f"Skipping malformed dataset document: {doc.id}")
                 continue
     except Exception as exc:
         logger.debug(
@@ -147,7 +147,7 @@ def _query_collection_group(
 def _get_personal_datasets(db, identity: str) -> list[DatasetInfo]:
     """Retrieve datasets from user's personal collection."""
     results = []
-    logger.debug("Getting personal datasets for %s", identity)
+    logger.debug(f"Getting personal datasets for {identity}")
 
     try:
         # Query personal datasets from the top-level 'personal' collection
@@ -171,10 +171,10 @@ def _get_personal_datasets(db, identity: str) -> list[DatasetInfo]:
                     )
                 )
             except Exception:
-                logger.debug("Skipping malformed personal dataset: %s", doc.id)
+                logger.debug(f"Skipping malformed personal dataset: {doc.id}")
                 continue
     except Exception as exc:
-        logger.error("Failed to retrieve personal datasets for %s: %s %s", identity, type(exc), exc)
+        logger.error(f"Failed to retrieve personal datasets for {identity}: {type(exc)} {exc}")
 
     return results
 
@@ -193,7 +193,7 @@ def _get_workspace_datasets(db, workspace_ids: set[str]) -> list[DatasetInfo]:
             )
             results.extend(datasets)
     except Exception as exc:
-        logger.error("Failed to retrieve datasets: %s %s", type(exc), exc)
+        logger.error(f"Failed to retrieve datasets: {type(exc)} {exc}")
         raise HTTPException(
             status_code=status.HTTP_504_GATEWAY_TIMEOUT,
             detail="failed to read datasets from firestore",
@@ -256,7 +256,7 @@ def _get_dataset_schema(table_name: str, access_policies: list[dict]) -> list[tu
 
         return columns
     except Exception as exc:
-        logger.warning("Failed to get schema for %s: %s", table_name, exc)
+        logger.warning(f"Failed to get schema for {table_name}: {exc}")
         return []
 
 
@@ -374,7 +374,7 @@ def get_edmx_metadata(
 
         if not columns:
             # Skip datasets with no accessible schema
-            logger.debug("Skipping dataset with no schema: %s", table_name)
+            logger.debug(f"Skipping dataset with no schema: {table_name}")
             continue
 
         # Create EntityType

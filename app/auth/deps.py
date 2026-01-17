@@ -157,7 +157,7 @@ async def require_bearer_token(authorization: Optional[str] = Header(None)) -> D
         RuntimeError,
         gcp_exceptions.GoogleAPIError,
     ) as exc:  # pragma: no cover - best-effort fallback
-        logger.debug("load_public_key raised, attempting find_key_by_kid: %s", exc)
+        logger.debug(f"load_public_key raised, attempting find_key_by_kid: {exc}")
         pub_key = None
 
     options = {"require_exp": True, "require_iss": True, "verify_nbf": True, "verify_iat": True}
@@ -176,7 +176,7 @@ async def require_bearer_token(authorization: Optional[str] = Header(None)) -> D
             # Normalize claims structure
             return _normalize_claims(claims)
         except JWTError as exc:
-            logger.info("Token verification failed with secret store key: %s", exc)
+            logger.info(f"Token verification failed with secret store key: {exc}")
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token"
             ) from exc
@@ -196,7 +196,7 @@ async def require_bearer_token(authorization: Optional[str] = Header(None)) -> D
             # Normalize claims structure
             return _normalize_claims(claims)
         except JWTError as exc:
-            logger.info("Token verification failed using remote JWKS: %s", exc)
+            logger.info(f"Token verification failed using remote JWKS: {exc}")
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token"
             ) from exc
@@ -212,7 +212,7 @@ async def require_bearer_token(authorization: Optional[str] = Header(None)) -> D
                 token, google_auth_requests.Request(), audience=expected_aud
             )
         except Exception as exc:  # pragma: no cover - library dependent
-            logger.info("Google token verification failed: %s", exc)
+            logger.info(f"Google token verification failed: {exc}")
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid Google ID token"
             ) from exc
@@ -267,7 +267,7 @@ async def require_authentication(
             claims = await require_bearer_token(authorization)
         except HTTPException as exc:
             # If bearer fails, we'll try basic auth next
-            logger.debug("Bearer token authentication failed: %s", exc.detail)
+            logger.debug(f"Bearer token authentication failed: {exc.detail}")
 
     # Try basic authentication
     if not claims and authorization.lower().startswith("basic "):
@@ -277,7 +277,7 @@ async def require_authentication(
             username, password = decoded_credentials.split(":", 1)
             claims = _verify_basic_auth(username, password)
         except (ValueError, IndexError, TypeError) as exc:
-            logger.debug("Basic authentication parsing failed: %s", exc)
+            logger.debug(f"Basic authentication parsing failed: {exc}")
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid basic credentials"
             ) from exc

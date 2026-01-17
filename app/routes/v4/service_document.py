@@ -125,7 +125,7 @@ def _query_collection_group(
                     )
                 )
             except Exception:
-                logger.debug("Skipping malformed dataset document: %s", doc.id)
+                logger.debug(f"Skipping malformed dataset document: {doc.id}")
                 continue
     except Exception as exc:
         logger.debug(
@@ -142,7 +142,7 @@ def _query_collection_group(
 def _get_personal_datasets(db, identity: str) -> list[DatasetInfo]:
     """Retrieve datasets from user's personal collection."""
     results = []
-    logger.debug("Getting personal datasets for %s", identity)
+    logger.debug(f"Getting personal datasets for {identity}")
 
     try:
         # Query personal datasets from the top-level 'personal' collection
@@ -166,10 +166,10 @@ def _get_personal_datasets(db, identity: str) -> list[DatasetInfo]:
                     )
                 )
             except Exception:
-                logger.debug("Skipping malformed personal dataset: %s", doc.id)
+                logger.debug(f"Skipping malformed personal dataset: {doc.id}")
                 continue
     except Exception as exc:
-        logger.error("Failed to retrieve personal datasets for %s: %s %s", identity, type(exc), exc)
+        logger.error(f"Failed to retrieve personal datasets for {identity}: {type(exc)} {exc}")
 
     return results
 
@@ -188,7 +188,7 @@ def _get_workspace_datasets(db, workspace_ids: set[str]) -> list[DatasetInfo]:
             )
             results.extend(datasets)
     except Exception as exc:
-        logger.error("Failed to retrieve datasets: %s %s", type(exc), exc)
+        logger.error(f"Failed to retrieve datasets: {type(exc)} {exc}")
         raise HTTPException(
             status_code=status.HTTP_504_GATEWAY_TIMEOUT,
             detail="failed to read datasets from firestore",
