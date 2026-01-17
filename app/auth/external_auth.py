@@ -43,7 +43,7 @@ def authenticate_with_external_service(username: str, password: str) -> Dict[str
     token_endpoint = f"{auth_url.rstrip('/')}/token"
     timeout = float(os.environ.get("AUTH_SERVICE_TIMEOUT", "10"))
 
-    logger.debug("Authenticating user '%s' with external service", username)
+    logger.debug(f"Authenticating user '{username}' with external service")
 
     # Prepare request data for OAuth2 client_credentials grant
     data = {
@@ -62,14 +62,14 @@ def authenticate_with_external_service(username: str, password: str) -> Dict[str
 
         # Handle authentication failures
         if response.status_code == 401:
-            logger.info("Authentication failed for user '%s': invalid credentials", username)
+            logger.info(f"Authentication failed for user '{username}': invalid credentials")
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid username or password",
             )
 
         if response.status_code == 403:
-            logger.info("Authentication forbidden for user '%s'", username)
+            logger.info(f"Authentication forbidden for user '{username}'")
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Access forbidden",
@@ -104,7 +104,7 @@ def authenticate_with_external_service(username: str, password: str) -> Dict[str
         access_token = response_data.get("access_token")
 
         if not access_token:
-            logger.error("Auth service response missing access_token: %s", response_data)
+            logger.error(f"Auth service response missing access_token: {response_data}")
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Invalid auth service response",
@@ -114,7 +114,7 @@ def authenticate_with_external_service(username: str, password: str) -> Dict[str
         try:
             claims = jose_jwt.get_unverified_claims(access_token)
         except JWTError as exc:
-            logger.error("Failed to decode JWT from auth service: %s", exc)
+            logger.error(f"Failed to decode JWT from auth service: {exc}")
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Invalid token from auth service",
@@ -148,14 +148,14 @@ def authenticate_with_external_service(username: str, password: str) -> Dict[str
         return claims
 
     except requests.Timeout as exc:
-        logger.error("Auth service timeout after %ss for user '%s'", timeout, username)
+        logger.error(f"Auth service timeout after {timeout}s for user '{username}'")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=f"Authentication service timeout after {timeout}s",
         ) from exc
 
     except requests.RequestException as exc:
-        logger.error("Auth service connection error for user '%s': %s", username, exc)
+        logger.error(f"Auth service connection error for user '{username}': {exc}")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Authentication service unavailable",

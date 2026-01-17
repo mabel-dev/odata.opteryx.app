@@ -74,7 +74,7 @@ def root():
                         {"name": dataset, "url": f"api/v1/{workstream}/{collection}/{dataset}"}
                     )
     except Exception as exc:  # noqa: BLE001
-        logger.warning("Failed to list datasets: %s", exc)
+        logger.warning(f"Failed to list datasets: {exc}")
 
     body = {
         "@odata.context": "/$metadata",
@@ -261,7 +261,7 @@ def api_v1_root():
                         }
                     )
     except Exception as exc:  # noqa: BLE001
-        logger.warning("Failed to list datasets: %s", exc)
+        logger.warning(f"Failed to list datasets: {exc}")
 
     body = {
         "@odata.context": "/api/v1/$metadata",
