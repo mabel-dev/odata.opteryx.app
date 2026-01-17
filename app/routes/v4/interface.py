@@ -6,29 +6,24 @@ This module provides OData protocol endpoints for querying Opteryx data.
 from __future__ import annotations
 
 import os
-import sys
 from typing import Any
 from typing import List
 from typing import Optional
 
 import opteryx
 from fastapi import APIRouter
+from fastapi import Depends
 from fastapi import HTTPException
 from fastapi import Query
+from fastapi import Request
+from fastapi import Response
 from opteryx.connectors import OpteryxConnector
 from opteryx_catalog import OpteryxCatalog
 from orso.logging import get_logger
 
+from app.auth.deps import require_authentication
+from app.auth.permissions import get_access_policies_from_claims
 from app.models.query import Query as SQLQuery
-
-sys.path.insert(
-    0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../opteryx-core"))
-)
-sys.path.insert(
-    0,
-    os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../pyiceberg-firestore-gcs")),
-)
-
 
 logger = get_logger()
 
@@ -36,6 +31,7 @@ logger = get_logger()
 FIRESTORE_DATABASE = os.environ.get("FIRESTORE_DATABASE")
 BUCKET_NAME = os.environ.get("GCS_BUCKET")
 GCP_PROJECT_ID = os.environ.get("GCP_PROJECT_ID")
+
 
 opteryx.set_default_connector(
     OpteryxConnector,
@@ -73,13 +69,16 @@ def _map_py_type_to_edm(py_type: type) -> str:
 
 
 router = APIRouter(
-    prefix="/api/v1",
-    tags=["OData"],  # , dependencies=[Depends(require_bearer_token)]
+    prefix="/api/v4",
+    tags=["OData v4"],
+    dependencies=[Depends(require_authentication)],
 )
 
 
 @router.get("/{workstream}/{collection}/{dataset}")
 def read_dataset(
+    request: Request,
+    response: Response,
     workstream: str,
     collection: str,
     dataset: str,
@@ -96,7 +95,14 @@ def read_dataset(
     This implementation exposes OData-style query string names (e.g. `$filter`).
     For performance and safety we require a `$top` limit to be provided and it
     must be in the range 1..10000.
+
+    Requires authentication via bearer token or basic auth.
     """
+    # Set OData-Version header
+    response.headers["OData-Version"] = "4.0"
+
+    # Extract claims from request state (set by require_authentication dependency)
+    claims = getattr(request.state, "claims", {})
 
     table_name = f"{workstream}.{collection}.{dataset}"
     # Apply a safe default $top when clients don't provide one to avoid
@@ -115,7 +121,7 @@ def read_dataset(
     top = top_val
     qb = SQLQuery()
     qb.SELECT("*")
-    qb.FROM(f'"{table_name}"')
+    qb.FROM(table_name)
 
     # Prefer doing paging in SQL. When $top is provided use LIMIT (and OFFSET
     # when present). When only $skip is provided append an `OFFSET` clause to
@@ -135,9 +141,20 @@ def read_dataset(
     if append_offset:
         sql = sql + f" OFFSET {skip}"
 
+    # Get access policies from JWT claims for Opteryx authorization
+    access_policies = get_access_policies_from_claims(claims)
+
+    logger.debug(
+        "Executing query for table=%s with %d access policies for identity=%s",
+        table_name,
+        len(access_policies),
+        claims.get("identity", "unknown"),
+    )
+
     try:
-        # Use query_to_arrow() which returns a PyArrow table
-        arrow_table = opteryx.query_to_arrow(sql)
+        # Pass access_policies to Opteryx for authorization enforcement
+        print(f"Executing SQL: {sql}")
+        arrow_table = opteryx.query_to_arrow(sql, access_policies=access_policies)
 
         # Get column names from the Arrow table
         col_names = arrow_table.column_names
@@ -161,8 +178,24 @@ def read_dataset(
     except Exception as exc:
         logger.exception(f"failed to query dataset {table_name}")
         exc_name = exc.__class__.__name__
+
+        # Handle specific error types
         if exc_name == "DatasetNotFoundError":
             raise HTTPException(status_code=404, detail="dataset not found")
+
+        # Handle authorization/permission errors from Opteryx
+        if (
+            "permission" in str(exc).lower()
+            or "access" in str(exc).lower()
+            or "forbidden" in str(exc).lower()
+        ):
+            logger.warning(
+                "Access denied to dataset %s for identity %s",
+                table_name,
+                claims.get("identity", "unknown"),
+            )
+            raise HTTPException(status_code=403, detail=f"Access denied to dataset {table_name}")
+
         raise HTTPException(status_code=500, detail="failed to read dataset")
 
     # If the client requested total count, run a separate COUNT(*) query
@@ -180,7 +213,8 @@ def read_dataset(
     if want_count:
         count_sql = f'SELECT COUNT(*) AS "__count__" FROM "{table_name}"'
         try:
-            count_res = opteryx.query(count_sql)
+            # Pass access policies to count query as well
+            count_res = opteryx.query(count_sql, access_policies=access_policies)
             for crow in count_res:
                 try:
                     # crow may be mapping-like or positional
@@ -273,7 +307,7 @@ def read_dataset(
             enriched_rows.append(row)
 
     response = {
-        "@odata.context": f"/api/v1/$metadata#{dataset}",
+        "@odata.context": f"/api/v4/$metadata#{dataset}",
         "value": enriched_rows,
     }
     if total_count is not None:
@@ -282,20 +316,35 @@ def read_dataset(
 
 
 @router.get("/{workstream}/{collection}/{dataset}/$metadata")
-def dataset_metadata(workstream: str, collection: str, dataset: str) -> Any:
+def dataset_metadata(
+    request: Request,
+    response: Response,
+    workstream: str,
+    collection: str,
+    dataset: str,
+) -> Any:
     """Return a minimal OData $metadata (EDMX) for the given dataset.
 
     The endpoint inspects the dataset column metadata (without scanning rows)
     and emits an EDMX Schema describing an EntityType and EntitySet for the
     dataset. This is intentionally minimal — a full EDMX generator can be
     implemented later.
+
+    Requires authentication via bearer token or basic auth.
     """
+    # Set OData-Version header
+    response.headers["OData-Version"] = "4.0"
+
+    # Extract claims from request state
+    claims = getattr(request.state, "claims", {})
+    access_policies = get_access_policies_from_claims(claims)
 
     table_name = f"{workstream}.{collection}.{dataset}"
     sql = f'SELECT * FROM "{table_name}" LIMIT 1'
 
     try:
-        arrow_table = opteryx.query_to_arrow(sql)
+        # Pass access policies to metadata query
+        arrow_table = opteryx.query_to_arrow(sql, access_policies=access_policies)
         col_names = arrow_table.column_names
     except Exception as exc:
         logger.exception(f"failed to query dataset for metadata {table_name}")
