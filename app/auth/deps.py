@@ -88,9 +88,7 @@ def _normalize_claims(claims: Dict[str, Any]) -> Dict[str, Any]:
         claims["permissions"] = []
 
     logger.debug(
-        "Normalized claims: identity=%s, permissions_count=%d",
-        claims.get("identity"),
-        len(claims.get("permissions", [])),
+        f"Normalized claims: identity={claims.get('identity')}, permissions_count={len(claims.get('permissions', []))}"
     )
 
     return claims
@@ -140,11 +138,7 @@ async def require_bearer_token(authorization: Optional[str] = Header(None)) -> D
     else:
         if iss != issuer or aud != audience:
             logger.info(
-                "token claims mismatch; iss=%s aud=%s expected_iss=%s expected_aud=%s",
-                iss,
-                aud,
-                issuer,
-                audience,
+                f"token claims mismatch; iss={iss} aud={aud} expected_iss={issuer} expected_aud={audience}"
             )
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token claims"
