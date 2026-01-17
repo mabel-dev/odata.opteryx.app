@@ -274,7 +274,7 @@ def _get_dataset_schema(dataset_info: DatasetInfo) -> list[tuple[str, str]]:
         return columns
         
     except Exception as exc:
-        logger.warning("Failed to get schema from catalog for %s: %s", dataset_info.resource, exc)
+        logger.warning(f"Failed to get schema from catalog for {dataset_info.resource}: {exc}")
         return []
 
 
@@ -388,7 +388,7 @@ def get_edmx_metadata(
 
         if not columns:
             # Skip datasets with no accessible schema
-            logger.debug("Skipping dataset with no schema: %s", dataset.resource)
+            logger.debug(f"Skipping dataset with no schema: {dataset.resource}")
             continue
 
         # Create EntityType
