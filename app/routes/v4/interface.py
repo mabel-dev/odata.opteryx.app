@@ -75,13 +75,21 @@ def _sanitize_value_for_odata(value: Any) -> Any:
             return None
         return f
 
-    # Datetime types -> ISO 8601 string (OData expects strings for dates)
+    # Datetime types -> ISO 8601 string with timezone (OData requires timezone)
     if isinstance(value, dt.datetime):
-        return value.isoformat()
+        # If naive datetime (no timezone), assume UTC
+        if value.tzinfo is None:
+            return value.isoformat() + 'Z'
+        else:
+            return value.isoformat()
+    
     if isinstance(value, dt.date):
-        return value.isoformat()
+        # Date -> convert to datetime at midnight UTC
+        return value.isoformat() + 'T00:00:00Z'
+    
     if isinstance(value, dt.time):
-        return value.isoformat()
+        # Time alone -> convert to today's date with that time in UTC
+        return f"1970-01-01T{value.isoformat()}Z"
 
     # Binary data -> None (OData clients struggle with binary in JSON)
     if isinstance(value, (bytes, bytearray)):
