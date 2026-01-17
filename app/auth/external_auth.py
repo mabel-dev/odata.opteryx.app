@@ -79,9 +79,7 @@ def authenticate_with_external_service(username: str, password: str) -> Dict[str
         # Handle service errors
         if response.status_code >= 500:
             logger.error(
-                "Auth service returned server error: %s - %s",
-                response.status_code,
-                response.text,
+                f"Auth service returned server error: {response.status_code} - {response.text}"
             )
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -91,10 +89,9 @@ def authenticate_with_external_service(username: str, password: str) -> Dict[str
         # Handle other non-200 responses
         if response.status_code != 200:
             logger.warning(
-                "Auth service returned unexpected status %s: %s",
-                response.status_code,
-                response.text,
+                f"Auth service returned unexpected status {response.status_code}: {response.text}"
             )
+
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Authentication service error",
@@ -144,7 +141,7 @@ def authenticate_with_external_service(username: str, password: str) -> Dict[str
         claims["permissions"] = permissions
 
         logger.info(
-            f"Successfully authenticated user '{username}' (identity: {identity}) with {len(permissions)} permissions",
+            f"Successfully authenticated user '{username}' (identity: {identity}) with {len(permissions)} permissions"
         )
 
         return claims
