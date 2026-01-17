@@ -57,10 +57,16 @@ def _sanitize_value_for_odata(value: Any) -> Any:
     if value is None:
         return None
 
+    # Debug logging for datetime values to diagnose timezone issues
+    if isinstance(value, (dt.datetime, dt.date, dt.time)):
+        logger.debug(f"Datetime value: {value}, type: {type(value)}, tzinfo: {getattr(value, 'tzinfo', 'N/A')}")
+    elif isinstance(value, str) and 'T' in value:
+        logger.debug(f"String with T (possible datetime): {value}")
+    
     # Boolean - check first since bool is subclass of int in Python
     if isinstance(value, bool):
         return value
-
+    
     # Numeric types -> int or float
     if isinstance(value, int):
         return value
@@ -90,6 +96,17 @@ def _sanitize_value_for_odata(value: Any) -> Any:
     if isinstance(value, dt.time):
         # Time alone -> convert to today's date with that time in UTC
         return f"1970-01-01T{value.isoformat()}Z"
+    
+    # String that looks like a datetime without timezone -> add Z suffix
+    if isinstance(value, str):
+        # Check if it's an ISO datetime string without timezone
+        # Formats: "1988-10-01T04:00:00" (needs Z), "1988-10-01T04:00:00Z" (OK), "1988-10-01T04:00:00+00:00" (OK)
+        if 'T' in value and len(value) >= 19:
+            # Has time component
+            if not (value.endswith('Z') or '+' in value[-6:] or '-' in value[-6:]):
+                # No timezone indicator, add Z
+                return value + 'Z'
+        return value
 
     # Binary data -> None (OData clients struggle with binary in JSON)
     if isinstance(value, (bytes, bytearray)):
