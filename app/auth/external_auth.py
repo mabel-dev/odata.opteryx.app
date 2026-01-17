@@ -55,6 +55,7 @@ def authenticate_with_external_service(username: str, password: str) -> Dict[str
     try:
         response = requests.post(
             token_endpoint,
+            params={"set_cookie": "false"},  # Add query parameter
             data=data,
             headers={"Content-Type": "application/x-www-form-urlencoded"},
             timeout=timeout,
