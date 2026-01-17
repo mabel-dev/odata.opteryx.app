@@ -212,8 +212,8 @@ def _role_allows_read(role: str | None) -> bool:
     return role_lower in {"reader", "writer", "admin", "owner"}
 
 
-def _map_py_type_to_edm(py_type: type) -> str:
-    """Map Python type to EDM type."""
+def _map_py_type_to_edm(py_type) -> str:
+    """Map Python type or Opteryx OrsoTypes to EDM type."""
     import datetime as _dt
     import decimal as _dec
 
@@ -222,6 +222,46 @@ def _map_py_type_to_edm(py_type: type) -> str:
     except Exception:
         _uuid = None
 
+    # Handle OrsoTypes enum (from Opteryx catalog)
+    if hasattr(py_type, 'name'):
+        type_str = str(py_type).upper()
+        
+        # Integer types
+        if type_str in ('INTEGER', 'BIGINT', 'TINYINT', 'SMALLINT'):
+            return "Edm.Int64"
+        if type_str == 'INT':
+            return "Edm.Int32"
+        
+        # Float types
+        if type_str in ('DOUBLE', 'FLOAT', 'REAL'):
+            return "Edm.Double"
+        if type_str == 'DECIMAL':
+            return "Edm.Decimal"
+            
+        # Boolean
+        if type_str in ('BOOLEAN', 'BOOL'):
+            return "Edm.Boolean"
+            
+        # String types
+        if type_str in ('VARCHAR', 'TEXT', 'CHAR', 'STRING'):
+            return "Edm.String"
+            
+        # Date/Time types
+        if type_str in ('TIMESTAMP', 'DATETIME'):
+            return "Edm.DateTimeOffset"
+        if type_str == 'DATE':
+            return "Edm.Date"
+        if type_str == 'TIME':
+            return "Edm.TimeOfDay"
+            
+        # Binary
+        if type_str in ('BINARY', 'BLOB', 'VARBINARY'):
+            return "Edm.Binary"
+            
+        # Default to string for unknown types
+        return "Edm.String"
+    
+    # Handle Python types (legacy)
     if py_type is int:
         return "Edm.Int64"
     if py_type is float:
