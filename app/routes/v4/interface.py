@@ -180,6 +180,16 @@ def read_dataset(
         if exc_name == "DatasetNotFoundError":
             raise HTTPException(status_code=404, detail="dataset not found")
 
+        # Handle UTF-8 decode errors (binary data or corrupted files)
+        if isinstance(exc, UnicodeDecodeError) or "codec can't decode" in str(exc):
+            logger.warning(
+                f"Dataset {table_name} contains binary data or is corrupted: {exc}"
+            )
+            raise HTTPException(
+                status_code=500, 
+                detail=f"Dataset contains binary data that cannot be read as UTF-8"
+            )
+
         # Handle authorization/permission errors from Opteryx
         if (
             "permission" in str(exc).lower()
