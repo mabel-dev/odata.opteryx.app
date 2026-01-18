@@ -439,6 +439,8 @@ class ODataLogicalPlanBuilder:
         
         # Handle function calls (contains, startswith, endswith)
         if isinstance(ast_node, odata_ast.Call):
+            if not ast_node.func or not ast_node.func.name:
+                raise ValueError("Function call missing name")
             func_name = ast_node.func.name.lower()  # OData functions are case-insensitive
             args = [self._odata_ast_to_opteryx_node(arg) for arg in ast_node.args]
             
