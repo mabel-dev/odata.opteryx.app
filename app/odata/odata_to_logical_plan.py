@@ -17,8 +17,7 @@ from orso.tools import random_string
 from orso.types import OrsoTypes
 from opteryx.managers.expression import NodeType
 from opteryx.models import Node
-
-from logical_planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
+from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
 
 # Import odata-query parser
 sys.path.insert(0, "/Users/justin/Nextcloud/opteryx-cloud/odata.opteryx/app/vendored/odata-query")
