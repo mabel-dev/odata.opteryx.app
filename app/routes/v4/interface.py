@@ -357,7 +357,8 @@ def read_dataset(
             logger.info(f"Count query result: {total_count}")
             
         except Exception as exc:
-            logger.error(f"Error executing count query: {exc}")
+            import traceback
+            logger.error(f"Error executing count query: {exc}\n{traceback.format_exc()}")
             total_count = None
 
     # All paging (LIMIT/OFFSET) should have been pushed down to SQL when
