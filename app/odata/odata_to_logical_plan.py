@@ -553,7 +553,7 @@ class ODataLogicalPlanBuilder:
         return self.plan
 
     def __repr__(self) -> str:
-        return f"ODataLogicalPlanBuilder(table={self.table_name}, nodes={len(self.plan.nodes)})"
+        return f"ODataLogicalPlanBuilder(table={self.table_name}, nodes={len(self.plan.nodes())})"
 
 
 def build_logical_plan(
