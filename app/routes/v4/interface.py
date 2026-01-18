@@ -191,7 +191,7 @@ def read_dataset(
     # Set OData-Version header
     response.headers["OData-Version"] = "4.0"
     
-    logger.info("read_dataset called with: filter=%s, top=%s, skip=%s, orderby=%s, select=%s", filter, top, skip, orderby, select)
+    logger.info(f"read_dataset called with: filter={filter}, top={top}, skip={skip}, orderby={orderby}, select={select}")
 
     # Extract claims from request state (set by require_authentication dependency)
     claims = getattr(request.state, "claims", {})
@@ -234,10 +234,10 @@ def read_dataset(
             apply_expr=None,  # $apply not yet exposed in OData endpoint
         )
         
-        logger.debug("Built logical plan with %d nodes for %s", len(builder.plan.nodes()), table_name)
+        logger.debug(f"Built logical plan with {len(builder.plan.nodes())} nodes for {table_name}")
         
     except ValueError as e:
-        logger.error("Invalid OData query parameters: %s", e)
+        logger.error(f"Invalid OData query parameters: {e}")
         raise HTTPException(status_code=400, detail=f"Invalid query: {str(e)}")
 
     logger.debug(
@@ -258,8 +258,8 @@ def read_dataset(
 
             # Get column names from the Arrow table
             col_names = arrow_table.column_names
-            logger.info("Arrow table columns: %s", col_names)
-            logger.info("Arrow table num_rows: %d", arrow_table.num_rows)
+            logger.info(f"Arrow table columns: {col_names}")
+            logger.info(f"Arrow table num_rows: {arrow_table.num_rows}")
 
             # Convert Arrow table to list of dicts
             # Use to_pydict() which gives {column: [values]}, then transpose to rows
@@ -277,10 +277,10 @@ def read_dataset(
                     row_dict[col] = _sanitize_value_for_odata(value)
                 rows.append(row_dict)
 
-            logger.info("Created %d rows with %d keys", len(rows), len(rows[0].keys()) if rows else 0)
+            logger.info(f"Created {len(rows)} rows with {len(rows[0].keys()) if rows else 0} keys")
 
         except Exception as exc:
-            logger.error("failed to query dataset %s", table_name)
+            logger.error(f"failed to query dataset {table_name}")
             exc_name = exc.__class__.__name__
             exc_str = str(exc)
 
@@ -288,7 +288,7 @@ def read_dataset(
             current_exc = exc
             while current_exc is not None:
                 if isinstance(current_exc, UnicodeDecodeError):
-                    logger.warning("Dataset %s contains binary data: %s", table_name, exc)
+                    logger.warning(f"Dataset {table_name} contains binary data: {exc}")
                     raise HTTPException(
                         status_code=400,
                         detail="Dataset contains binary data that cannot be read as text",
@@ -297,7 +297,7 @@ def read_dataset(
                     "codec can't decode" in str(current_exc).lower()
                     or "utf-8" in str(current_exc).lower()
                 ):
-                    logger.warning("Dataset %s has encoding issue: %s", table_name, exc)
+                    logger.warning(f"Dataset {table_name} has encoding issue: {exc}")
                     raise HTTPException(
                         status_code=400, detail="Dataset has encoding issues and cannot be read as text"
                     )
@@ -348,16 +348,16 @@ def read_dataset(
                 apply_expr=None,
             )
             
-            logger.debug("Built count logical plan with %d nodes for %s", len(count_builder.plan.nodes()), table_name)
+            logger.debug(f"Built count logical plan with {len(count_builder.plan.nodes())} nodes for {table_name}")
             
             # Execute the count logical plan
             # For counting, we'll execute the plan and count the rows
             arrow_table = opteryx.execute_logical_plan(count_plan, access_policies=access_policies)
             total_count = arrow_table.num_rows
-            logger.info("Count query result: %s", total_count)
+            logger.info(f"Count query result: {total_count}")
             
         except Exception as exc:
-            logger.error("Error executing count query", exc_info=True)
+            logger.error(f"Error executing count query", exc_info=True)
             total_count = None
 
     # All paging (LIMIT/OFFSET) should have been pushed down to SQL when
@@ -479,7 +479,7 @@ def dataset_metadata(
         arrow_table = opteryx.query_to_arrow(sql, access_policies=access_policies)
         col_names = arrow_table.column_names
     except Exception as exc:
-        logger.error("failed to query dataset for metadata %s", table_name)
+        logger.error(f"failed to query dataset for metadata {table_name}")
         if exc.__class__.__name__ == "DatasetNotFoundError":
             raise HTTPException(status_code=404, detail="dataset not found")
         raise HTTPException(status_code=500, detail="failed to read dataset metadata")
