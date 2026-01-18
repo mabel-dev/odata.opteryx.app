@@ -11,6 +11,7 @@ The conversion flow is:
 
 import re
 import sys
+from pathlib import Path
 from typing import List, Optional, Tuple
 
 from orso.tools import random_string
@@ -20,7 +21,8 @@ from opteryx.models import Node
 from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
 
 # Import odata-query parser
-sys.path.insert(0, "/Users/justin/Nextcloud/opteryx-cloud/odata.opteryx/app/vendored/odata-query")
+_vendored_path = str(Path(__file__).parent.parent / "vendored" / "odata-query")
+sys.path.insert(0, _vendored_path)
 from odata_query.grammar import ODataLexer, ODataParser
 from odata_query import ast as odata_ast
 
