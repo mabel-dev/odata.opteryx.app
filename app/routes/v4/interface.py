@@ -254,7 +254,7 @@ def read_dataset(
     else:
         try:
             # Execute the logical plan using Opteryx
-            arrow_table = opteryx.execute_logical_plan(logical_plan, access_policies=access_policies)
+            arrow_table = opteryx.execute_logical_plan(logical_plan) #, access_policies=access_policies)
 
             # Get column names from the Arrow table
             col_names = arrow_table.column_names
@@ -352,7 +352,7 @@ def read_dataset(
             
             # Execute the count logical plan
             # For counting, we'll execute the plan and count the rows
-            arrow_table = opteryx.execute_logical_plan(count_plan, access_policies=access_policies)
+            arrow_table = opteryx.execute_logical_plan(count_plan) #, access_policies=access_policies)
             total_count = arrow_table.num_rows
             logger.info(f"Count query result: {total_count}")
             
