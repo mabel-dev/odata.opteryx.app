@@ -309,7 +309,7 @@ def read_dataset(
         
         # For now, fall back to SQL generation for compatibility
         # The logical plan is built but not yet executed
-        logger.debug(f"Built logical plan with {len(builder.plan.nodes)} nodes for {table_name}")
+        logger.debug(f"Built logical plan with {len(builder.plan.nodes())} nodes for {table_name}")
         
     except ValueError as e:
         logger.error(f"Invalid OData query parameters: {e}")
