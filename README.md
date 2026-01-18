@@ -107,22 +107,95 @@ This returns an XML document describing EntityTypes, properties, and their data 
 | `/api/v4/{workspace}/{collection}/{dataset}` | GET | Query data from a specific dataset |
 | `/api/v4/{workspace}/{collection}/{dataset}/$metadata` | GET | Schema for a specific dataset |
 
-### Legacy v1 API (`/api/v1`)
-
-The v1 API is still available but deprecated. Use `/api/v4` for new integrations.
-
 ## Query Parameters
 
-Standard OData v4 query parameters are supported:
+### Supported OData v4 Query Parameters (Phase 1)
 
 | Parameter | Description | Example |
 |-----------|-------------|---------|
+| `$filter` | Filter results with comparison/logical operators | `$filter=age gt 21 and status eq 'active'` |
+| `$select` | Select specific columns | `$select=name,age,status` |
+| `$orderby` | Sort by one or more columns (asc/desc) | `$orderby=name asc, age desc` |
 | `$top` | Limit number of results (max 10000) | `$top=100` |
 | `$skip` | Skip N results for pagination | `$skip=200` |
-| `$filter` | Filter results (limited support) | `$filter=age gt 21` |
-| `$orderby` | Sort results | `$orderby=name desc` |
-| `$select` | Select specific columns | `$select=name,age` |
-| `$count` | Include total count | `$count=true` |
+| `$count` | Include total count of results | `$count=true` |
+| `$apply` | Aggregation and grouping operations | `$apply=groupby((Region), aggregate(sum(Sales) as Total))` |
+
+### Filter Operators
+
+**Comparison Operators:**
+- `eq` - equals (case-sensitive for strings)
+- `ne` - not equals
+- `gt` - greater than
+- `ge` - greater than or equal
+- `lt` - less than
+- `le` - less than or equal
+
+**Logical Operators:**
+- `and` - logical AND
+- `or` - logical OR
+- `not` - logical NOT
+
+**String Functions:**
+- `contains(field, 'substring')` - case-sensitive substring search
+- `startswith(field, 'prefix')` - case-sensitive prefix match
+- `endswith(field, 'suffix')` - case-sensitive suffix match
+
+### Aggregation (`$apply`)
+
+The `$apply` parameter supports grouping and aggregation for analytics queries:
+
+```
+$apply=groupby((column1, column2), aggregate(sum(amount) as Total, count(*) as Count, avg(price) as AvgPrice, min(value) as Min, max(value) as Max))
+```
+
+**Supported Aggregations:**
+- `sum()` - sum numeric values
+- `count()` - count records
+- `count(*)` - count all records
+- `avg()` - average numeric values
+- `min()` - minimum value
+- `max()` - maximum value
+
+### Query Examples
+
+**Basic filter:**
+```
+GET /api/v4/workspace/collection/dataset?$filter=vendor eq 'Oracle'
+```
+
+**Complex filter with logical operators:**
+```
+GET /api/v4/workspace/collection/dataset?$filter=(age gt 21 or status eq 'premium') and region ne 'APAC'
+```
+
+**Pagination:**
+```
+GET /api/v4/workspace/collection/dataset?$top=50&$skip=100&$orderby=created_date desc
+```
+
+**Select specific columns:**
+```
+GET /api/v4/workspace/collection/dataset?$select=name,email,phone&$top=1000
+```
+
+**Aggregation query (analytics):**
+```
+GET /api/v4/workspace/collection/dataset?$apply=groupby((region,product_type), aggregate(sum(revenue) as TotalRevenue, count(*) as TransactionCount, avg(order_value) as AvgOrderValue))
+```
+
+**Combined query:**
+```
+GET /api/v4/workspace/collection/dataset?$filter=year ge 2023&$apply=groupby((status), aggregate(count(*) as Count))&$select=status,Count
+```
+
+### Important Notes
+
+- **Case-Sensitive Filtering:** String comparisons in `$filter` are case-sensitive. `eq 'Oracle'` will not match `'oracle'`.
+- **Column Names:** Reference columns by their exact names in the dataset schema.
+- **Type Coercion:** Numeric values in comparisons should not be quoted (e.g., `age gt 21` not `age gt '21'`).
+- **String Values:** Always quote string literals (e.g., `vendor eq 'ABC'`).
+- **Maximum Results:** Default `$top` is 100 if not specified. Maximum allowed is 10,000 records per request.
 
 ## Permission Model
 

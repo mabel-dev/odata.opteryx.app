@@ -24,6 +24,7 @@ from orso.logging import get_logger
 from app.auth.deps import require_authentication
 from app.auth.permissions import get_access_policies_from_claims
 from app.models.query import Query as SQLQuery
+from app.odata.odata_to_logical_plan import ODataLogicalPlanBuilder
 
 logger = get_logger()
 
@@ -289,6 +290,32 @@ def read_dataset(
         if top_val <= 0 or top_val > 10000:
             raise HTTPException(status_code=400, detail="$top must be between 1 and 10000")
     top = top_val
+    
+    # Build logical plan from OData parameters using Phase 1 builder
+    # This converts $filter, $select, $orderby, $top/$skip, $apply to Opteryx logical plan
+    try:
+        builder = ODataLogicalPlanBuilder(table_name)
+        logical_plan = builder.build(
+            filter_expr=filter,
+            select_cols=select,
+            orderby_expr=orderby,
+            top=top,
+            skip=skip,
+            apply_expr=None,  # $apply not yet exposed in OData endpoint
+        )
+        
+        # TODO: Once Opteryx supports execute_logical_plan(), use it directly:
+        # arrow_table = opteryx.execute_logical_plan(logical_plan, access_policies=access_policies)
+        
+        # For now, fall back to SQL generation for compatibility
+        # The logical plan is built but not yet executed
+        logger.debug(f"Built logical plan with {len(builder.plan.nodes)} nodes for {table_name}")
+        
+    except ValueError as e:
+        logger.error(f"Invalid OData query parameters: {e}")
+        raise HTTPException(status_code=400, detail=f"Invalid query: {str(e)}")
+    
+    # Build legacy SQL query for now (will be replaced with logical plan execution)
     qb = SQLQuery()
 
     # Handle $select (column projection)
