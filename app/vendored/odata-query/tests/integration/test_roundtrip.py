@@ -1,5 +1,4 @@
 import pytest
-
 from odata_query.roundtrip import AstToODataVisitor
 
 

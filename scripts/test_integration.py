@@ -5,10 +5,12 @@ Tests building complete logical plans with all OData parameters
 """
 
 import sys
+
+from app.odata.odata_to_logical_plan import ODataLogicalPlanBuilder
+
 sys.path.insert(0, "/Users/justin/Nextcloud/opteryx-cloud/odata.opteryx")
 sys.path.insert(0, "/Users/justin/Nextcloud/opteryx-cloud/odata.opteryx/app/vendored/odata-query")
 
-from app.odata.odata_to_logical_plan import ODataLogicalPlanBuilder
 
 # Test scenarios
 test_scenarios = [
@@ -68,33 +70,34 @@ for scenario in test_scenarios:
     print(f"Top: {scenario['top']}, Skip: {scenario['skip']}")
     print(f"Apply: {scenario['apply']}")
     print()
-    
+
     try:
-        builder = ODataLogicalPlanBuilder(scenario['table'])
+        builder = ODataLogicalPlanBuilder(scenario["table"])
         plan = builder.build(
-            filter_expr=scenario['filter'],
-            select_cols=scenario['select'],
-            orderby_expr=scenario['orderby'],
-            top=scenario['top'],
-            skip=scenario['skip'],
-            apply_expr=scenario['apply'],
+            filter_expr=scenario["filter"],
+            select_cols=scenario["select"],
+            orderby_expr=scenario["orderby"],
+            top=scenario["top"],
+            skip=scenario["skip"],
+            apply_expr=scenario["apply"],
         )
-        
+
         # Display plan info
         print("Plan built successfully!")
         # Note: LogicalPlan is a Graph, we can verify it was built
-        print(f"  - Builder processed all parameters")
-        print(f"  - Logical plan returned with no errors")
-        
+        print("  - Builder processed all parameters")
+        print("  - Logical plan returned with no errors")
+
         # Show the logical plan structure
         # (In a real test, we'd verify node properties)
-        
+
         print("✓ PASS")
     except Exception as e:
         print(f"✗ ERROR: {e}")
         import traceback
+
         traceback.print_exc()
-    
+
     print("-" * 80)
     print()
 

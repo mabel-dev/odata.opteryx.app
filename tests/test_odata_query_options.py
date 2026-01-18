@@ -5,13 +5,13 @@ import re
 
 def _convert_odata_filter_to_sql(odata_filter: str) -> str:
     """Convert OData filter syntax to SQL WHERE clause.
-    
+
     Supports basic OData operators:
     - Comparison: eq, ne, gt, ge, lt, le
     - Logical: and, or, not
     - String functions: contains, startswith, endswith
     - Other: null literal
-    
+
     Examples:
         "name eq 'John'" -> "name = 'John'"
         "age gt 25" -> "age > 25"
@@ -19,7 +19,7 @@ def _convert_odata_filter_to_sql(odata_filter: str) -> str:
     """
     if not odata_filter:
         return ""
-    
+
     # Replace OData operators with SQL equivalents
     replacements = [
         (" eq ", " = "),
@@ -32,42 +32,32 @@ def _convert_odata_filter_to_sql(odata_filter: str) -> str:
         (" or ", " OR "),
         (" not ", " NOT "),
     ]
-    
+
     result = odata_filter
     for odata_op, sql_op in replacements:
         result = result.replace(odata_op, sql_op)
-    
+
     # Handle string functions
     # contains(field, 'value') -> field LIKE '%value%'
     result = re.sub(
-        r"contains\(([^,]+),\s*'([^']*)'\)",
-        r"\1 LIKE '%\2%'",
-        result,
-        flags=re.IGNORECASE
+        r"contains\(([^,]+),\s*'([^']*)'\)", r"\1 LIKE '%\2%'", result, flags=re.IGNORECASE
     )
-    
+
     # startswith(field, 'value') -> field LIKE 'value%'
     result = re.sub(
-        r"startswith\(([^,]+),\s*'([^']*)'\)",
-        r"\1 LIKE '\2%'",
-        result,
-        flags=re.IGNORECASE
+        r"startswith\(([^,]+),\s*'([^']*)'\)", r"\1 LIKE '\2%'", result, flags=re.IGNORECASE
     )
-    
+
     # endswith(field, 'value') -> field LIKE '%value'
     result = re.sub(
-        r"endswith\(([^,]+),\s*'([^']*)'\)",
-        r"\1 LIKE '%\2'",
-        result,
-        flags=re.IGNORECASE
+        r"endswith\(([^,]+),\s*'([^']*)'\)", r"\1 LIKE '%\2'", result, flags=re.IGNORECASE
     )
-    
+
     # Handle null literal
     result = result.replace(" null", " NULL")
     result = result.replace("(null", "(NULL")
-    
-    return result
 
+    return result
 
 
 def test_filter_equality():

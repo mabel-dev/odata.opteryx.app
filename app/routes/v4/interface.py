@@ -31,7 +31,7 @@ logger = get_logger()
 FIRESTORE_DATABASE = os.environ.get("FIRESTORE_DATABASE")
 BUCKET_NAME = os.environ.get("GCS_BUCKET")
 GCP_PROJECT_ID = os.environ.get("GCP_PROJECT_ID")
-
+DEFAULT_TOP = int(os.environ.get("ODATA_DEFAULT_TOP", "100"))
 
 opteryx.set_default_connector(
     OpteryxConnector,
@@ -157,7 +157,6 @@ def _map_py_type_to_edm(py_type: type) -> str:
     return "Edm.String"
 
 
-
 router = APIRouter(
     prefix="/api/v4",
     tags=["OData v4"],
@@ -190,41 +189,40 @@ def read_dataset(
     """
     # Set OData-Version header
     response.headers["OData-Version"] = "4.0"
-    
-    logger.info(f"read_dataset called with: filter={filter}, top={top}, skip={skip}, orderby={orderby}, select={select}")
+
+    logger.info(
+        f"read_dataset called with: filter={filter}, top={top}, skip={skip}, orderby={orderby}, select={select}"
+    )
 
     # Extract claims from request state (set by require_authentication dependency)
     claims = getattr(request.state, "claims", {})
 
     table_name = f"{workstream}.{collection}.{dataset}"
-    # Apply a safe default $top when clients don't provide one to avoid
-    # returning a 400 for discovery clients (Excel). Default can be
-    # overridden via the ODATA_DEFAULT_TOP env var.
-    DEFAULT_TOP = int(os.environ.get("ODATA_DEFAULT_TOP", "100"))
-    try:
-        if top is None:
-            top_val = DEFAULT_TOP
-        else:
-            top_val = int(top)
-    except Exception:
-        raise HTTPException(status_code=400, detail="$top must be an integer between 0 and 10000")
-    # Allow $top=0 when $count=true (user wants just the count)
-    # Otherwise, require $top between 1 and 10000
-    if count and count.lower() in ("true", "1", "yes"):
-        if top_val < 0 or top_val > 10000:
-            raise HTTPException(status_code=400, detail="$top must be between 0 and 10000")
+
+    # Parse and validate $top parameter
+    if top is None:
+        top = DEFAULT_TOP
     else:
-        if top_val <= 0 or top_val > 10000:
+        top = int(top)  # Will raise ValueError if not a valid integer
+
+    # Validate $top range
+    if count and count.lower() in ("true", "1", "yes"):
+        if not (0 <= top <= 10000):
+            raise HTTPException(
+                status_code=400,
+                detail="$top must be between 0 and 10000 (0 allowed with $count=true)",
+            )
+    else:
+        if not (1 <= top <= 10000):
             raise HTTPException(status_code=400, detail="$top must be between 1 and 10000")
-    top = top_val
-    
+
     # Get access policies from JWT claims for Opteryx authorization
     access_policies = get_access_policies_from_claims(claims)
-    
+
     # Build logical plan from OData parameters
     # This converts $filter, $select, $orderby, $top/$skip to Opteryx logical plan
+    builder = ODataLogicalPlanBuilder(table_name)
     try:
-        builder = ODataLogicalPlanBuilder(table_name)
         logical_plan = builder.build(
             filter_expr=filter,
             select_cols=select,
@@ -233,12 +231,10 @@ def read_dataset(
             skip=skip,
             apply_expr=None,  # $apply not yet exposed in OData endpoint
         )
-        
-        logger.debug(f"Built logical plan with {len(builder.plan.nodes())} nodes for {table_name}")
-        
     except ValueError as e:
-        logger.error(f"Invalid OData query parameters: {e}")
         raise HTTPException(status_code=400, detail=f"Invalid query: {str(e)}")
+
+    logger.debug(f"Built logical plan with {len(builder.plan.nodes())} nodes for {table_name}")
 
     logger.debug(
         f"Executing logical plan for table={table_name} with {len(access_policies)} access policies for identity={claims.get('identity', 'unknown')}"
@@ -249,79 +245,34 @@ def read_dataset(
     col_names = []
     if top == 0:
         # Skip the data query if $top=0 (only valid with $count=true)
-        rows = []
-        col_names = []
+        pass
     else:
-        try:
-            # Execute the logical plan using Opteryx
-            arrow_table = opteryx.execute_logical_plan(logical_plan) #, access_policies=access_policies)
+        # Execute the logical plan using Opteryx - let errors propagate
+        arrow_table = opteryx.execute_logical_plan(
+            logical_plan
+        )  # , access_policies=access_policies)
 
-            # Get column names from the Arrow table
-            col_names = arrow_table.column_names
-            logger.info(f"Arrow table columns: {col_names}")
-            logger.info(f"Arrow table num_rows: {arrow_table.num_rows}")
+        # Get column names from the Arrow table
+        col_names = arrow_table.column_names
+        logger.info(f"Arrow table columns: {col_names}")
+        logger.info(f"Arrow table num_rows: {arrow_table.num_rows}")
 
-            # Convert Arrow table to list of dicts
-            # Use to_pydict() which gives {column: [values]}, then transpose to rows
-            columns_dict = arrow_table.to_pydict()
-            logger.info(
-                f"First row sample: {[(k, columns_dict[k][0] if columns_dict[k] else None) for k in list(col_names)[:5]]}"
-            )
+        # Convert Arrow table to list of dicts
+        columns_dict = arrow_table.to_pydict()
+        logger.info(
+            f"First row sample: {[(k, columns_dict[k][0] if columns_dict[k] else None) for k in list(col_names)[:5]]}"
+        )
 
-            rows = []
-            for i in range(arrow_table.num_rows):
-                row_dict = {}
-                for col in col_names:
-                    value = columns_dict[col][i]
-                    # Sanitize values to ensure OData compatibility
-                    row_dict[col] = _sanitize_value_for_odata(value)
-                rows.append(row_dict)
+        rows = []
+        for i in range(arrow_table.num_rows):
+            row_dict = {}
+            for col in col_names:
+                value = columns_dict[col][i]
+                # Sanitize values to ensure OData compatibility
+                row_dict[col] = _sanitize_value_for_odata(value)
+            rows.append(row_dict)
 
-            logger.info(f"Created {len(rows)} rows with {len(rows[0].keys()) if rows else 0} keys")
-
-        except Exception as exc:
-            logger.error(f"failed to query dataset {table_name}")
-            exc_name = exc.__class__.__name__
-            exc_str = str(exc)
-
-            # Check for UTF-8 decode errors in the exception chain
-            current_exc = exc
-            while current_exc is not None:
-                if isinstance(current_exc, UnicodeDecodeError):
-                    logger.warning(f"Dataset {table_name} contains binary data: {exc}")
-                    raise HTTPException(
-                        status_code=400,
-                        detail="Dataset contains binary data that cannot be read as text",
-                    )
-                if (
-                    "codec can't decode" in str(current_exc).lower()
-                    or "utf-8" in str(current_exc).lower()
-                ):
-                    logger.warning(f"Dataset {table_name} has encoding issue: {exc}")
-                    raise HTTPException(
-                        status_code=400, detail="Dataset has encoding issues and cannot be read as text"
-                    )
-                # Check chained exceptions
-                current_exc = getattr(current_exc, "__cause__", None) or getattr(
-                    current_exc, "__context__", None
-                )
-
-            # Handle specific error types
-            if exc_name == "DatasetNotFoundError":
-                raise HTTPException(status_code=404, detail="dataset not found")
-
-            # Handle authorization/permission errors from Opteryx
-            if (
-                "permission" in exc_str.lower()
-                or "access" in exc_str.lower()
-                or "forbidden" in exc_str.lower()
-            ):
-                logger.warning(
-                    f"Access denied to dataset {table_name} for identity {claims.get('identity', 'unknown')}"
-                )
-                raise HTTPException(status_code=403, detail=f"Access denied to dataset {table_name}")
-
-            raise HTTPException(status_code=500, detail="failed to read dataset")
+        logger.info(f"Created {len(rows)} rows with {len(rows[0].keys()) if rows else 0} keys")
 
     # If the client requested total count, run a separate COUNT(*) query
     want_count = False
@@ -337,29 +288,24 @@ def read_dataset(
     total_count: Optional[int] = None
     if want_count:
         # Build a count query using a separate logical plan
-        try:
-            count_builder = ODataLogicalPlanBuilder(table_name)
-            count_plan = count_builder.build(
-                filter_expr=filter,
-                select_cols=None,  # No select needed for count
-                orderby_expr=None,  # No order by needed for count
-                top=None,
-                skip=None,
-                apply_expr=None,
-            )
-            
-            logger.debug(f"Built count logical plan with {len(count_builder.plan.nodes())} nodes for {table_name}")
-            
-            # Execute the count logical plan
-            # For counting, we'll execute the plan and count the rows
-            arrow_table = opteryx.execute_logical_plan(count_plan) #, access_policies=access_policies)
-            total_count = arrow_table.num_rows
-            logger.info(f"Count query result: {total_count}")
-            
-        except Exception as exc:
-            import traceback
-            logger.error(f"Error executing count query: {exc}\n{traceback.format_exc()}")
-            total_count = None
+        count_builder = ODataLogicalPlanBuilder(table_name)
+        count_plan = count_builder.build(
+            filter_expr=filter,
+            select_cols=None,  # No select needed for count
+            orderby_expr=None,  # No order by needed for count
+            top=None,
+            skip=None,
+            apply_expr=None,
+        )
+
+        logger.debug(
+            f"Built count logical plan with {len(count_builder.plan.nodes())} nodes for {table_name}"
+        )
+
+        # Execute the count logical plan - let errors propagate
+        arrow_table = opteryx.execute_logical_plan(count_plan)  # , access_policies=access_policies)
+        total_count = arrow_table.num_rows
+        logger.info(f"Count query result: {total_count}")
 
     # All paging (LIMIT/OFFSET) should have been pushed down to SQL when
     # possible; no Python-side slicing is necessary.

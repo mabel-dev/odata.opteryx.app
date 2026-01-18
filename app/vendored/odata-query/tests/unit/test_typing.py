@@ -1,8 +1,8 @@
 from typing import Type
 
 import pytest
-
-from odata_query import ast, typing
+from odata_query import ast
+from odata_query import typing
 
 
 @pytest.mark.parametrize(
@@ -52,9 +52,7 @@ def test_infer_type_of_node(input_node: ast._Node, expected_type: Type[ast._Node
         ),
     ],
 )
-def test_infer_return_type_of_call(
-    input_node: ast.Call, expected_type: Type[ast._Node]
-):
+def test_infer_return_type_of_call(input_node: ast.Call, expected_type: Type[ast._Node]):
     res = typing.infer_type(input_node)
 
     assert res is expected_type
