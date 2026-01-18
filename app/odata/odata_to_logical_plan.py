@@ -16,6 +16,10 @@ from typing import List
 from typing import Optional
 from typing import Tuple
 
+# CRITICAL: Set up vendored path BEFORE importing odata_query
+_vendored_path = str(Path(__file__).parent.parent / "vendored" / "odata-query")
+sys.path.insert(0, _vendored_path)
+
 from odata_query import ast as odata_ast
 from odata_query.grammar import ODataLexer
 from odata_query.grammar import ODataParser
@@ -26,15 +30,6 @@ from opteryx.planner.logical_planner import LogicalPlanNode
 from opteryx.planner.logical_planner import LogicalPlanStepType
 from orso.tools import random_string
 from orso.types import OrsoTypes
-
-# Add vendored odata-query to path
-_vendored_path = str(Path(__file__).parent.parent / "vendored" / "odata-query")
-sys.path.insert(0, _vendored_path)
-
-
-# Import odata-query parser
-_vendored_path = str(Path(__file__).parent.parent / "vendored" / "odata-query")
-sys.path.insert(0, _vendored_path)
 
 
 class ODataLogicalPlanBuilder:
