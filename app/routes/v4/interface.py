@@ -279,9 +279,15 @@ def read_dataset(
         else:
             top_val = int(top)
     except Exception:
-        raise HTTPException(status_code=400, detail="$top must be an integer between 1 and 10000")
-    if top_val <= 0 or top_val > 10000:
-        raise HTTPException(status_code=400, detail="$top must be between 1 and 10000")
+        raise HTTPException(status_code=400, detail="$top must be an integer between 0 and 10000")
+    # Allow $top=0 when $count=true (user wants just the count)
+    # Otherwise, require $top between 1 and 10000
+    if count and count.lower() in ("true", "1", "yes"):
+        if top_val < 0 or top_val > 10000:
+            raise HTTPException(status_code=400, detail="$top must be between 0 and 10000")
+    else:
+        if top_val <= 0 or top_val > 10000:
+            raise HTTPException(status_code=400, detail="$top must be between 1 and 10000")
     top = top_val
     qb = SQLQuery()
 
@@ -420,6 +426,10 @@ def read_dataset(
     total_count: Optional[int] = None
     if want_count:
         count_sql = f'SELECT COUNT(*) AS "__count__" FROM "{table_name}"'
+        # Apply the same filter to the count query
+        if filter:
+            sql_filter = _convert_odata_filter_to_sql(filter)
+            count_sql += f" WHERE {sql_filter}"
         try:
             # Pass access policies to count query as well
             count_res = opteryx.query(count_sql, access_policies=access_policies)
