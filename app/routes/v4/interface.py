@@ -340,77 +340,82 @@ def read_dataset(
         f"Executing query for table={table_name} with {len(access_policies)} access policies for identity={claims.get('identity', 'unknown')}"
     )
 
-    try:
-        # Pass access_policies to Opteryx for authorization enforcement
-        print(f"Executing SQL: {sql}")
-        arrow_table = opteryx.query_to_arrow(sql, access_policies=access_policies)
-
-        # Get column names from the Arrow table
-        col_names = arrow_table.column_names
-        logger.info(f"Arrow table columns: {col_names}")
-        logger.info(f"Arrow table num_rows: {arrow_table.num_rows}")
-
-        # Convert Arrow table to list of dicts
-        # Use to_pydict() which gives {column: [values]}, then transpose to rows
-        columns_dict = arrow_table.to_pydict()
-        logger.info(
-            f"First row sample: {[(k, columns_dict[k][0] if columns_dict[k] else None) for k in list(col_names)[:5]]}"
-        )
-
+    # Skip the data query if $top=0 (only valid with $count=true)
+    rows = []
+    if top == 0:
         rows = []
-        for i in range(arrow_table.num_rows):
-            row_dict = {}
-            for col in col_names:
-                value = columns_dict[col][i]
-                # Sanitize values to ensure OData compatibility
-                row_dict[col] = _sanitize_value_for_odata(value)
-            rows.append(row_dict)
+    else:
+        try:
+            # Pass access_policies to Opteryx for authorization enforcement
+            print(f"Executing SQL: {sql}")
+            arrow_table = opteryx.query_to_arrow(sql, access_policies=access_policies)
 
-        logger.info(f"Created {len(rows)} rows with {len(rows[0].keys()) if rows else 0} keys")
+            # Get column names from the Arrow table
+            col_names = arrow_table.column_names
+            logger.info(f"Arrow table columns: {col_names}")
+            logger.info(f"Arrow table num_rows: {arrow_table.num_rows}")
 
-    except Exception as exc:
-        logger.error(f"failed to query dataset {table_name}")
-        exc_name = exc.__class__.__name__
-        exc_str = str(exc)
+            # Convert Arrow table to list of dicts
+            # Use to_pydict() which gives {column: [values]}, then transpose to rows
+            columns_dict = arrow_table.to_pydict()
+            logger.info(
+                f"First row sample: {[(k, columns_dict[k][0] if columns_dict[k] else None) for k in list(col_names)[:5]]}"
+            )
 
-        # Check for UTF-8 decode errors in the exception chain
-        current_exc = exc
-        while current_exc is not None:
-            if isinstance(current_exc, UnicodeDecodeError):
-                logger.warning(f"Dataset {table_name} contains binary data: {exc}")
-                raise HTTPException(
-                    status_code=400,
-                    detail="Dataset contains binary data that cannot be read as text",
+            rows = []
+            for i in range(arrow_table.num_rows):
+                row_dict = {}
+                for col in col_names:
+                    value = columns_dict[col][i]
+                    # Sanitize values to ensure OData compatibility
+                    row_dict[col] = _sanitize_value_for_odata(value)
+                rows.append(row_dict)
+
+            logger.info(f"Created {len(rows)} rows with {len(rows[0].keys()) if rows else 0} keys")
+
+        except Exception as exc:
+            logger.error(f"failed to query dataset {table_name}")
+            exc_name = exc.__class__.__name__
+            exc_str = str(exc)
+
+            # Check for UTF-8 decode errors in the exception chain
+            current_exc = exc
+            while current_exc is not None:
+                if isinstance(current_exc, UnicodeDecodeError):
+                    logger.warning(f"Dataset {table_name} contains binary data: {exc}")
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Dataset contains binary data that cannot be read as text",
+                    )
+                if (
+                    "codec can't decode" in str(current_exc).lower()
+                    or "utf-8" in str(current_exc).lower()
+                ):
+                    logger.warning(f"Dataset {table_name} has encoding issue: {exc}")
+                    raise HTTPException(
+                        status_code=400, detail="Dataset has encoding issues and cannot be read as text"
+                    )
+                # Check chained exceptions
+                current_exc = getattr(current_exc, "__cause__", None) or getattr(
+                    current_exc, "__context__", None
                 )
+
+            # Handle specific error types
+            if exc_name == "DatasetNotFoundError":
+                raise HTTPException(status_code=404, detail="dataset not found")
+
+            # Handle authorization/permission errors from Opteryx
             if (
-                "codec can't decode" in str(current_exc).lower()
-                or "utf-8" in str(current_exc).lower()
+                "permission" in exc_str.lower()
+                or "access" in exc_str.lower()
+                or "forbidden" in exc_str.lower()
             ):
-                logger.warning(f"Dataset {table_name} has encoding issue: {exc}")
-                raise HTTPException(
-                    status_code=400, detail="Dataset has encoding issues and cannot be read as text"
+                logger.warning(
+                    f"Access denied to dataset {table_name} for identity {claims.get('identity', 'unknown')}"
                 )
-            # Check chained exceptions
-            current_exc = getattr(current_exc, "__cause__", None) or getattr(
-                current_exc, "__context__", None
-            )
+                raise HTTPException(status_code=403, detail=f"Access denied to dataset {table_name}")
 
-        # Handle specific error types
-        if exc_name == "DatasetNotFoundError":
-            raise HTTPException(status_code=404, detail="dataset not found")
-
-        # Handle authorization/permission errors from Opteryx
-        if (
-            "permission" in exc_str.lower()
-            or "access" in exc_str.lower()
-            or "forbidden" in exc_str.lower()
-        ):
-            logger.warning(
-                f"Access denied to dataset {table_name} for identity {claims.get('identity', 'unknown')}"
-            )
-            raise HTTPException(status_code=403, detail=f"Access denied to dataset {table_name}")
-
-        raise HTTPException(status_code=500, detail="failed to read dataset")
+            raise HTTPException(status_code=500, detail="failed to read dataset")
 
     # If the client requested total count, run a separate COUNT(*) query
     want_count = False
