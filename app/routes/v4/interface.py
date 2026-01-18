@@ -342,8 +342,10 @@ def read_dataset(
 
     # Skip the data query if $top=0 (only valid with $count=true)
     rows = []
+    col_names = []
     if top == 0:
         rows = []
+        col_names = []
     else:
         try:
             # Pass access_policies to Opteryx for authorization enforcement
