@@ -23,7 +23,6 @@ from orso.logging import get_logger
 
 from app.auth.deps import require_authentication
 from app.auth.permissions import get_access_policies_from_claims
-from app.models.query import Query as SQLQuery
 from app.odata.odata_to_logical_plan import ODataLogicalPlanBuilder
 
 logger = get_logger()
@@ -158,80 +157,6 @@ def _map_py_type_to_edm(py_type: type) -> str:
     return "Edm.String"
 
 
-def _convert_odata_filter_to_sql(odata_filter: str) -> str:
-    """Convert OData filter syntax to SQL WHERE clause.
-
-    Supports basic OData operators:
-    - Comparison: eq, ne, gt, ge, lt, le (case-insensitive for text with LOWER)
-    - Logical: and, or, not
-    - String functions: contains, startswith, endswith (case-insensitive with ILIKE)
-    - Other: null literal
-
-    Examples:
-        "name eq 'John'" -> "LOWER(name) = LOWER('John')"
-        "age gt 25" -> "age > 25"
-        "contains(name, 'test')" -> "name ILIKE '%test%'"
-    """
-    if not odata_filter:
-        return ""
-
-    import re
-
-    # Replace OData operators with SQL equivalents
-    replacements = [
-        (" eq ", " = "),
-        (" ne ", " != "),
-        (" gt ", " > "),
-        (" ge ", " >= "),
-        (" lt ", " < "),
-        (" le ", " <= "),
-        (" and ", " AND "),
-        (" or ", " OR "),
-        (" not ", " NOT "),
-    ]
-
-    result = odata_filter
-    for odata_op, sql_op in replacements:
-        result = result.replace(odata_op, sql_op)
-
-    # Make text equality comparisons case-insensitive by wrapping with LOWER()
-    # Pattern: fieldname = 'value' or fieldname != 'value'
-    # Replace with: LOWER(fieldname) = LOWER('value') or LOWER(fieldname) != LOWER('value')
-    result = re.sub(
-        r"(\w+)\s*=\s*'([^']*)'",
-        r"LOWER(\1) = LOWER('\2')",
-        result,
-        flags=re.IGNORECASE,
-    )
-    result = re.sub(
-        r"(\w+)\s*!=\s*'([^']*)'",
-        r"LOWER(\1) != LOWER('\2')",
-        result,
-        flags=re.IGNORECASE,
-    )
-
-    # Handle string functions (case-insensitive with ILIKE)
-    # contains(field, 'value') -> field ILIKE '%value%'
-    result = re.sub(
-        r"contains\(([^,]+),\s*'([^']*)'\)", r"\1 ILIKE '%\2%'", result, flags=re.IGNORECASE
-    )
-
-    # startswith(field, 'value') -> field ILIKE 'value%'
-    result = re.sub(
-        r"startswith\(([^,]+),\s*'([^']*)'\)", r"\1 ILIKE '\2%'", result, flags=re.IGNORECASE
-    )
-
-    # endswith(field, 'value') -> field ILIKE '%value'
-    result = re.sub(
-        r"endswith\(([^,]+),\s*'([^']*)'\)", r"\1 ILIKE '%\2'", result, flags=re.IGNORECASE
-    )
-
-    # Handle null literal
-    result = result.replace(" null", " NULL")
-    result = result.replace("(null", "(NULL")
-
-    return result
-
 
 router = APIRouter(
     prefix="/api/v4",
@@ -265,6 +190,8 @@ def read_dataset(
     """
     # Set OData-Version header
     response.headers["OData-Version"] = "4.0"
+    
+    logger.info(f"read_dataset called with: filter={filter}, top={top}, skip={skip}, orderby={orderby}, select={select}")
 
     # Extract claims from request state (set by require_authentication dependency)
     claims = getattr(request.state, "claims", {})
@@ -291,8 +218,11 @@ def read_dataset(
             raise HTTPException(status_code=400, detail="$top must be between 1 and 10000")
     top = top_val
     
-    # Build logical plan from OData parameters using Phase 1 builder
-    # This converts $filter, $select, $orderby, $top/$skip, $apply to Opteryx logical plan
+    # Get access policies from JWT claims for Opteryx authorization
+    access_policies = get_access_policies_from_claims(claims)
+    
+    # Build logical plan from OData parameters
+    # This converts $filter, $select, $orderby, $top/$skip to Opteryx logical plan
     try:
         builder = ODataLogicalPlanBuilder(table_name)
         logical_plan = builder.build(
@@ -304,80 +234,27 @@ def read_dataset(
             apply_expr=None,  # $apply not yet exposed in OData endpoint
         )
         
-        # TODO: Once Opteryx supports execute_logical_plan(), use it directly:
-        # arrow_table = opteryx.execute_logical_plan(logical_plan, access_policies=access_policies)
-        
-        # For now, fall back to SQL generation for compatibility
-        # The logical plan is built but not yet executed
         logger.debug(f"Built logical plan with {len(builder.plan.nodes())} nodes for {table_name}")
         
     except ValueError as e:
         logger.error(f"Invalid OData query parameters: {e}")
         raise HTTPException(status_code=400, detail=f"Invalid query: {str(e)}")
-    
-    # Build legacy SQL query for now (will be replaced with logical plan execution)
-    qb = SQLQuery()
-
-    # Handle $select (column projection)
-    if select:
-        # Parse comma-separated list of column names
-        columns = [col.strip() for col in select.split(",")]
-        for col in columns:
-            qb.SELECT(col)
-    else:
-        qb.SELECT("*")
-
-    qb.FROM(table_name)
-
-    # Handle $filter (WHERE clause)
-    if filter:
-        # Convert OData filter to SQL WHERE clause
-        sql_filter = _convert_odata_filter_to_sql(filter)
-        qb.WHERE(sql_filter)
-
-    # Handle $orderby (ORDER BY clause)
-    if orderby:
-        # Parse orderby: "col1 asc, col2 desc" or "col1, col2"
-        order_parts = [part.strip() for part in orderby.split(",")]
-        for part in order_parts:
-            qb.ORDER_BY(part)
-
-    # Prefer doing paging in SQL. When $top is provided use LIMIT (and OFFSET
-    # when present). When only $skip is provided append an `OFFSET` clause to
-    # the SQL so the engine can avoid materializing skipped rows.
-    append_offset = False
-    if top is not None:
-        if skip is not None:
-            qb.LIMIT(f"{top} OFFSET {skip}")
-        else:
-            qb.LIMIT(str(top))
-    elif skip is not None:
-        # No top provided, but we have a skip — we'll append OFFSET to the SQL
-        # string below so the engine can apply it.
-        append_offset = True
-
-    sql = str(qb)
-    if append_offset:
-        sql = sql + f" OFFSET {skip}"
-
-    # Get access policies from JWT claims for Opteryx authorization
-    access_policies = get_access_policies_from_claims(claims)
 
     logger.debug(
-        f"Executing query for table={table_name} with {len(access_policies)} access policies for identity={claims.get('identity', 'unknown')}"
+        f"Executing logical plan for table={table_name} with {len(access_policies)} access policies for identity={claims.get('identity', 'unknown')}"
     )
 
-    # Skip the data query if $top=0 (only valid with $count=true)
+    # Execute the logical plan using Opteryx
     rows = []
     col_names = []
     if top == 0:
+        # Skip the data query if $top=0 (only valid with $count=true)
         rows = []
         col_names = []
     else:
         try:
-            # Pass access_policies to Opteryx for authorization enforcement
-            print(f"Executing SQL: {sql}")
-            arrow_table = opteryx.query_to_arrow(sql, access_policies=access_policies)
+            # Execute the logical plan using Opteryx
+            arrow_table = opteryx.execute_logical_plan(logical_plan, access_policies=access_policies)
 
             # Get column names from the Arrow table
             col_names = arrow_table.column_names
@@ -459,27 +336,28 @@ def read_dataset(
 
     total_count: Optional[int] = None
     if want_count:
-        count_sql = f'SELECT COUNT(*) AS "__count__" FROM "{table_name}"'
-        # Apply the same filter to the count query
-        if filter:
-            sql_filter = _convert_odata_filter_to_sql(filter)
-            count_sql += f" WHERE {sql_filter}"
+        # Build a count query using a separate logical plan
         try:
-            # Pass access policies to count query as well
-            count_res = opteryx.query(count_sql, access_policies=access_policies)
-            for crow in count_res:
-                try:
-                    # crow may be mapping-like or positional
-                    if hasattr(crow, "_asdict"):
-                        total_count = int(dict(crow._asdict()).get("__count__", 0))
-                    elif isinstance(crow, dict):
-                        total_count = int(crow.get("__count__", 0))
-                    else:
-                        total_count = int(crow[0])
-                except Exception:
-                    total_count = None
-                break
-        except Exception:
+            count_builder = ODataLogicalPlanBuilder(table_name)
+            count_plan = count_builder.build(
+                filter_expr=filter,
+                select_cols=None,  # No select needed for count
+                orderby_expr=None,  # No order by needed for count
+                top=None,
+                skip=None,
+                apply_expr=None,
+            )
+            
+            logger.debug(f"Built count logical plan with {len(count_builder.plan.nodes())} nodes for {table_name}")
+            
+            # Execute the count logical plan
+            # For counting, we'll execute the plan and count the rows
+            arrow_table = opteryx.execute_logical_plan(count_plan, access_policies=access_policies)
+            total_count = arrow_table.num_rows
+            logger.info(f"Count query result: {total_count}")
+            
+        except Exception as exc:
+            logger.error(f"Error executing count query", exc_info=exc)
             total_count = None
 
     # All paging (LIMIT/OFFSET) should have been pushed down to SQL when
