@@ -1,5 +1,7 @@
 from dataclasses import fields
-from typing import Any, Iterator, Tuple
+from typing import Any
+from typing import Iterator
+from typing import Tuple
 
 from . import ast
 

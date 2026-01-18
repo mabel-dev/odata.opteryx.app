@@ -1,12 +1,13 @@
 import sys
 from typing import Type
 
+from odata_query import ast
+from odata_query import visitor
+
 if sys.version_info >= (3, 8):
     from typing import Protocol
 else:
     from typing_extensions import Protocol
-
-from odata_query import ast, visitor
 
 
 class LiteralValNode(Protocol):
@@ -137,12 +138,8 @@ class AstToODataVisitor(visitor.NodeVisitor):
 
     def visit_Compare(self, node: ast.Compare) -> str:
         """:meta private:"""
-        left = self._visit_and_paren_if_precedence_lower(
-            node.left, type(node.comparator)
-        )
-        right = self._visit_and_paren_if_precedence_lower(
-            node.right, type(node.comparator)
-        )
+        left = self._visit_and_paren_if_precedence_lower(node.left, type(node.comparator))
+        right = self._visit_and_paren_if_precedence_lower(node.right, type(node.comparator))
         return left + " " + self.visit(node.comparator) + " " + right
 
     def visit_And(self, node: ast.And) -> str:
@@ -174,12 +171,7 @@ class AstToODataVisitor(visitor.NodeVisitor):
 
     def visit_Call(self, node: ast.Call) -> str:
         """:meta private:"""
-        return (
-            self.visit(node.func)
-            + "("
-            + ", ".join(self.visit(n) for n in node.args)
-            + ")"
-        )
+        return self.visit(node.func) + "(" + ", ".join(self.visit(n) for n in node.args) + ")"
 
     def visit_Any(self, node: ast.Any) -> str:
         """:meta private:"""

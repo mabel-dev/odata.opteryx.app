@@ -4,10 +4,12 @@ Test ODataLogicalPlanBuilder expression parser
 """
 
 import sys
+
+from app.odata.odata_to_logical_plan import ODataLogicalPlanBuilder
+
 sys.path.insert(0, "/Users/justin/Nextcloud/opteryx-cloud/odata.opteryx")
 sys.path.insert(0, "/Users/justin/Nextcloud/opteryx-cloud/odata.opteryx/app/vendored/odata-query")
 
-from app.odata.odata_to_logical_plan import ODataLogicalPlanBuilder
 
 # Test cases
 test_cases = [
@@ -32,20 +34,21 @@ for filter_expr, description in test_cases:
     try:
         # Parse the expression
         expr_node = builder._parse_filter_expression(filter_expr)
-        
+
         print(f"Result: {expr_node}")
         print(f"Node Type: {expr_node.node_type}")
         print(f"Value: {expr_node.value}")
-        if hasattr(expr_node, 'left'):
+        if hasattr(expr_node, "left"):
             print(f"Left: {expr_node.left}")
-        if hasattr(expr_node, 'right'):
+        if hasattr(expr_node, "right"):
             print(f"Right: {expr_node.right}")
-        
+
         print("✓ PASS")
     except Exception as e:
         print(f"✗ ERROR: {e}")
         import traceback
+
         traceback.print_exc()
-    
+
     print("-" * 80)
     print()

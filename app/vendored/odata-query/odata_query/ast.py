@@ -1,14 +1,15 @@
 import datetime as dt
 import re
-from dataclasses import dataclass, field
-from typing import List as ListType, Optional, Tuple
+from dataclasses import dataclass
+from dataclasses import field
+from typing import List as ListType
+from typing import Optional
+from typing import Tuple
 from uuid import UUID
 
 from dateutil.parser import isoparse
 
-DURATION_PATTERN = re.compile(
-    r"([+-])?P(\d+Y)?(\d+M)?(\d+D)?(?:T(\d+H)?(\d+M)?(\d+(?:\.\d+)?S)?)?"
-)
+DURATION_PATTERN = re.compile(r"([+-])?P(\d+Y)?(\d+M)?(\d+D)?(?:T(\d+H)?(\d+M)?(\d+(?:\.\d+)?S)?)?")
 
 
 @dataclass(frozen=True)

@@ -1,4 +1,5 @@
-from typing import Any, Optional
+from typing import Any
+from typing import Optional
 
 from sly.lex import Token
 
@@ -64,9 +65,7 @@ class ArgumentCountException(FunctionCallException):
     of arguments.
     """
 
-    def __init__(
-        self, function_name: str, exp_min_args: int, exp_max_args: int, given_args: int
-    ):
+    def __init__(self, function_name: str, exp_min_args: int, exp_max_args: int, given_args: int):
         self.function_name = function_name
         self.exp_min_args = exp_min_args
         self.exp_max_args = exp_max_args
@@ -78,8 +77,7 @@ class ArgumentCountException(FunctionCallException):
             )
         else:
             super().__init__(
-                f"Function '{function_name}' takes {exp_min_args} arguments. "
-                f"{given_args} given."
+                f"Function '{function_name}' takes {exp_min_args} arguments. {given_args} given."
             )
 
 

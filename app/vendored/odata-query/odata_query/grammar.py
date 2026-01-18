@@ -5,12 +5,19 @@ Implemented with `SLY <https://sly.readthedocs.io/en/latest/>`_.
 """
 
 import re
-from typing import Any, Callable, List, Optional, TypeVar, Union
+from typing import Any
+from typing import Callable
+from typing import List
+from typing import Optional
+from typing import TypeVar
+from typing import Union
 
-from sly import Lexer, Parser
+from sly import Lexer
+from sly import Parser
 from sly.lex import Token
 
-from . import ast, exceptions
+from . import ast
+from . import exceptions
 
 RuleDecorator = TypeVar("RuleDecorator", bound=Callable[..., Any])
 
@@ -119,9 +126,7 @@ class ODataLexer(Lexer):
     # Primitive literals
     ####################################################################################
 
-    @_(
-        r"duration'[+-]?P(?:\d+Y)?(?:\d+M)?(?:\d+D)?(?:T(?:\d+H)?(?:\d+M)?(?:\d+(?:\.\d+)?S)?)?'"
-    )
+    @_(r"duration'[+-]?P(?:\d+Y)?(?:\d+M)?(?:\d+D)?(?:T(?:\d+H)?(?:\d+M)?(?:\d+(?:\.\d+)?S)?)?'")
     def DURATION(self, t):
         ":meta private:"
         val = t.value.upper()

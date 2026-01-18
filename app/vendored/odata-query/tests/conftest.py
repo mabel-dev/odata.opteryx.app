@@ -1,8 +1,8 @@
 from pathlib import Path
 
 import pytest
-
-from odata_query.grammar import ODataLexer, ODataParser
+from odata_query.grammar import ODataLexer
+from odata_query.grammar import ODataParser
 
 
 @pytest.fixture(scope="session")

@@ -63,9 +63,7 @@ def test_identifier_to_function_rewrite():
 
 def test_rewrite_attribute_owner():
     rewriter = AliasRewriter({"a": "author"})
-    _ast = ast.Compare(
-        ast.Eq(), ast.Attribute(ast.Identifier("a"), "name"), ast.String("Bobby")
-    )
+    _ast = ast.Compare(ast.Eq(), ast.Attribute(ast.Identifier("a"), "name"), ast.String("Bobby"))
     exp = ast.Compare(
         ast.Eq(), ast.Attribute(ast.Identifier("author"), "name"), ast.String("Bobby")
     )

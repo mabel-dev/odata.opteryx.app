@@ -1,6 +1,6 @@
 import pytest
-
-from odata_query import ast, utils
+from odata_query import ast
+from odata_query import utils
 
 
 @pytest.mark.parametrize(
@@ -29,9 +29,7 @@ from odata_query import ast, utils
                 ast.Attribute(ast.Identifier("id"), "name"),
                 ast.List([ast.String("Jozef")]),
             ),
-            ast.Compare(
-                ast.In(), ast.Identifier("name"), ast.List([ast.String("Jozef")])
-            ),
+            ast.Compare(ast.In(), ast.Identifier("name"), ast.List([ast.String("Jozef")])),
         ),
     ],
 )

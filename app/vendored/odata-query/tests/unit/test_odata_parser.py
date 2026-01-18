@@ -2,9 +2,10 @@ import datetime as dt
 from uuid import UUID
 
 import pytest
-
-from odata_query import ast, exceptions
-from odata_query.grammar import ODataLexer, ODataParser
+from odata_query import ast
+from odata_query import exceptions
+from odata_query.grammar import ODataLexer
+from odata_query.grammar import ODataParser
 
 _prev_starting_symbol = None
 
@@ -232,9 +233,7 @@ def test_member_expression_parsing(value: str, expected_type: type):
         ),
         (
             "namespace.meter_id eq 1",
-            ast.Compare(
-                ast.Eq(), ast.Identifier("meter_id", ("namespace",)), ast.Integer("1")
-            ),
+            ast.Compare(ast.Eq(), ast.Identifier("meter_id", ("namespace",)), ast.Integer("1")),
         ),
         (
             "ns1.ns2.meter_id eq 1",
@@ -276,9 +275,7 @@ def test_member_expression_parsing(value: str, expected_type: type):
         ),
         (
             "period_start ge 2019-01-01",
-            ast.Compare(
-                ast.GtE(), ast.Identifier("period_start"), ast.Date("2019-01-01")
-            ),
+            ast.Compare(ast.GtE(), ast.Identifier("period_start"), ast.Date("2019-01-01")),
         ),
         (
             "daily_metered eq true",
@@ -318,9 +315,7 @@ def test_member_expression_parsing(value: str, expected_type: type):
         ),
         (
             "meter_id in ('1',)",
-            ast.Compare(
-                ast.In(), ast.Identifier("meter_id"), ast.List([ast.String("1")])
-            ),
+            ast.Compare(ast.In(), ast.Identifier("meter_id"), ast.List([ast.String("1")])),
         ),
         (
             "created_by/name eq 'Ruben'",

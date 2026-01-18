@@ -2,8 +2,8 @@ from copy import deepcopy
 from unittest import mock
 
 import pytest
-
-from odata_query import ast, visitor
+from odata_query import ast
+from odata_query import visitor
 
 
 @pytest.fixture()
@@ -13,9 +13,7 @@ def simple_ast():
         ast.BoolOp(
             ast.And(),
             ast.Compare(ast.Eq(), ast.Identifier("meter_id"), ast.String("123")),
-            ast.Compare(
-                ast.In(), ast.Identifier("category"), ast.List([ast.String("Gas")])
-            ),
+            ast.Compare(ast.In(), ast.Identifier("category"), ast.List([ast.String("Gas")])),
         ),
         ast.Boolean("true"),
     )
