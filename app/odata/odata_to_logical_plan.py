@@ -25,6 +25,7 @@ from odata_query.grammar import ODataLexer
 from odata_query.grammar import ODataParser
 from opteryx.managers.expression import NodeType
 from opteryx.models import Node
+from opteryx.models.logical_column import LogicalColumn
 from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import LogicalPlanNode
 from opteryx.planner.logical_planner import LogicalPlanStepType
@@ -500,10 +501,12 @@ class ODataLogicalPlanBuilder:
         if isinstance(ast_node, odata_ast.Identifier):
             if not ast_node.name:
                 raise ValueError("Identifier missing name")
-            return Node(
+            # Use LogicalColumn to match what the SQL parser creates
+            return LogicalColumn(
                 node_type=NodeType.IDENTIFIER,
                 source_column=ast_node.name,
-                current_name=ast_node.name,
+                source=None,  # Will be bound during optimization
+                alias=None,
             )
 
         # Handle String literals
