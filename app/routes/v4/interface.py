@@ -26,7 +26,7 @@ from app.auth.permissions import get_access_policies_from_claims
 from app.odata.odata_to_logical_plan import ODataLogicalPlanBuilder
 
 logger = get_logger()
-
+logger.setLevel(5)
 
 FIRESTORE_DATABASE = os.environ.get("FIRESTORE_DATABASE")
 BUCKET_NAME = os.environ.get("GCS_BUCKET")
