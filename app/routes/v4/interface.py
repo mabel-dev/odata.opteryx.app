@@ -161,18 +161,20 @@ def _convert_odata_filter_to_sql(odata_filter: str) -> str:
     """Convert OData filter syntax to SQL WHERE clause.
 
     Supports basic OData operators:
-    - Comparison: eq, ne, gt, ge, lt, le
+    - Comparison: eq, ne, gt, ge, lt, le (case-insensitive for text with LOWER)
     - Logical: and, or, not
-    - String functions: contains, startswith, endswith
+    - String functions: contains, startswith, endswith (case-insensitive with ILIKE)
     - Other: null literal
 
     Examples:
-        "name eq 'John'" -> "name = 'John'"
+        "name eq 'John'" -> "LOWER(name) = LOWER('John')"
         "age gt 25" -> "age > 25"
-        "contains(name, 'test')" -> "name LIKE '%test%'"
+        "contains(name, 'test')" -> "name ILIKE '%test%'"
     """
     if not odata_filter:
         return ""
+
+    import re
 
     # Replace OData operators with SQL equivalents
     replacements = [
@@ -191,22 +193,36 @@ def _convert_odata_filter_to_sql(odata_filter: str) -> str:
     for odata_op, sql_op in replacements:
         result = result.replace(odata_op, sql_op)
 
-    # Handle string functions
-    # contains(field, 'value') -> field LIKE '%value%'
-    import re
-
+    # Make text equality comparisons case-insensitive by wrapping with LOWER()
+    # Pattern: fieldname = 'value' or fieldname != 'value'
+    # Replace with: LOWER(fieldname) = LOWER('value') or LOWER(fieldname) != LOWER('value')
     result = re.sub(
-        r"contains\(([^,]+),\s*'([^']*)'\)", r"\1 LIKE '%\2%'", result, flags=re.IGNORECASE
+        r"(\w+)\s*=\s*'([^']*)'",
+        r"LOWER(\1) = LOWER('\2')",
+        result,
+        flags=re.IGNORECASE,
+    )
+    result = re.sub(
+        r"(\w+)\s*!=\s*'([^']*)'",
+        r"LOWER(\1) != LOWER('\2')",
+        result,
+        flags=re.IGNORECASE,
     )
 
-    # startswith(field, 'value') -> field LIKE 'value%'
+    # Handle string functions (case-insensitive with ILIKE)
+    # contains(field, 'value') -> field ILIKE '%value%'
     result = re.sub(
-        r"startswith\(([^,]+),\s*'([^']*)'\)", r"\1 LIKE '\2%'", result, flags=re.IGNORECASE
+        r"contains\(([^,]+),\s*'([^']*)'\)", r"\1 ILIKE '%\2%'", result, flags=re.IGNORECASE
     )
 
-    # endswith(field, 'value') -> field LIKE '%value'
+    # startswith(field, 'value') -> field ILIKE 'value%'
     result = re.sub(
-        r"endswith\(([^,]+),\s*'([^']*)'\)", r"\1 LIKE '%\2'", result, flags=re.IGNORECASE
+        r"startswith\(([^,]+),\s*'([^']*)'\)", r"\1 ILIKE '\2%'", result, flags=re.IGNORECASE
+    )
+
+    # endswith(field, 'value') -> field ILIKE '%value'
+    result = re.sub(
+        r"endswith\(([^,]+),\s*'([^']*)'\)", r"\1 ILIKE '%\2'", result, flags=re.IGNORECASE
     )
 
     # Handle null literal
