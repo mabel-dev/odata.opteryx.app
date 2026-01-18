@@ -311,6 +311,9 @@ class ODataLogicalPlanBuilder:
         Returns:
             Step ID of the project node
         """
+        if not select_cols:
+            return self.current_step_id
+        
         project_node = LogicalPlanNode(node_type=LogicalPlanStepType.Project)
         
         # Parse select expression: "col1, col2, col3"
@@ -344,6 +347,9 @@ class ODataLogicalPlanBuilder:
                 right=BinaryOp(price gt 100)
             )
         """
+        if not filter_expr:
+            return None
+        
         # Parse OData filter string to AST using odata-query library
         lexer = ODataLexer()
         parser = ODataParser()
@@ -499,7 +505,7 @@ class ODataLogicalPlanBuilder:
             return Node(
                 node_type=NodeType.LITERAL,
                 type=OrsoTypes.BOOLEAN,
-                value=ast_node.val.lower() == 'true',
+                value=(ast_node.val.lower() == 'true') if ast_node.val else False,
             )
         
         # Handle Null literals
@@ -524,6 +530,9 @@ class ODataLogicalPlanBuilder:
         Example:
             "name desc, price asc" → [("name", "desc"), ("price", "asc")]
         """
+        if not orderby_expr:
+            return []
+        
         # Parse comma-separated list of "column [asc|desc]"
         sort_clauses = []
         for clause in orderby_expr.split(","):
