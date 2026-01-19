@@ -4,6 +4,9 @@ from fastapi import HTTPException
 from fastapi import Request
 from fastapi import status
 from fastapi.responses import JSONResponse
+from orso.logging import get_logger
+
+logger = get_logger()
 
 
 class ODataError(Exception):
@@ -72,6 +75,9 @@ async def http_exception_handler(request: Request, exc: HTTPException) -> JSONRe
 
 async def generic_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     """Handle generic exceptions for v4 endpoints."""
+    # Log the actual exception so we can debug it
+    logger.error("Unhandled exception in %s: %s", request.url.path, str(exc), exc_info=exc)
+    
     # Only convert to OData format for /api/v4 requests
     if request.url.path.startswith("/api/v4"):
         return JSONResponse(
@@ -79,7 +85,7 @@ async def generic_exception_handler(request: Request, exc: Exception) -> JSONRes
             content={
                 "error": {
                     "code": "InternalServerError",
-                    "message": "An unexpected error occurred",
+                    "message": f"An unexpected error occurred: {str(exc)}",
                 }
             },
             headers={"OData-Version": "4.0"},
@@ -88,7 +94,7 @@ async def generic_exception_handler(request: Request, exc: Exception) -> JSONRes
     # For non-v4 endpoints, return standard error
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        content={"detail": "Internal server error"},
+        content={"detail": f"Internal server error: {str(exc)}"},
     )
 
 

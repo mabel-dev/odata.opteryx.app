@@ -232,7 +232,26 @@ def read_dataset(
             apply_expr=None,  # $apply not yet exposed in OData endpoint
         )
     except ValueError as e:
+        logger.error(
+            "Failed to build logical plan for table %s: filter=%s, select=%s, orderby=%s, error=%s",
+            table_name,
+            filter,
+            select,
+            orderby,
+            str(e),
+        )
         raise HTTPException(status_code=400, detail=f"Invalid query: {str(e)}")
+    except Exception as e:
+        logger.error(
+            "Unexpected error building logical plan for table %s: filter=%s, select=%s, orderby=%s, error=%s",
+            table_name,
+            filter,
+            select,
+            orderby,
+            str(e),
+            exc_info=e,
+        )
+        raise
 
     logger.debug(f"Built logical plan with {len(builder.plan.nodes())} nodes for {table_name}")
 
@@ -248,31 +267,42 @@ def read_dataset(
         pass
     else:
         # Execute the logical plan using Opteryx - let errors propagate
-        arrow_table = opteryx.execute_logical_plan(
-            logical_plan
-        )  # , access_policies=access_policies)
+        try:
+            arrow_table = opteryx.execute_logical_plan(
+                logical_plan
+            )  # , access_policies=access_policies)
 
-        # Get column names from the Arrow table
-        col_names = arrow_table.column_names
-        logger.info(f"Arrow table columns: {col_names}")
-        logger.info(f"Arrow table num_rows: {arrow_table.num_rows}")
+            # Get column names from the Arrow table
+            col_names = arrow_table.column_names
+            logger.info(f"Arrow table columns: {col_names}")
+            logger.info(f"Arrow table num_rows: {arrow_table.num_rows}")
 
-        # Convert Arrow table to list of dicts
-        columns_dict = arrow_table.to_pydict()
-        logger.info(
-            f"First row sample: {[(k, columns_dict[k][0] if columns_dict[k] else None) for k in list(col_names)[:5]]}"
-        )
+            # Convert Arrow table to list of dicts
+            columns_dict = arrow_table.to_pydict()
+            logger.info(
+                f"First row sample: {[(k, columns_dict[k][0] if columns_dict[k] else None) for k in list(col_names)[:5]]}"
+            )
 
-        rows = []
-        for i in range(arrow_table.num_rows):
-            row_dict = {}
-            for col in col_names:
-                value = columns_dict[col][i]
-                # Sanitize values to ensure OData compatibility
-                row_dict[col] = _sanitize_value_for_odata(value)
-            rows.append(row_dict)
+            rows = []
+            for i in range(arrow_table.num_rows):
+                row_dict = {}
+                for col in col_names:
+                    value = columns_dict[col][i]
+                    # Sanitize values to ensure OData compatibility
+                    row_dict[col] = _sanitize_value_for_odata(value)
+                rows.append(row_dict)
 
-        logger.info(f"Created {len(rows)} rows with {len(rows[0].keys()) if rows else 0} keys")
+            logger.info(f"Created {len(rows)} rows with {len(rows[0].keys()) if rows else 0} keys")
+        except Exception as exc:
+            logger.error(
+                "Error executing logical plan for table %s with orderby=%s, filter=%s: %s",
+                table_name,
+                orderby,
+                filter,
+                str(exc),
+                exc_info=exc,
+            )
+            raise
 
     # If the client requested total count, run a separate COUNT(*) query
     want_count = False
