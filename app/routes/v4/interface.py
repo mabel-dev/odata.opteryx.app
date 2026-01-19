@@ -215,7 +215,7 @@ def execute_odata_query(
             "Unexpected error building logical plan for table %s: error=%s",
             table_name,
             str(e),
-            exc_info=e,
+            exc_info=True,
         )
         raise
 
@@ -251,7 +251,7 @@ def execute_odata_query(
                 "Error getting schema for table %s: %s",
                 table_name,
                 str(exc),
-                exc_info=exc,
+                exc_info=True,
             )
             raise
         
@@ -277,7 +277,7 @@ def execute_odata_query(
                 "Error executing count query for table %s: %s",
                 table_name,
                 str(exc),
-                exc_info=exc,
+                exc_info=True,
             )
             raise
     else:
@@ -311,7 +311,7 @@ def execute_odata_query(
                 orderby_expr,
                 filter_expr,
                 str(exc),
-                exc_info=exc,
+                exc_info=True,
             )
             raise
 
@@ -338,7 +338,7 @@ def execute_odata_query(
                     "Error executing count query for table %s: %s",
                     table_name,
                     str(exc),
-                    exc_info=exc,
+                    exc_info=True,
                 )
                 raise
 

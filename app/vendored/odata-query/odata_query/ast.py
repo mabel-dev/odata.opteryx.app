@@ -566,7 +566,14 @@ class Call(_Node):
                 )
 
         # For all other functions, create a function call node
-        return Node(node_type=NodeType.FUNCTION, value=func_name, parameters=arg_nodes)
+        # Map OData function names to SQL function names
+        sql_func_name = func_name
+        if func_name == "tolower":
+            sql_func_name = "LOWER"
+        elif func_name == "toupper":
+            sql_func_name = "UPPER"
+        
+        return Node(node_type=NodeType.FUNCTION, value=sql_func_name, parameters=arg_nodes)
 
 
 ###############################################################################
