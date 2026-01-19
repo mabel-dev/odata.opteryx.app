@@ -279,7 +279,7 @@ def _map_py_type_to_edm(py_type) -> str:
     # Default fallback
     return "Edm.String"
 
-
+@lru_cache(maxsize=512)
 def _get_dataset_schema(dataset_info: DatasetInfo) -> list[tuple[str, str]]:
     """Get dataset schema from catalog instead of querying Opteryx.
 
