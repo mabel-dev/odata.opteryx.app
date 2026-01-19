@@ -77,7 +77,7 @@ async def generic_exception_handler(request: Request, exc: Exception) -> JSONRes
     """Handle generic exceptions for v4 endpoints."""
     # Log the actual exception so we can debug it
     logger.error("Unhandled exception in %s: %s", request.url.path, str(exc), exc_info=exc)
-    
+
     # Only convert to OData format for /api/v4 requests
     if request.url.path.startswith("/api/v4"):
         return JSONResponse(

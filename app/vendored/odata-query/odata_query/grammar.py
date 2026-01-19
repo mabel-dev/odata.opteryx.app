@@ -28,6 +28,8 @@ _TIME = r"(?:[01]\d|2[0-3]):[0-5]\d(:?:[0-5]\d(?:\.\d{1,12})?)"
 
 # Defines known functions and min/max nr of args:
 ODATA_FUNCTIONS = {
+    # Logical functions
+    "not": 1,
     # String functions
     "concat": 2,
     "contains": 2,

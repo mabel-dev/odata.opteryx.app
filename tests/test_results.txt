@@ -1,0 +1,35 @@
+================================================================================
+OData Planets Test Battery - 53 Tests
+================================================================================
+
+Known Issues:
+  - $orderby parameter broken (AttributeError in binder)
+  - $select with multiple columns broken (list concatenation issue)
+  - Filter row counts may be incorrect
+  - not() function not recognized
+
+Running available tests...
+================================================================================
+FAIL #5: $planets
+  query: $top=0
+  Reason: Column count mismatch: got 0, expected 20
+FAIL #27: $planets
+  query: $select=*&$top=1
+  Reason: Query contained columns which could not be found.
+FAIL #33: $planets
+  query: $filter=mass gt 100&$top=10
+  Reason: Row count mismatch: got 3, expected 1
+FAIL #34: $planets
+  query: $filter=mass lt 10&$top=10
+  Reason: Row count mismatch: got 5, expected 8
+FAIL #35: $planets
+  query: $filter=diameter gt 10000&$top=10
+  Reason: Row count mismatch: got 6, expected 5
+
+Passed:  59/99 (59%)
+Failed:  40/99 (40%)
+Time:    0.73s
+
+Failed Tests (by category):
+
+  Unknown Functions (1 failures):
