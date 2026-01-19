@@ -400,7 +400,7 @@ def read_dataset(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=f"Invalid query: {str(e)}")
     except Exception as e:
-        logger.error("Error executing OData query for %s: %s", table_name, str(e), exc_info=e)
+        logger.error(f"Error executing OData query for {table_name}: {e}")
         raise
 
     rows = result["rows"]
