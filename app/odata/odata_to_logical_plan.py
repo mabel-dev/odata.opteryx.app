@@ -16,11 +16,6 @@ from typing import List
 from typing import Optional
 from typing import Tuple
 
-# CRITICAL: Set up vendored path BEFORE importing odata_query
-_vendored_path = str(Path(__file__).parent.parent / "vendored" / "odata-query")
-sys.path.insert(0, _vendored_path)
-
-from odata_query import ast as odata_ast
 from odata_query.grammar import ODataLexer
 from odata_query.grammar import ODataParser
 from opteryx.managers.expression import NodeType
@@ -30,7 +25,10 @@ from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import LogicalPlanNode
 from opteryx.planner.logical_planner import LogicalPlanStepType
 from orso.tools import random_string
-from orso.types import OrsoTypes
+
+# CRITICAL: Set up vendored path BEFORE importing odata_query
+_vendored_path = str(Path(__file__).parent.parent / "vendored" / "odata-query")
+sys.path.insert(0, _vendored_path)
 
 
 class ODataLogicalPlanBuilder:
@@ -90,17 +88,17 @@ class ODataLogicalPlanBuilder:
         if apply_expr:
             self.current_step_id = self._add_apply_nodes(apply_expr)
 
-        # Apply ORDER BY
+        # Apply column projection (must come before ORDER BY)
+        if select_cols:
+            self.current_step_id = self._add_project_node(select_cols, orderby_expr)
+
+        # Apply ORDER BY (after projection so ordered columns are available)
         if orderby_expr:
             self.current_step_id = self._add_order_node(orderby_expr)
 
         # Apply LIMIT and OFFSET
         if top is not None or skip is not None:
             self.current_step_id = self._add_limit_node(top, skip)
-
-        # Apply column projection (must be last before exit)
-        if select_cols:
-            self.current_step_id = self._add_project_node(select_cols)
 
         # Add exit node
         self._add_exit_node()
@@ -130,6 +128,7 @@ class ODataLogicalPlanBuilder:
         scan_node.relation = self.table_name
         scan_node.alias = self.table_name.split(".")[-1]  # Use dataset name as alias
         scan_node.hints = []
+        # Don't set columns - binder will populate it
 
         return self._add_node(scan_node)
 
@@ -155,6 +154,8 @@ class ODataLogicalPlanBuilder:
             return self.current_step_id
 
         filter_node.condition = condition
+        # Filter passes through all columns (doesn't change column set)
+        filter_node.columns = [Node(node_type=NodeType.WILDCARD)]
 
         return self._add_node(filter_node)
 
@@ -291,7 +292,27 @@ class ODataLogicalPlanBuilder:
         order_node = LogicalPlanNode(node_type=LogicalPlanStepType.Order)
 
         # Parse orderby expression: "col1 desc, col2 asc"
-        order_node.order_by = self._parse_orderby_expression(orderby_expr)
+        # _parse_orderby_expression returns List[Tuple[str, str]] of (column_name, direction)
+        orderby_tuples = self._parse_orderby_expression(orderby_expr)
+
+        # Convert to format Opteryx expects: List[Tuple[Node, bool]]
+        # where bool is True for ascending, False for descending
+        order_by_nodes = []
+        for column_name, direction in orderby_tuples:
+            # Create a LogicalColumn node for the column
+            col_node = LogicalColumn(
+                node_type=NodeType.IDENTIFIER,
+                source_column=column_name,
+                source=None,  # Will be bound during optimization
+                alias=None,
+            )
+            col_node.query_column = column_name  # Required for binder
+            # direction is "asc" or "desc", convert to boolean (True=asc, False=desc)
+            is_ascending = direction.lower() == "asc"
+            order_by_nodes.append((col_node, is_ascending))
+
+        order_node.order_by = order_by_nodes
+        # Don't set columns - binder will populate it
 
         return self._add_node(order_node)
 
@@ -313,13 +334,16 @@ class ODataLogicalPlanBuilder:
         if skip is not None:
             limit_node.offset = skip
 
+        # Don't set columns - binder will populate it
+
         return self._add_node(limit_node)
 
-    def _add_project_node(self, select_cols: str) -> str:
+    def _add_project_node(self, select_cols: str, orderby_expr: Optional[str] = None) -> str:
         """Add a Project node for column selection.
 
         Args:
             select_cols: OData $select expression (comma-separated columns)
+            orderby_expr: OData $orderby expression to determine order_by_columns
 
         Returns:
             Step ID of the project node
@@ -329,19 +353,54 @@ class ODataLogicalPlanBuilder:
 
         project_node = LogicalPlanNode(node_type=LogicalPlanStepType.Project)
 
-        # Parse select expression: "col1, col2, col3"
-        # Each column becomes a Node(NodeType.IDENTIFIER) in the project node's columns
+        # Parse select expression: "col1, col2, col3" or "*"
+        # "*" means all columns (represented as a WILDCARD node)
+        # Each column becomes a Node(NodeType.IDENTIFIER) or Node(NodeType.WILDCARD)
         columns = []
-        for col in select_cols.split(","):
-            col_name = col.strip()
-            columns.append(
-                Node(
+        selected_column_names = set()
+
+        # Check if this is a wildcard select
+        if select_cols.strip() == "*":
+            # Use WILDCARD node to represent all columns
+            wildcard_node = Node(node_type=NodeType.WILDCARD)
+            wildcard_node.except_columns = None  # No exclusions for basic wildcard
+            columns.append(wildcard_node)
+            # With wildcard, all columns are selected, so order_by_columns will be empty
+        else:
+            # Parse individual columns
+            for col in select_cols.split(","):
+                col_name = col.strip()
+                selected_column_names.add(col_name)
+                col_node = LogicalColumn(
                     node_type=NodeType.IDENTIFIER,
                     source_column=col_name,
-                    current_name=col_name,
+                    alias=None,  # OData doesn't support field aliasing in $select
                 )
-            )
+                col_node.query_column = col_name
+                columns.append(col_node)
+
         project_node.columns = columns
+
+        # Compute order_by_columns: columns in ORDER BY but not in SELECT
+        # This allows ordering by columns that aren't in the final projection
+        order_by_columns = []
+        if orderby_expr and select_cols.strip() != "*":
+            # Parse the orderby expression to extract column names
+            orderby_tuples = self._parse_orderby_expression(orderby_expr)
+            for col_name, _ in orderby_tuples:
+                if col_name not in selected_column_names:
+                    # This column is needed for ordering but not in projection
+                    col_node = LogicalColumn(
+                        node_type=NodeType.IDENTIFIER,
+                        source_column=col_name,
+                        alias=None,
+                    )
+                    col_node.query_column = col_name
+                    order_by_columns.append(col_node)
+
+        project_node.order_by_columns = order_by_columns
+        # Initialize except_columns as empty list (for EXCEPT modifier if needed)
+        project_node.except_columns = []
 
         return self._add_node(project_node)
 
@@ -385,171 +444,12 @@ class ODataLogicalPlanBuilder:
         return self._odata_ast_to_opteryx_node(ast)
 
     def _odata_ast_to_opteryx_node(self, ast_node) -> Node:
-        """Recursively convert OData AST nodes to Opteryx expression nodes.
+        """Convert OData AST to Opteryx node using the AST node's built-in method."""
+        if ast_node is None:
+            return None
 
-        Supports:
-        - Comparisons: eq, ne, gt, ge, lt, le
-        - Logical operators: and, or, not
-        - Functions: contains, startswith, endswith
-        - Literals: String, Integer, Float, Boolean, Null
-        - Identifiers: Column/field names
-        """
-        # Handle Comparison nodes (eq, ne, gt, lt, ge, le)
-        if isinstance(ast_node, odata_ast.Compare):
-            left_node = self._odata_ast_to_opteryx_node(ast_node.left)
-            right_node = self._odata_ast_to_opteryx_node(ast_node.right)
-
-            # Map OData comparators to Opteryx operator names
-            comparator = ast_node.comparator
-            if isinstance(comparator, odata_ast.Eq):
-                op_name = "Eq"
-                op_type = NodeType.COMPARISON_OPERATOR
-            elif isinstance(comparator, odata_ast.NotEq):
-                op_name = "NotEq"
-                op_type = NodeType.COMPARISON_OPERATOR
-            elif isinstance(comparator, odata_ast.Gt):
-                op_name = "Gt"
-                op_type = NodeType.COMPARISON_OPERATOR
-            elif isinstance(comparator, odata_ast.GtE):
-                op_name = "GtEq"
-                op_type = NodeType.COMPARISON_OPERATOR
-            elif isinstance(comparator, odata_ast.Lt):
-                op_name = "Lt"
-                op_type = NodeType.COMPARISON_OPERATOR
-            elif isinstance(comparator, odata_ast.LtE):
-                op_name = "LtEq"
-                op_type = NodeType.COMPARISON_OPERATOR
-            else:
-                raise ValueError(f"Unsupported comparator: {comparator}")
-
-            return Node(
-                node_type=op_type,
-                value=op_name,
-                left=left_node,
-                right=right_node,
-            )
-
-        # Handle BoolOp nodes (and, or)
-        if isinstance(ast_node, odata_ast.BoolOp):
-            left_node = self._odata_ast_to_opteryx_node(ast_node.left)
-            right_node = self._odata_ast_to_opteryx_node(ast_node.right)
-
-            if isinstance(ast_node.op, odata_ast.And):
-                operator_type = NodeType.AND
-                operator = "And"
-            elif isinstance(ast_node.op, odata_ast.Or):
-                operator_type = NodeType.OR
-                operator = "Or"
-            else:
-                raise ValueError(f"Unsupported boolean operator: {ast_node.op}")
-
-            return Node(
-                operator_type,
-                value=operator,
-                left=left_node,
-                right=right_node,
-            )
-
-        # Handle UnaryOp nodes (not)
-        if isinstance(ast_node, odata_ast.UnaryOp):
-            operand_node = self._odata_ast_to_opteryx_node(ast_node.operand)
-
-            if isinstance(ast_node.op, odata_ast.Not):
-                return Node(
-                    node_type=NodeType.NOT,
-                    value="Not",
-                    centre=operand_node,
-                )
-            else:
-                raise ValueError(f"Unsupported unary operator: {ast_node.op}")
-
-        # Handle function calls (contains, startswith, endswith)
-        if isinstance(ast_node, odata_ast.Call):
-            if not ast_node.func or not ast_node.func.name:
-                raise ValueError("Function call missing name")
-            func_name = ast_node.func.name.lower()  # OData functions are case-insensitive
-            args = [self._odata_ast_to_opteryx_node(arg) for arg in ast_node.args]
-
-            if func_name in ("contains", "startswith", "endswith"):
-                # These are string functions
-                # contains(str, substring) → str LIKE %substring%
-                # startswith(str, prefix) → str LIKE prefix%
-                # endswith(str, suffix) → str LIKE %suffix%
-                if len(args) != 2:
-                    raise ValueError(f"{func_name}() expects 2 arguments, got {len(args)}")
-
-                field_node = args[0]
-                pattern_node = args[1]
-
-                if func_name == "contains":
-                    op_name = "Like"
-                elif func_name == "startswith":
-                    op_name = "Like"
-                elif func_name == "endswith":
-                    op_name = "Like"
-
-                return Node(
-                    node_type=NodeType.COMPARISON_OPERATOR,
-                    value=op_name,
-                    left=field_node,
-                    right=pattern_node,
-                )
-            else:
-                raise ValueError(f"Unsupported function: {func_name}()")
-
-        # Handle Identifier nodes (column/field references)
-        if isinstance(ast_node, odata_ast.Identifier):
-            if not ast_node.name:
-                raise ValueError("Identifier missing name")
-            # Use LogicalColumn to match what the SQL parser creates
-            return LogicalColumn(
-                node_type=NodeType.IDENTIFIER,
-                source_column=ast_node.name,
-                source=None,  # Will be bound during optimization
-                alias=None,
-            )
-
-        # Handle String literals
-        if isinstance(ast_node, odata_ast.String):
-            return Node(
-                node_type=NodeType.LITERAL,
-                type=OrsoTypes.VARCHAR,
-                value=ast_node.val,
-            )
-
-        # Handle Integer literals
-        if isinstance(ast_node, odata_ast.Integer):
-            return Node(
-                node_type=NodeType.LITERAL,
-                type=OrsoTypes.INTEGER,
-                value=int(ast_node.val),
-            )
-
-        # Handle Float literals
-        if isinstance(ast_node, odata_ast.Float):
-            return Node(
-                node_type=NodeType.LITERAL,
-                type=OrsoTypes.DOUBLE,
-                value=float(ast_node.val),
-            )
-
-        # Handle Boolean literals
-        if isinstance(ast_node, odata_ast.Boolean):
-            return Node(
-                node_type=NodeType.LITERAL,
-                type=OrsoTypes.BOOLEAN,
-                value=(ast_node.val.lower() == "true") if ast_node.val else False,
-            )
-
-        # Handle Null literals
-        if isinstance(ast_node, odata_ast.Null):
-            return Node(
-                node_type=NodeType.LITERAL,
-                type=OrsoTypes.NULL,
-                value=None,
-            )
-
-        raise ValueError(f"Unsupported OData AST node type: {type(ast_node).__name__}")
+        # Use the AST node's own conversion method
+        return ast_node.to_opteryx_node()
 
     def _parse_orderby_expression(self, orderby_expr: str) -> List[Tuple[str, str]]:
         """Parse OData $orderby expression into column/direction tuples.
@@ -595,6 +495,34 @@ class ODataLogicalPlanBuilder:
             The LogicalPlan ready for Opteryx optimization
         """
         return self.plan
+
+    def _print_ast(self, node, indent=0):
+        """Recursively print AST node structure for debugging."""
+        prefix = "  " * indent
+        if node is None:
+            print(f"{prefix}None")
+            return
+
+        node_type = type(node).__name__
+        print(f"{prefix}{node_type}")
+
+        # Print relevant attributes based on node type
+        if hasattr(node, "__dict__"):
+            for key, value in node.__dict__.items():
+                if key.startswith("_"):
+                    continue
+                if isinstance(value, (str, int, float, bool)):
+                    print(f"{prefix}  {key}: {value}")
+                elif isinstance(value, list):
+                    if value:
+                        print(f"{prefix}  {key}:")
+                        for item in value:
+                            self._print_ast(item, indent + 2)
+                elif hasattr(value, "__dict__"):
+                    print(f"{prefix}  {key}:")
+                    self._print_ast(value, indent + 2)
+                else:
+                    print(f"{prefix}  {key}: {type(value).__name__}")
 
     def __repr__(self) -> str:
         return f"ODataLogicalPlanBuilder(table={self.table_name}, nodes={len(self.plan.nodes())})"

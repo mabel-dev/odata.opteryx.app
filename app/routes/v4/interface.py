@@ -132,6 +132,172 @@ def _sanitize_value_for_odata(value: Any) -> Any:
 
 
 def _map_py_type_to_edm(py_type: type) -> str:
+    try:
+        import uuid as _uuid
+    except Exception:
+        _uuid = None
+
+    if py_type is int:
+        return "Edm.Int64"
+    if py_type is float:
+        return "Edm.Double"
+    if py_type is bool:
+        return "Edm.Boolean"
+    if py_type is str:
+        return "Edm.String"
+
+
+def execute_odata_query(
+    table_name: str,
+    filter_expr: Optional[str] = None,
+    orderby_expr: Optional[str] = None,
+    select_cols: Optional[str] = None,
+    top: Optional[int] = None,
+    skip: Optional[int] = None,
+    count_requested: bool = False,
+) -> dict:
+    """Execute an OData query and return results.
+
+    This is the core logic extracted from read_dataset for easier unit testing.
+    It doesn't require authentication, request objects, or response headers.
+
+    Args:
+        table_name: Full table name (e.g., "workstream.collection.dataset")
+        filter_expr: OData $filter expression
+        orderby_expr: OData $orderby expression
+        select_cols: OData $select columns
+        top: $top limit (1-10000, default: DEFAULT_TOP)
+        skip: $skip offset
+        count_requested: Whether to include total count
+
+    Returns:
+        dict with keys:
+            - rows: list of dicts containing the result rows
+            - col_names: list of column names
+            - total_count: total count (if requested), None otherwise
+            - took_ms: execution time in milliseconds
+
+    Raises:
+        ValueError: If OData query is invalid
+        Exception: If execution fails
+    """
+    import time
+
+    start_time = time.time()
+
+    # Set defaults
+    if top is None:
+        top = DEFAULT_TOP
+
+    # Build logical plan from OData parameters
+    builder = ODataLogicalPlanBuilder(table_name)
+    try:
+        logical_plan = builder.build(
+            filter_expr=filter_expr,
+            select_cols=select_cols,
+            orderby_expr=orderby_expr,
+            top=top,
+            skip=skip,
+            apply_expr=None,
+        )
+    except ValueError as e:
+        logger.error(
+            "Failed to build logical plan for table %s: filter=%s, select=%s, orderby=%s, error=%s",
+            table_name,
+            filter_expr,
+            select_cols,
+            orderby_expr,
+            str(e),
+        )
+        raise
+    except Exception as e:
+        logger.error(
+            "Unexpected error building logical plan for table %s: error=%s",
+            table_name,
+            str(e),
+            exc_info=e,
+        )
+        raise
+
+    logger.debug(f"Built logical plan with {len(builder.plan.nodes())} nodes for {table_name}")
+
+    # Execute the logical plan using Opteryx
+    rows = []
+    col_names = []
+
+    try:
+        arrow_table = opteryx.execute_logical_plan(logical_plan)
+
+        # Get column names from the Arrow table
+        col_names = arrow_table.column_names
+        logger.debug(f"Arrow table columns: {col_names}")
+        logger.debug(f"Arrow table num_rows: {arrow_table.num_rows}")
+
+        # Convert Arrow table to list of dicts
+        # Even if top=0, we still need to get the schema from the Arrow table
+        columns_dict = arrow_table.to_pydict()
+
+        rows = []
+        for i in range(arrow_table.num_rows):
+            row_dict = {}
+            for col in col_names:
+                value = columns_dict[col][i]
+                # Sanitize values to ensure OData compatibility
+                row_dict[col] = _sanitize_value_for_odata(value)
+            rows.append(row_dict)
+
+        logger.debug(f"Created {len(rows)} rows with {len(rows[0].keys()) if rows else 0} keys")
+
+    except Exception as exc:
+        logger.error(
+            "Error executing logical plan for table %s with orderby=%s, filter=%s: %s",
+            table_name,
+            orderby_expr,
+            filter_expr,
+            str(exc),
+            exc_info=exc,
+        )
+        raise
+
+    # Get total count if requested
+    total_count = None
+    if count_requested:
+        try:
+            count_builder = ODataLogicalPlanBuilder(table_name)
+            count_plan = count_builder.build(
+                filter_expr=filter_expr,
+                select_cols=None,
+                orderby_expr=None,
+                top=None,
+                skip=None,
+                apply_expr=None,
+            )
+
+            arrow_table = opteryx.execute_logical_plan(count_plan)
+            total_count = arrow_table.num_rows
+            logger.debug(f"Count query result: {total_count}")
+
+        except Exception as exc:
+            logger.error(
+                "Error executing count query for table %s: %s",
+                table_name,
+                str(exc),
+                exc_info=exc,
+            )
+            raise
+
+    elapsed_ms = (time.time() - start_time) * 1000
+
+    return {
+        "rows": rows,
+        "col_names": col_names,
+        "total_count": total_count,
+        "took_ms": elapsed_ms,
+    }
+
+
+def _map_py_type_to_edm_complete(py_type: type) -> str:
+    """Map Python types to OData EDM types."""
     import datetime as _dt
     import decimal as _dec
 
@@ -190,13 +356,6 @@ def read_dataset(
     # Set OData-Version header
     response.headers["OData-Version"] = "4.0"
 
-    logger.info(
-        f"read_dataset called with: filter={filter}, top={top}, skip={skip}, orderby={orderby}, select={select}"
-    )
-
-    # Extract claims from request state (set by require_authentication dependency)
-    claims = getattr(request.state, "claims", {})
-
     table_name = f"{workstream}.{collection}.{dataset}"
 
     # Parse and validate $top parameter
@@ -216,95 +375,7 @@ def read_dataset(
         if not (1 <= top <= 10000):
             raise HTTPException(status_code=400, detail="$top must be between 1 and 10000")
 
-    # Get access policies from JWT claims for Opteryx authorization
-    access_policies = get_access_policies_from_claims(claims)
-
-    # Build logical plan from OData parameters
-    # This converts $filter, $select, $orderby, $top/$skip to Opteryx logical plan
-    builder = ODataLogicalPlanBuilder(table_name)
-    try:
-        logical_plan = builder.build(
-            filter_expr=filter,
-            select_cols=select,
-            orderby_expr=orderby,
-            top=top,
-            skip=skip,
-            apply_expr=None,  # $apply not yet exposed in OData endpoint
-        )
-    except ValueError as e:
-        logger.error(
-            "Failed to build logical plan for table %s: filter=%s, select=%s, orderby=%s, error=%s",
-            table_name,
-            filter,
-            select,
-            orderby,
-            str(e),
-        )
-        raise HTTPException(status_code=400, detail=f"Invalid query: {str(e)}")
-    except Exception as e:
-        logger.error(
-            "Unexpected error building logical plan for table %s: filter=%s, select=%s, orderby=%s, error=%s",
-            table_name,
-            filter,
-            select,
-            orderby,
-            str(e),
-            exc_info=e,
-        )
-        raise
-
-    logger.debug(f"Built logical plan with {len(builder.plan.nodes())} nodes for {table_name}")
-
-    logger.debug(
-        f"Executing logical plan for table={table_name} with {len(access_policies)} access policies for identity={claims.get('identity', 'unknown')}"
-    )
-
-    # Execute the logical plan using Opteryx
-    rows = []
-    col_names = []
-    if top == 0:
-        # Skip the data query if $top=0 (only valid with $count=true)
-        pass
-    else:
-        # Execute the logical plan using Opteryx - let errors propagate
-        try:
-            arrow_table = opteryx.execute_logical_plan(
-                logical_plan
-            )  # , access_policies=access_policies)
-
-            # Get column names from the Arrow table
-            col_names = arrow_table.column_names
-            logger.info(f"Arrow table columns: {col_names}")
-            logger.info(f"Arrow table num_rows: {arrow_table.num_rows}")
-
-            # Convert Arrow table to list of dicts
-            columns_dict = arrow_table.to_pydict()
-            logger.info(
-                f"First row sample: {[(k, columns_dict[k][0] if columns_dict[k] else None) for k in list(col_names)[:5]]}"
-            )
-
-            rows = []
-            for i in range(arrow_table.num_rows):
-                row_dict = {}
-                for col in col_names:
-                    value = columns_dict[col][i]
-                    # Sanitize values to ensure OData compatibility
-                    row_dict[col] = _sanitize_value_for_odata(value)
-                rows.append(row_dict)
-
-            logger.info(f"Created {len(rows)} rows with {len(rows[0].keys()) if rows else 0} keys")
-        except Exception as exc:
-            logger.error(
-                "Error executing logical plan for table %s with orderby=%s, filter=%s: %s",
-                table_name,
-                orderby,
-                filter,
-                str(exc),
-                exc_info=exc,
-            )
-            raise
-
-    # If the client requested total count, run a separate COUNT(*) query
+    # Parse count parameter
     want_count = False
     if count is not None:
         try:
@@ -315,27 +386,26 @@ def read_dataset(
         except Exception:
             want_count = False
 
-    total_count: Optional[int] = None
-    if want_count:
-        # Build a count query using a separate logical plan
-        count_builder = ODataLogicalPlanBuilder(table_name)
-        count_plan = count_builder.build(
+    # Execute the OData query using the core function
+    try:
+        result = execute_odata_query(
+            table_name=table_name,
             filter_expr=filter,
-            select_cols=None,  # No select needed for count
-            orderby_expr=None,  # No order by needed for count
-            top=None,
-            skip=None,
-            apply_expr=None,
+            orderby_expr=orderby,
+            select_cols=select,
+            top=top,
+            skip=skip,
+            count_requested=want_count,
         )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid query: {str(e)}")
+    except Exception as e:
+        logger.error("Error executing OData query for %s: %s", table_name, str(e), exc_info=e)
+        raise
 
-        logger.debug(
-            f"Built count logical plan with {len(count_builder.plan.nodes())} nodes for {table_name}"
-        )
-
-        # Execute the count logical plan - let errors propagate
-        arrow_table = opteryx.execute_logical_plan(count_plan)  # , access_policies=access_policies)
-        total_count = arrow_table.num_rows
-        logger.info(f"Count query result: {total_count}")
+    rows = result["rows"]
+    col_names = result["col_names"]
+    total_count = result["total_count"]
 
     # All paging (LIMIT/OFFSET) should have been pushed down to SQL when
     # possible; no Python-side slicing is necessary.

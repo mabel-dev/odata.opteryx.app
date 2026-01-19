@@ -27,7 +27,9 @@ class TokenizingException(ODataSyntaxError):
 
     def __init__(self, token: Token):
         self.token = token
-        super().__init__(f"Failed to tokenize at: {token}")
+        # Format token manually to avoid AttributeError on 'end' attribute
+        token_str = f"Token(type={token.type!r}, value={token.value!r})"
+        super().__init__(f"Failed to tokenize at: {token_str}")
 
 
 class ParsingException(ODataSyntaxError):
