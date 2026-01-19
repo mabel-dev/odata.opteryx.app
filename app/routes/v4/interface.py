@@ -225,43 +225,40 @@ def execute_odata_query(
     rows = []
     col_names = []
 
-    try:
-        arrow_table = opteryx.execute_logical_plan(logical_plan)
-
-        # Get column names from the Arrow table
-        col_names = arrow_table.column_names
-        logger.debug(f"Arrow table columns: {col_names}")
-        logger.debug(f"Arrow table num_rows: {arrow_table.num_rows}")
-
-        # Convert Arrow table to list of dicts
-        # Even if top=0, we still need to get the schema from the Arrow table
-        columns_dict = arrow_table.to_pydict()
-
+    # Optimization: when top=0 and count is requested, skip the data query
+    # and only run the count query to get the total, then get schema separately
+    if top == 0 and count_requested:
+        logger.debug("Optimizing: top=0 with count_requested, fetching count and schema only")
+        
+        total_count = None
+        
+        # Get schema by running a query with top=1
+        try:
+            schema_builder = ODataLogicalPlanBuilder(table_name)
+            schema_plan = schema_builder.build(
+                filter_expr=filter_expr,
+                select_cols=select_cols,
+                orderby_expr=None,
+                top=1,
+                skip=None,
+                apply_expr=None,
+            )
+            schema_table = opteryx.execute_logical_plan(schema_plan)
+            col_names = schema_table.column_names
+            logger.debug(f"Got schema from query: {col_names}")
+        except Exception as exc:
+            logger.error(
+                "Error getting schema for table %s: %s",
+                table_name,
+                str(exc),
+                exc_info=exc,
+            )
+            raise
+        
+        # rows stays empty since top=0
         rows = []
-        for i in range(arrow_table.num_rows):
-            row_dict = {}
-            for col in col_names:
-                value = columns_dict[col][i]
-                # Sanitize values to ensure OData compatibility
-                row_dict[col] = _sanitize_value_for_odata(value)
-            rows.append(row_dict)
-
-        logger.debug(f"Created {len(rows)} rows with {len(rows[0].keys()) if rows else 0} keys")
-
-    except Exception as exc:
-        logger.error(
-            "Error executing logical plan for table %s with orderby=%s, filter=%s: %s",
-            table_name,
-            orderby_expr,
-            filter_expr,
-            str(exc),
-            exc_info=exc,
-        )
-        raise
-
-    # Get total count if requested
-    total_count = None
-    if count_requested:
+        
+        # Get total count
         try:
             count_builder = ODataLogicalPlanBuilder(table_name)
             count_plan = count_builder.build(
@@ -272,11 +269,9 @@ def execute_odata_query(
                 skip=None,
                 apply_expr=None,
             )
-
-            arrow_table = opteryx.execute_logical_plan(count_plan)
-            total_count = arrow_table.num_rows
+            count_table = opteryx.execute_logical_plan(count_plan)
+            total_count = count_table.num_rows
             logger.debug(f"Count query result: {total_count}")
-
         except Exception as exc:
             logger.error(
                 "Error executing count query for table %s: %s",
@@ -285,6 +280,67 @@ def execute_odata_query(
                 exc_info=exc,
             )
             raise
+    else:
+        # Normal path: execute the logical plan with the specified top value
+        try:
+            arrow_table = opteryx.execute_logical_plan(logical_plan)
+
+            # Get column names from the Arrow table
+            col_names = arrow_table.column_names
+            logger.debug(f"Arrow table columns: {col_names}")
+            logger.debug(f"Arrow table num_rows: {arrow_table.num_rows}")
+
+            # Convert Arrow table to list of dicts
+            columns_dict = arrow_table.to_pydict()
+
+            rows = []
+            for i in range(arrow_table.num_rows):
+                row_dict = {}
+                for col in col_names:
+                    value = columns_dict[col][i]
+                    # Sanitize values to ensure OData compatibility
+                    row_dict[col] = _sanitize_value_for_odata(value)
+                rows.append(row_dict)
+
+            logger.debug(f"Created {len(rows)} rows with {len(rows[0].keys()) if rows else 0} keys")
+
+        except Exception as exc:
+            logger.error(
+                "Error executing logical plan for table %s with orderby=%s, filter=%s: %s",
+                table_name,
+                orderby_expr,
+                filter_expr,
+                str(exc),
+                exc_info=exc,
+            )
+            raise
+
+        # Get total count if requested
+        total_count = None
+        if count_requested:
+            try:
+                count_builder = ODataLogicalPlanBuilder(table_name)
+                count_plan = count_builder.build(
+                    filter_expr=filter_expr,
+                    select_cols=None,
+                    orderby_expr=None,
+                    top=None,
+                    skip=None,
+                    apply_expr=None,
+                )
+
+                arrow_table = opteryx.execute_logical_plan(count_plan)
+                total_count = arrow_table.num_rows
+                logger.debug(f"Count query result: {total_count}")
+
+            except Exception as exc:
+                logger.error(
+                    "Error executing count query for table %s: %s",
+                    table_name,
+                    str(exc),
+                    exc_info=exc,
+                )
+                raise
 
     elapsed_ms = (time.time() - start_time) * 1000
 
