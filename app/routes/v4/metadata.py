@@ -14,6 +14,7 @@ from fastapi import status
 from google.cloud.firestore_v1.base_query import FieldFilter
 from opteryx_catalog import OpteryxCatalog
 from orso.logging import get_logger
+from functools import lru_cache
 
 from app.auth.deps import require_authentication
 from app.core import _get_firestore_client

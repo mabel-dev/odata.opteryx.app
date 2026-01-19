@@ -33,6 +33,7 @@ class AuditMiddleware(BaseHTTPMiddleware):
             payload = {
                 "method": request.method,
                 "path": request.url.path,
+                "query": request.url.query or None,
                 "status": status,
                 "duration_ms": duration_ms,
                 "from": xff,
