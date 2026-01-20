@@ -258,7 +258,7 @@ def execute_odata_query(
         # rows stays empty since top=0
         rows = []
         
-        # Get total count
+        # Get total count via an explicit COUNT(*) aggregation (more efficient)
         try:
             count_builder = ODataLogicalPlanBuilder(table_name)
             count_plan = count_builder.build(
@@ -268,13 +268,19 @@ def execute_odata_query(
                 top=None,
                 skip=None,
                 apply_expr=None,
+                count_only=True,
             )
             count_table = opteryx.execute_logical_plan(count_plan)
-            total_count = count_table.num_rows
-            logger.debug(f"Count query result: {total_count}")
+            # Extract the count from the aggregation result (single-row, single-col)
+            if count_table.num_rows == 0:
+                total_count = 0
+            else:
+                cnt_col = count_table.column_names[0]
+                total_count = int(count_table.to_pydict()[cnt_col][0])
+            logger.debug(f"Count(*) query result: {total_count}")
         except Exception as exc:
             logger.error(
-                "Error executing count query for table %s: %s",
+                "Error executing count(*) query for table %s: %s",
                 table_name,
                 str(exc),
                 exc_info=True,
@@ -327,15 +333,19 @@ def execute_odata_query(
                     top=None,
                     skip=None,
                     apply_expr=None,
+                    count_only=True,
                 )
-
                 arrow_table = opteryx.execute_logical_plan(count_plan)
-                total_count = arrow_table.num_rows
-                logger.debug(f"Count query result: {total_count}")
+                if arrow_table.num_rows == 0:
+                    total_count = 0
+                else:
+                    cnt_col = arrow_table.column_names[0]
+                    total_count = int(arrow_table.to_pydict()[cnt_col][0])
+                logger.debug(f"Count(*) query result: {total_count}")
 
             except Exception as exc:
                 logger.error(
-                    "Error executing count query for table %s: %s",
+                    "Error executing count(*) query for table %s: %s",
                     table_name,
                     str(exc),
                     exc_info=True,

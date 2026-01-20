@@ -229,14 +229,18 @@ def get_service_document(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing token identity"
         )
 
-    # Get normalized permissions: list of (role, pattern) tuples
-    permissions = claims.get("permissions", [])
+    # Determine access policies from JWT "policies" claim (do not rely on a "permissions" key).
+    from app.auth.permissions import get_access_policies_from_claims
 
-    # Group permissions by workspace (extract workspace from patterns like "benchmarks.*")
+    access_policies_list = get_access_policies_from_claims(claims)
+
+    # Group access policies by workspace (extract workspace from patterns like "benchmarks.*")
     access_policies: dict[str, list[str]] = {}  # workspace -> [roles]
-    for role, pattern in permissions:
-        # Extract workspace from pattern (e.g., "benchmarks.*" -> "benchmarks")
-        # Pattern could be "workspace.*" or "workspace.collection.*"
+    for p in access_policies_list:
+        role = p.get("role")
+        pattern = p.get("pattern")
+        if not role or not pattern:
+            continue
         workspace = pattern.split(".")[0] if "." in pattern else pattern
         access_policies.setdefault(workspace, []).append(role)
 
