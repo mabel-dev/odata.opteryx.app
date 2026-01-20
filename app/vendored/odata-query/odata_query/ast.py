@@ -276,10 +276,20 @@ class List(_Literal):
         from opteryx.models import Node
         from orso.types import OrsoTypes
 
-        # Convert each element to an Opteryx node
+        # Convert each element to a node, then extract Python values
         element_nodes = [item.to_opteryx_node() for item in self.val]
-        # Return an array literal containing the elements
-        return Node(NodeType.LITERAL, type=OrsoTypes.ARRAY, value=element_nodes)
+        value_list = [node.value for node in element_nodes]
+        
+        # Determine the element type (all elements should have the same type)
+        element_types = {node.type for node in element_nodes}
+        element_type = element_types.pop() if len(element_types) == 1 else OrsoTypes.VARCHAR
+        
+        return Node(
+            node_type=NodeType.LITERAL,
+            type=OrsoTypes.ARRAY,
+            element_type=element_type,
+            value=value_list
+        )
 
 
 ###############################################################################
@@ -320,6 +330,28 @@ class BinOp(_Node):
     op: _BinOpToken
     left: _Node
     right: _Node
+
+    def to_opteryx_node(self):
+        """Convert a binary arithmetic expression to an Opteryx BINARY_OPERATOR node."""
+        from opteryx.managers.expression import NodeType
+        from opteryx.models import Node
+
+        left_node = self.left.to_opteryx_node()
+        right_node = self.right.to_opteryx_node()
+
+        op_map = {
+            "Add": "Plus",
+            "Sub": "Minus",
+            "Mult": "Multiply",
+            "Div": "Divide",
+            "Mod": "Modulo",
+        }
+
+        op_name = op_map.get(type(self.op).__name__)
+        if op_name is None:
+            raise ValueError(f"Unknown binary operator: {type(self.op).__name__}")
+
+        return Node(node_type=NodeType.BINARY_OPERATOR, value=op_name, left=left_node, right=right_node)
 
 
 ###############################################################################
@@ -385,6 +417,26 @@ class Compare(_Node):
             elif isinstance(self.comparator, NotEq):
                 return Node(node_type=NodeType.UNARY_OPERATOR, value="IsNotNull", centre=left_node)
 
+        # Special-case IN: expand `col IN (a,b,c)` into `col = a OR col = b OR col = c`
+        if isinstance(self.comparator, In) and isinstance(self.right, List):
+            # Build equality comparisons for each element
+            element_nodes = [elem.to_opteryx_node() for elem in self.right.val]
+            eq_nodes = [
+                Node(node_type=NodeType.COMPARISON_OPERATOR, value="Eq", left=left_node, right=en)
+                for en in element_nodes
+            ]
+
+            # Fold into a chain of ORs
+            if not eq_nodes:
+                # Empty IN () should be false
+                from orso.types import OrsoTypes
+                return Node(node_type=NodeType.COMPARISON_OPERATOR, value="Eq", left=left_node, right=Node(node_type=NodeType.LITERAL, type=OrsoTypes.BOOLEAN, value=False))
+
+            result = eq_nodes[0]
+            for en in eq_nodes[1:]:
+                result = Node(node_type=NodeType.OR, value="Or", left=result, right=en)
+            return result
+
         # Map comparator types to operator names
         comparator_map = {
             "Eq": "Eq",
@@ -393,7 +445,7 @@ class Compare(_Node):
             "LtE": "LtEq",
             "Gt": "Gt",
             "GtE": "GtEq",
-            "In": "In",
+            # "In" handled specially above
         }
 
         op_name = comparator_map.get(type(self.comparator).__name__)
@@ -514,6 +566,55 @@ class Call(_Node):
         if func_name == "not" and len(arg_nodes) == 1:
             return Node(node_type=NodeType.NOT, centre=arg_nodes[0])
 
+        # Handle indexof specially - needs parameter swap and adjustment
+        # OData: indexof(string, substring) returns 0-based index, -1 if not found
+        # SQL: POSITION(substring IN string) returns 1-based index, 0 if not found
+        # Conversion: POSITION(substring, string) - 1
+        if func_name == "indexof" and len(arg_nodes) == 2:
+            # Swap parameters: indexof(string, substring) → POSITION(substring, string)
+            string_node = arg_nodes[0]
+            substring_node = arg_nodes[1]
+            
+            # Create POSITION(substring, string) call
+            position_call = Node(
+                node_type=NodeType.FUNCTION,
+                value="POSITION",
+                parameters=[substring_node, string_node]
+            )
+            
+            # Subtract 1 to convert from 1-based to 0-based (POSITION(...) - 1)
+            from orso.types import OrsoTypes
+            return Node(
+                node_type=NodeType.BINARY_OPERATOR,
+                value="Minus",
+                left=position_call,
+                right=Node(node_type=NodeType.LITERAL, type=OrsoTypes.INTEGER, value=1)
+            )
+
+        # Handle substring specially - OData is 0-based, SQL is 1-based
+        # OData: substring(string, start, length) where start is 0-based
+        # SQL: SUBSTRING(string, start, length) where start is 1-based
+        # Conversion: SUBSTRING(string, start+1, length)
+        if func_name == "substring" and len(arg_nodes) >= 2:
+            string_node = arg_nodes[0]
+            start_node = arg_nodes[1]
+            
+            # Add 1 to start position to convert from 0-based to 1-based
+            from orso.types import OrsoTypes
+            adjusted_start = Node(
+                node_type=NodeType.BINARY_OPERATOR,
+                value="Plus",
+                left=start_node,
+                right=Node(node_type=NodeType.LITERAL, type=OrsoTypes.INTEGER, value=1)
+            )
+            
+            # Build parameter list with adjusted start
+            params = [string_node, adjusted_start]
+            if len(arg_nodes) > 2:  # If length is provided
+                params.append(arg_nodes[2])
+            
+            return Node(node_type=NodeType.FUNCTION, value="SUBSTRING", parameters=params)
+
         # Convert startswith, endswith, contains to LIKE operators
         if func_name == "startswith" and len(arg_nodes) == 2:
             # startswith(field, 'value') → field LIKE 'value%'
@@ -566,12 +667,30 @@ class Call(_Node):
                 )
 
         # For all other functions, create a function call node
-        # Map OData function names to SQL function names
-        sql_func_name = func_name
-        if func_name == "tolower":
-            sql_func_name = "LOWER"
-        elif func_name == "toupper":
-            sql_func_name = "UPPER"
+        # Map OData function names to SQL/Opteryx function names
+        sql_func_name = func_name.upper()  # Default: uppercase the function name
+        
+        # Explicit mappings for OData functions → Opteryx functions
+        odata_to_sql_functions = {
+            "tolower": "LOWER",
+            "toupper": "UPPER",
+            "length": "LENGTH",
+            # indexof handled specially above (parameter swap + 0-based adjustment)
+            # substring handled specially above (0-based → 1-based start position)
+            "concat": "CONCAT",
+            "trim": "TRIM",
+            "year": "YEAR",
+            "month": "MONTH",
+            "day": "DAY",
+            "hour": "HOUR",
+            "minute": "MINUTE",
+            "second": "SECOND",
+            "round": "ROUND",
+            "floor": "FLOOR",
+            "ceiling": "CEIL",  # Note: SQL uses CEIL, not CEILING
+        }
+        
+        sql_func_name = odata_to_sql_functions.get(func_name, sql_func_name)
         
         return Node(node_type=NodeType.FUNCTION, value=sql_func_name, parameters=arg_nodes)
 
