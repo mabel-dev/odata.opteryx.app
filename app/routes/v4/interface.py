@@ -201,22 +201,10 @@ def execute_odata_query(
             apply_expr=None,
         )
     except ValueError as e:
-        logger.error(
-            "Failed to build logical plan for table %s: filter=%s, select=%s, orderby=%s, error=%s",
-            table_name,
-            filter_expr,
-            select_cols,
-            orderby_expr,
-            str(e),
-        )
+        logger.error(f"Failed to build logical plan for table {table_name}: filter={filter_expr}, select={select_cols}, orderby={orderby_expr}, error={e}")
         raise
     except Exception as e:
-        logger.error(
-            "Unexpected error building logical plan for table %s: error=%s",
-            table_name,
-            str(e),
-            exc_info=True,
-        )
+        logger.exception(f"Unexpected error building logical plan for table {table_name}: error={e}")
         raise
 
     logger.debug(f"Built logical plan with {len(builder.plan.nodes())} nodes for {table_name}")
@@ -247,12 +235,7 @@ def execute_odata_query(
             col_names = schema_table.column_names
             logger.debug(f"Got schema from query: {col_names}")
         except Exception as exc:
-            logger.error(
-                "Error getting schema for table %s: %s",
-                table_name,
-                str(exc),
-                exc_info=True,
-            )
+            logger.exception(f"Error getting schema for table {table_name}: {exc}")
             raise
         
         # rows stays empty since top=0
@@ -279,12 +262,7 @@ def execute_odata_query(
                 total_count = int(count_table.to_pydict()[cnt_col][0])
             logger.debug(f"Count(*) query result: {total_count}")
         except Exception as exc:
-            logger.error(
-                "Error executing count(*) query for table %s: %s",
-                table_name,
-                str(exc),
-                exc_info=True,
-            )
+            logger.exception(f"Error executing count(*) query for table {table_name}: {exc}")
             raise
     else:
         # Normal path: execute the logical plan with the specified top value
@@ -311,14 +289,7 @@ def execute_odata_query(
             logger.debug(f"Created {len(rows)} rows with {len(rows[0].keys()) if rows else 0} keys")
 
         except Exception as exc:
-            logger.error(
-                "Error executing logical plan for table %s with orderby=%s, filter=%s: %s",
-                table_name,
-                orderby_expr,
-                filter_expr,
-                str(exc),
-                exc_info=True,
-            )
+            logger.exception(f"Error executing logical plan for table {table_name} with orderby={orderby_expr}, filter={filter_expr}: {exc}")
             raise
 
         # Get total count if requested
@@ -344,12 +315,7 @@ def execute_odata_query(
                 logger.debug(f"Count(*) query result: {total_count}")
 
             except Exception as exc:
-                logger.error(
-                    "Error executing count(*) query for table %s: %s",
-                    table_name,
-                    str(exc),
-                    exc_info=True,
-                )
+                logger.exception(f"Error executing count(*) query for table {table_name}: {exc}")
                 raise
 
     elapsed_ms = (time.time() - start_time) * 1000
