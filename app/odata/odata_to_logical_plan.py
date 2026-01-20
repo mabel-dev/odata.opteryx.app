@@ -58,8 +58,12 @@ class ODataLogicalPlanBuilder:
         skip: Optional[int] = None,
         expand_expr: Optional[str] = None,
         apply_expr: Optional[str] = None,
+        count_only: bool = False,
     ) -> LogicalPlan:
         """Build a complete logical plan from OData parameters.
+
+        If `count_only` is True, the builder will construct a plan that
+        returns a single COUNT(*) aggregate (after any filters/applies).
 
         Args:
             filter_expr: OData $filter expression
@@ -69,6 +73,7 @@ class ODataLogicalPlanBuilder:
             skip: OData $skip offset value
             expand_expr: OData $expand expression (navigation properties)
             apply_expr: OData $apply expression (aggregations)
+            count_only: If True, build a COUNT(*) aggregate plan
 
         Returns:
             A LogicalPlan ready for Opteryx optimization
@@ -88,6 +93,12 @@ class ODataLogicalPlanBuilder:
         if apply_expr:
             self.current_step_id = self._add_apply_nodes(apply_expr)
 
+        # If caller asked for a COUNT-only plan, add the count node and exit
+        if count_only:
+            self.current_step_id = self._add_count_node()
+            self._add_exit_node()
+            return self.plan
+
         # Apply column projection (must come before ORDER BY)
         if select_cols:
             self.current_step_id = self._add_project_node(select_cols, orderby_expr)
@@ -104,6 +115,19 @@ class ODataLogicalPlanBuilder:
         self._add_exit_node()
 
         return self.plan
+
+    def _add_count_node(self) -> str:
+        """Add an Aggregate node that computes COUNT(*) for the current plan.
+
+        Returns the new step_id for the count aggregation node.
+        """
+        agg_node = LogicalPlanNode(node_type=LogicalPlanStepType.AggregateAndGroup)
+        # No group by -> global aggregation
+        agg_node.group_by = []
+        agg_node.aggregations = [
+            {"function": "COUNT", "expression": None, "alias": "count"}
+        ]
+        return self._add_node(agg_node)
 
     def _add_node(self, node: LogicalPlanNode) -> str:
         """Add a node to the plan and connect it to the previous node.

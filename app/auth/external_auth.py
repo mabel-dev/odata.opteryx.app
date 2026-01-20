@@ -123,25 +123,15 @@ def authenticate_with_external_service(username: str, password: str) -> Dict[str
             claims.get("sub") or claims.get("email") or claims.get("preferred_username") or username
         )
 
-        # Extract policies from JWT - format: [[policy_id, role, pattern], ...]
-        # Convert to permissions format: [(role, pattern), ...]
-        # Keep patterns as-is (e.g., "benchmarks.*", "opteryx.intel.*")
+        # Policies claim encodes what a user can access. Keep policies untouched
+        # (do not convert into a separate "permissions" claim which is incorrect).
         policies = claims.get("policies", [])
-        permissions = []
 
-        if policies:
-            for policy in policies:
-                if isinstance(policy, (list, tuple)) and len(policy) >= 3:
-                    _policy_id, role, pattern = policy[0], policy[1], policy[2]
-                    if role and pattern:
-                        permissions.append((role, pattern))
-
-        # Add identity and permissions to claims for easy access
+        # Add identity to claims for easy access
         claims["identity"] = identity
-        claims["permissions"] = permissions
 
         logger.info(
-            f"Successfully authenticated user '{username}' (identity: {identity}) with {len(permissions)} permissions"
+            f"Successfully authenticated user '{username}' (identity: {identity}) with {len(policies)} policies"
         )
 
         return claims

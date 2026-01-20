@@ -67,28 +67,21 @@ def _normalize_claims(claims: Dict[str, Any]) -> Dict[str, Any]:
     if identity:
         claims["identity"] = identity
 
-    # Normalize permissions to list of tuples
-    permissions = claims.get("permissions", [])
-
-    # Handle different permission formats
-    if permissions:
-        # If it's a list of dicts, convert to tuples
-        if isinstance(permissions[0], dict):
-            permissions = [(p.get("role", ""), p.get("workspace", "")) for p in permissions]
-            claims["permissions"] = permissions
-        # If it's already a list of tuples, ensure it's valid
-        elif isinstance(permissions[0], (list, tuple)):
-            # Ensure tuples have 2 elements
-            permissions = [
-                (p[0] if len(p) > 0 else "", p[1] if len(p) > 1 else "") for p in permissions
-            ]
-            claims["permissions"] = permissions
-    else:
-        # Default to empty list if no permissions
-        claims["permissions"] = []
+    # "policies" claim may be present in tokens and encodes what a user can access.
+    # We will NOT write or rely on a separate "permissions" claim (that was incorrect).
+    # Leave policies untouched and do not mutate the claims with derived permission keys.
+    # Any conversion/formatting should be done by helpers when needed.
+    
+    # Do NOT touch or create a "permissions" key here.
+    
+    # Ensure policies, if present, are a list; otherwise leave as-is
+    policies = claims.get("policies")
+    if policies and not isinstance(policies, list):
+        # If policies is a single dict/tuple, wrap it for convenience
+        claims["policies"] = [policies]
 
     logger.debug(
-        f"Normalized claims: identity={claims.get('identity')}, permissions_count={len(claims.get('permissions', []))}"
+        f"Normalized claims: identity={claims.get('identity')}, policies_count={len(claims.get('policies', []))}"
     )
 
     return claims
