@@ -424,6 +424,12 @@ class ODataParser(Parser):
         # Therefore we follow Python syntax: a single item list has a comma at the end.
         return ast.List([p.common_expr])
 
+    @_('"(" BWS common_expr BWS ")"')
+    def list_expr(self, p):
+        ":meta private:"
+        # Allow single-item lists without trailing comma when used in IN operator contexts
+        return ast.List([p.common_expr])
+
     @_('"(" BWS list_items BWS ")"')  # type:ignore[no-redef]
     def list_expr(self, p):
         ":meta private:"
