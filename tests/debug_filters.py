@@ -6,7 +6,7 @@ import sys
 import opteryx
 
 from app.odata.odata_to_logical_plan import ODataLogicalPlanBuilder
-from test_odata_battery_example import parse_odata_query_string
+from tests.test_odata_battery import parse_odata_query_string
 
 sys.path.insert(0, "/Users/justin/Nextcloud/opteryx-cloud/odata.opteryx")
 

@@ -36,3 +36,7 @@ lint: ## Run all linting tools
 
 run:
 	"$(UVICORN)" app.main:service --host 0.0.0.0 --port 8890
+
+t: ## Run odata battery tests
+	@echo "Running odata battery tests (tests/test_odata_battery.py)"
+	@$(PYTHON) -m pytest tests/test_odata_battery.py -q

@@ -3,7 +3,7 @@
 import os
 import sys
 
-from test_odata_battery_example import run_odata_battery_test
+from tests.test_odata_battery import run_odata_battery_test
 
 sys.path.insert(1, os.path.join(sys.path[0], "../opteryx-core"))
 
