@@ -1,0 +1,27 @@
+# Opteryx OData Service - LLM directives (machine readable)
+# Not an IETF standard; used by our tooling to find LLM guidelines
+# Last-Updated: 2026-01-20
+
+Service: Opteryx OData Service
+Base-URL: https://odata.opteryx.app/api/v4/
+Human-Instructions-Doc: /LLM_INSTRUCTIONS.md
+Repository: https://github.com/mabel-dev/odata.opteryx.app
+Contact: mabel-dev (repo maintainer)
+
+# Rules (machine-friendly key/value)
+Mandatory-Top: true
+Top-Default: 100
+Top-Recommendation: 50
+Expand-Supported: false
+Expand-Notes: Avoid $expand and Nav/$count; ask for alternatives or permission to sample with $top=1
+Output-Format: single-line URL-encoded query string (exactly one)
+Mod-Mixed-Type-Supported: false
+Case-Sensitive-Strings: true
+Require-Schema: true
+Schema-Endpoint-Template: /api/v4/{workspace}/{collection}/{dataset}/$metadata
+
+# Short examples (URL-encoded)
+Example-Select-Top: ?$select=name%2Cnumber_of_moons&$orderby=number_of_moons%20desc&$top=1
+Example-Aggregation: ?$apply=groupby((region),aggregate(sum(sales)%20as%20Total))&$orderby=Total%20desc&$top=10
+
+# Guidance summary: If schema missing, ASK for schema. If user requests unsupported feature ($expand, Nav/$count), respond with a concise refusal and offer a safe alternative.

@@ -5,6 +5,7 @@ import os
 import sys
 
 from app.odata.odata_to_logical_plan import ODataLogicalPlanBuilder
+from opteryx.planner.logical_planner import LogicalPlanStepType
 
 sys.path.insert(1, os.path.join(sys.path[0], "../pyiceberg-firestore-gcs"))
 sys.path.insert(1, os.path.join(sys.path[0], "../opteryx-core"))
@@ -63,3 +64,24 @@ print_plan("SELECT id, name LIMIT 3", select_cols="id,name", top=3)
 print_plan(
     "SELECT id, name ORDER BY id DESC LIMIT 3", select_cols="id,name", orderby_expr="id desc", top=3
 )
+
+
+def test_apply_aggregate_only_plan():
+    builder = ODataLogicalPlanBuilder("public.github.events")
+    plan = builder.build(
+        apply_expr="aggregate(min(published_at) as min_published_at, max(published_at) as max_published_at)"
+    )
+
+    found = False
+    for node in plan._nodes.values():
+        if getattr(node, "node_type", None) == LogicalPlanStepType.AggregateAndGroup:
+            # No group by for aggregate-only
+            assert node.group_by == []
+            assert len(node.aggregations) == 2
+            func_names = {agg["function"] for agg in node.aggregations}
+            assert "MIN" in func_names and "MAX" in func_names
+            aliases = {agg["alias"] for agg in node.aggregations}
+            assert "min_published_at" in aliases and "max_published_at" in aliases
+            found = True
+
+    assert found

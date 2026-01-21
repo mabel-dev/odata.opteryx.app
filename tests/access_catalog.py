@@ -16,10 +16,15 @@ workspace = OpteryxCatalog(
     gcs_bucket=BUCKET_NAME,
 )
 
-dataset = workspace.load_dataset("examples.planets")
+dataset = workspace.load_dataset("examples.vulnerabilities")
 
 schema = dataset.schema()
 snapshot = dataset.snapshot()
 description = dataset.describe()
 
+print("="*80, "\nSCHEMA\n", "="*80)
+print(schema)
+print("="*80, "\nSNAPSHOT\n", "="*80)
+print(snapshot)
+print("="*80, "\nDESCRIPTION\n", "="*80)
 print(description)

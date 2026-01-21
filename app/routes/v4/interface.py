@@ -20,10 +20,12 @@ from fastapi import Response
 from opteryx.connectors import OpteryxConnector
 from opteryx_catalog import OpteryxCatalog
 from orso.logging import get_logger
+from orso.types import OrsoTypes
 
 from app.auth.deps import require_authentication
 from app.auth.permissions import get_access_policies_from_claims
 from app.odata.odata_to_logical_plan import ODataLogicalPlanBuilder
+from app.odata.plan_optimizer import ODataLogicalPlanOptimizer
 
 logger = get_logger()
 logger.setLevel(5)
@@ -40,7 +42,6 @@ opteryx.set_default_connector(
     firestore_database=FIRESTORE_DATABASE,
     gcs_bucket=BUCKET_NAME,
 )
-
 
 def _sanitize_value_for_odata(value: Any) -> Any:
     """
@@ -154,12 +155,15 @@ def execute_odata_query(
     select_cols: Optional[str] = None,
     top: Optional[int] = None,
     skip: Optional[int] = None,
+    apply_expr: Optional[str] = None,
     count_requested: bool = False,
 ) -> dict:
     """Execute an OData query and return results.
 
-    This is the core logic extracted from read_dataset for easier unit testing.
-    It doesn't require authentication, request objects, or response headers.
+    This function orchestrates the core OData query execution pipeline:
+    1. Build logical plan from OData parameters (parsing + plan construction)
+    2. Optimize the plan based on constraints (e.g., top=0 with count)
+    3. Execute via Opteryx, handling optimization strategy
 
     Args:
         table_name: Full table name (e.g., "workstream.collection.dataset")
@@ -169,6 +173,7 @@ def execute_odata_query(
         top: $top limit (1-10000, default: DEFAULT_TOP)
         skip: $skip offset
         count_requested: Whether to include total count
+        apply_expr: OData $apply expression
 
     Returns:
         dict with keys:
@@ -185,20 +190,22 @@ def execute_odata_query(
 
     start_time = time.time()
 
-    # Set defaults
+    # Step 1: Set defaults
     if top is None:
         top = DEFAULT_TOP
 
-    # Build logical plan from OData parameters
-    builder = ODataLogicalPlanBuilder(table_name)
+    # Step 2: Build logical plan from OData parameters
+    # This parses each OData expression ($filter, $orderby, etc.) and builds
+    # a structured representation of the query
+    plan_builder = ODataLogicalPlanBuilder(table_name)
     try:
-        logical_plan = builder.build(
+        logical_plan = plan_builder.build(
             filter_expr=filter_expr,
             select_cols=select_cols,
             orderby_expr=orderby_expr,
             top=top,
             skip=skip,
-            apply_expr=None,
+            apply_expr=apply_expr,
         )
     except ValueError as e:
         logger.error(f"Failed to build logical plan for table {table_name}: filter={filter_expr}, select={select_cols}, orderby={orderby_expr}, error={e}")
@@ -207,19 +214,26 @@ def execute_odata_query(
         logger.exception(f"Unexpected error building logical plan for table {table_name}: error={e}")
         raise
 
-    logger.debug(f"Built logical plan with {len(builder.plan.nodes())} nodes for {table_name}")
+    logger.debug(f"Built logical plan with {len(logical_plan.nodes())} nodes for {table_name}")
 
-    # Execute the logical plan using Opteryx
-    rows = []
-    col_names = []
+    # Step 3: Optimize the plan based on query constraints
+    # This makes strategic decisions about query execution (e.g., schema+count split)
+    plan_optimizer = ODataLogicalPlanOptimizer()
+    optimized_plan, strategy_info = plan_optimizer.optimize_with_constraints(
+        logical_plan, top, count_requested
+    )
+    logger.debug(f"Applied optimization strategy: {strategy_info['strategy']} - {strategy_info['description']}")
 
-    # Optimization: when top=0 and count is requested, skip the data query
-    # and only run the count query to get the total, then get schema separately
-    if top == 0 and count_requested:
-        logger.debug("Optimizing: top=0 with count_requested, fetching count and schema only")
-        
+    # Step 4: Execute based on optimization strategy
+    strategy = strategy_info.get("strategy")
+
+    if strategy == "schema_count_split":
+        # Special optimization: top=0 with count_requested
+        # Fetch schema and count separately, no data rows
+        rows = []
+        col_names = []
         total_count = None
-        
+
         # Get schema by running a query with top=1
         try:
             schema_builder = ODataLogicalPlanBuilder(table_name)
@@ -229,7 +243,7 @@ def execute_odata_query(
                 orderby_expr=None,
                 top=1,
                 skip=None,
-                apply_expr=None,
+                apply_expr=apply_expr,
             )
             schema_table = opteryx.execute_logical_plan(schema_plan)
             col_names = schema_table.column_names
@@ -237,11 +251,8 @@ def execute_odata_query(
         except Exception as exc:
             logger.exception(f"Error getting schema for table {table_name}: {exc}")
             raise
-        
-        # rows stays empty since top=0
-        rows = []
-        
-        # Get total count via an explicit COUNT(*) aggregation (more efficient)
+
+        # Get total count
         try:
             count_builder = ODataLogicalPlanBuilder(table_name)
             count_plan = count_builder.build(
@@ -250,24 +261,28 @@ def execute_odata_query(
                 orderby_expr=None,
                 top=None,
                 skip=None,
-                apply_expr=None,
+                apply_expr=apply_expr,
                 count_only=True,
             )
             count_table = opteryx.execute_logical_plan(count_plan)
-            # Extract the count from the aggregation result (single-row, single-col)
             if count_table.num_rows == 0:
                 total_count = 0
             else:
                 cnt_col = count_table.column_names[0]
                 total_count = int(count_table.to_pydict()[cnt_col][0])
-            logger.debug(f"Count(*) query result: {total_count}")
+
+            logger.debug(f"Count query result: {total_count}")
         except Exception as exc:
             logger.exception(f"Error executing count(*) query for table {table_name}: {exc}")
             raise
     else:
-        # Normal path: execute the logical plan with the specified top value
+        # Standard path: execute the optimized logical plan
+        rows = []
+        col_names = []
+
         try:
-            arrow_table = opteryx.execute_logical_plan(logical_plan)
+            # Execute the logical plan using Opteryx executor
+            arrow_table = opteryx.execute_logical_plan(optimized_plan)
 
             # Get column names from the Arrow table
             col_names = arrow_table.column_names
@@ -303,7 +318,7 @@ def execute_odata_query(
                     orderby_expr=None,
                     top=None,
                     skip=None,
-                    apply_expr=None,
+                    apply_expr=apply_expr,
                     count_only=True,
                 )
                 arrow_table = opteryx.execute_logical_plan(count_plan)
@@ -355,6 +370,40 @@ def _map_py_type_to_edm_complete(py_type: type) -> str:
     return "Edm.String"
 
 
+def _orso_type_to_edm(orso_type: OrsoTypes) -> str:
+    """Convert Orso/Opteryx type to OData EDM type.
+    
+    Args:
+        orso_type: Orso/Opteryx DataType
+        
+    Returns:
+        OData EDM type string
+    """
+    
+    # Handle Orso/Opteryx type strings
+    if orso_type == OrsoTypes.INTEGER:
+        return "Edm.Int64"
+    if orso_type == OrsoTypes.DOUBLE:
+        return "Edm.Double"
+    if orso_type == OrsoTypes.BOOLEAN:
+        return "Edm.Boolean"
+    if orso_type == OrsoTypes.VARCHAR:
+        return "Edm.String"
+    if orso_type == OrsoTypes.TIMESTAMP:
+        return "Edm.DateTimeOffset"
+    if orso_type == OrsoTypes.DATE:
+        return "Edm.Date"
+    if orso_type == OrsoTypes.TIME:
+        return "Edm.TimeOfDay"
+    if orso_type == OrsoTypes.DECIMAL:
+        return "Edm.Decimal"
+    if orso_type == OrsoTypes.BLOB:
+        return "Edm.Binary"
+
+    # Fallback for unknown types
+    return "Edm.String"
+
+
 router = APIRouter(
     prefix="/api/v4",
     tags=["OData v4"],
@@ -376,6 +425,7 @@ def read_dataset(
     count: Optional[str] = Query(None, alias="$count"),
     select: Optional[str] = Query(None, alias="$select"),
     search: Optional[str] = Query(None, alias="$search"),
+    apply: Optional[str] = Query(None, alias="$apply"),
 ) -> Any:
     """Read rows from a specified dataset.
 
@@ -391,6 +441,16 @@ def read_dataset(
     table_name = f"{workstream}.{collection}.{dataset}"
 
     # Parse and validate $top parameter
+    # Detect duplicate OData query parameters in the raw query string and disallow them
+    from urllib.parse import parse_qs
+
+    parsed_qs = parse_qs(request.url.query)
+    # Parameters for which duplicates are disallowed
+    duplicate_sensitive = ["$top", "$apply", "$count", "$select", "$orderby"]
+    duplicates = [p for p in duplicate_sensitive if p in parsed_qs and len(parsed_qs.get(p, [])) > 1]
+    if duplicates:
+        raise HTTPException(status_code=400, detail=f"Multiple parameters not allowed: {', '.join(duplicates)}")
+
     if top is None:
         top = DEFAULT_TOP
     else:
@@ -427,6 +487,7 @@ def read_dataset(
             select_cols=select,
             top=top,
             skip=skip,
+            apply_expr=apply,
             count_requested=want_count,
         )
     except ValueError as e:
@@ -534,54 +595,96 @@ def dataset_metadata(
     collection: str,
     dataset: str,
 ) -> Any:
-    """Return a minimal OData $metadata (EDMX) for the given dataset.
+    """Return OData $metadata (EDMX) for the given dataset with enriched column information.
 
-    The endpoint inspects the dataset column metadata (without scanning rows)
-    and emits an EDMX Schema describing an EntityType and EntitySet for the
-    dataset. This is intentionally minimal — a full EDMX generator can be
-    implemented later.
+    Queries the catalog to get actual column types, cardinality, min/max values,
+    and distribution information, then emits an EDMX Schema with annotations.
 
     Requires authentication via bearer token or basic auth.
     """
     # Set OData-Version header
     response.headers["OData-Version"] = "4.0"
 
-    # Extract claims from request state
-    claims = getattr(request.state, "claims", {})
-    access_policies = get_access_policies_from_claims(claims)
-
     table_name = f"{workstream}.{collection}.{dataset}"
-    sql = f'SELECT * FROM "{table_name}" LIMIT 1'
-
-    try:
-        # Pass access policies to metadata query
-        arrow_table = opteryx.query_to_arrow(sql, access_policies=access_policies)
-        col_names = arrow_table.column_names
-    except Exception as exc:
-        logger.error(f"failed to query dataset for metadata {table_name}")
-        if exc.__class__.__name__ == "DatasetNotFoundError":
-            raise HTTPException(status_code=404, detail="dataset not found")
-        raise HTTPException(status_code=500, detail="failed to read dataset metadata")
-
+    
+    # Try to get enriched metadata from catalog
+    col_names = []
     col_types = []
-    try:
-        # col_names already set from query result above
-        # Default all to Edm.String for now; could infer better from row data
-        for col_name in col_names:
-            col_types.append("Edm.String")
-    except Exception:
-        # fallback: no column metadata
-        col_names = []
-        col_types = []
+    col_metadata = {}  # Maps col_name -> {type, min, max, cardinality, description}
+    
+    if OpteryxCatalog is not None:
+        try:
+            workspace = OpteryxCatalog(
+                "public",
+                firestore_project=GCP_PROJECT_ID,
+                firestore_database=FIRESTORE_DATABASE,
+                gcs_bucket=BUCKET_NAME,
+            )
+            ds = workspace.load_dataset(table_name)
+            
+            # Get schema for column types and precision info
+            schema = ds.schema()
+            if schema:
+                for field in schema:
+                    col_name = field.name
+                    col_names.append(col_name)
+                    # Map Arrow/IcebergSchema type to EDM type
+                    edm_type = _orso_type_to_edm(field.type)
+                    col_types.append(edm_type)
+                    col_metadata[col_name] = {
+                        "type": edm_type,
+                        "arrow_type": str(field.type),
+                    }
+            
+            # Get statistics from description (min/max, cardinality, distribution)
+            description = ds.describe()
+            if description:
+                for col_name, stats in description.items():
+                    if col_name in col_metadata:
+                        # Add stats to metadata
+                        if isinstance(stats, dict):
+                            col_metadata[col_name].update(stats)
+            
+            # Get snapshot for last modified info
+            snapshot = ds.snapshot()
+            if snapshot:
+                snapshot_time = snapshot.get("timestamp_ms")
+                if snapshot_time:
+                    response.headers["X-Dataset-LastModified"] = str(snapshot_time)
+            
+            logger.debug(f"Loaded enriched metadata for {table_name} from catalog")
+        except Exception as exc:
+            logger.debug(f"Could not load enriched metadata from catalog for {table_name}: {exc}")
+            # Fall back to schema-only query below
+            col_names = []
+    
+    # Fallback: if catalog didn't provide metadata, query dataset for schema
+    if not col_names:
+        sql = f'SELECT * FROM "{table_name}" LIMIT 1'
+        try:
+            arrow_table = opteryx.query_to_arrow(sql)
+            col_names = arrow_table.column_names
+            for col_name in col_names:
+                # Try to infer EDM type from Arrow type
+                arrow_col = arrow_table.schema.field(col_name).type
+                edm_type = _orso_type_to_edm(arrow_col)
+                col_types.append(edm_type)
+                col_metadata[col_name] = {"type": edm_type}
+        except Exception as exc:
+            logger.error(f"failed to query dataset for metadata {table_name}")
+            if exc.__class__.__name__ == "DatasetNotFoundError":
+                raise HTTPException(status_code=404, detail="dataset not found")
+            raise HTTPException(status_code=500, detail="failed to read dataset metadata")
 
-    # Build EDMX XML
+    # Build EDMX XML with annotations
     schema_ns = f"{collection}"
     entity_name = f"{collection}_{dataset}"
     lines = [
         '<?xml version="1.0" encoding="utf-8"?>',
         '<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">',
         "  <edmx:DataServices>",
-        f'    <Schema Namespace="{schema_ns}" xmlns="http://docs.oasis-open.org/odata/ns/edm">',
+        f'    <Schema Namespace="{schema_ns}" xmlns="http://docs.oasis-open.org/odata/ns/edm"',
+        '           xmlns:sap="http://www.sap.com/Protocols/SAPData">',
         f'      <EntityType Name="{entity_name}">',
     ]
 
@@ -591,8 +694,25 @@ def dataset_metadata(
         lines.append(f'          <PropertyRef Name="{col_names[0]}" />')
         lines.append("        </Key>")
 
-    for name, typ in zip(col_names, col_types):
-        lines.append(f'        <Property Name="{name}" Type="{typ}" Nullable="true" />')
+    # Add Property elements with annotations for statistics
+    for col_name in col_names:
+        meta = col_metadata.get(col_name, {})
+        edm_type = meta.get("type", "Edm.String")
+        
+        lines.append(f'        <Property Name="{col_name}" Type="{edm_type}" Nullable="true">')
+        
+        # Add annotations if we have statistics
+        if "min" in meta and meta["min"] is not None:
+            lines.append(f'          <Annotation Term="Org.OData.Measures.V1.Unit" String="min:{meta["min"]}"/>')
+        if "max" in meta and meta["max"] is not None:
+            lines.append(f'          <Annotation Term="Org.OData.Measures.V1.Unit" String="max:{meta["max"]}"/>')
+        if "cardinality" in meta and meta["cardinality"] is not None:
+            lines.append(f'          <Annotation Term="Custom.Statistics.Cardinality" Int="{meta["cardinality"]}"/>')
+        if "distribution" in meta and meta["distribution"]:
+            dist_str = str(meta["distribution"]).replace('"', "&quot;")
+            lines.append(f'          <Annotation Term="Custom.Statistics.Distribution" String="{dist_str}"/>')
+        
+        lines.append("        </Property>")
 
     lines.extend(
         [
@@ -605,8 +725,6 @@ def dataset_metadata(
             "</edmx:Edmx>",
         ]
     )
-
-    from fastapi.responses import Response
 
     xml = "\n".join(lines)
     return Response(content=xml, media_type="application/xml")
