@@ -571,12 +571,12 @@ def dataset_metadata(
     
     try:
         workspace = OpteryxCatalog(
-            "public",
+            workstream,
             firestore_project=GCP_PROJECT_ID,
             firestore_database=FIRESTORE_DATABASE,
             gcs_bucket=BUCKET_NAME,
         )
-        ds = workspace.load_dataset(table_name)
+        ds = workspace.load_dataset((collection, dataset,))
         
         # Get schema for column types and precision info
         schema = ds.schema()
@@ -620,24 +620,6 @@ def dataset_metadata(
         tb_str = traceback.format_exc()
         logger.error(f"Failed to load metadata from catalog: {e}\n{tb_str}")
         raise
-
-    # Fallback: if catalog didn't provide metadata, query dataset for schema
-    if not col_names:
-        sql = f'SELECT * FROM "{table_name}" LIMIT 1'
-        try:
-            arrow_table = opteryx.query_to_arrow(sql)
-            col_names = arrow_table.column_names
-            for col_name in col_names:
-                # Try to infer EDM type from Arrow type
-                arrow_col = arrow_table.schema.field(col_name).type
-                edm_type = _orso_type_to_edm(arrow_col)
-                col_types.append(edm_type)
-                col_metadata[col_name] = {"type": edm_type}
-        except Exception as exc:
-            logger.error(f"failed to query dataset for metadata {table_name}")
-            if exc.__class__.__name__ == "DatasetNotFoundError":
-                raise HTTPException(status_code=404, detail="dataset not found")
-            raise HTTPException(status_code=500, detail="failed to read dataset metadata")
 
     # Build EDMX XML with annotations
     schema_ns = f"{collection}"
