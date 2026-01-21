@@ -211,7 +211,7 @@ def execute_odata_query(
         logger.error(f"Failed to build logical plan for table {table_name}: filter={filter_expr}, select={select_cols}, orderby={orderby_expr}, error={e}")
         raise
     except Exception as e:
-        logger.exception(f"Unexpected error building logical plan for table {table_name}: error={e}")
+        logger.error(f"Unexpected error building logical plan for table {table_name}: error={e}")
         raise
 
     logger.debug(f"Built logical plan with {len(logical_plan.nodes())} nodes for {table_name}")
@@ -249,7 +249,7 @@ def execute_odata_query(
             col_names = schema_table.column_names
             logger.debug(f"Got schema from query: {col_names}")
         except Exception as exc:
-            logger.exception(f"Error getting schema for table {table_name}: {exc}")
+            logger.error(f"Error getting schema for table {table_name}: {exc}")
             raise
 
         # Get total count
@@ -273,7 +273,7 @@ def execute_odata_query(
 
             logger.debug(f"Count query result: {total_count}")
         except Exception as exc:
-            logger.exception(f"Error executing count(*) query for table {table_name}: {exc}")
+            logger.error(f"Error executing count(*) query for table {table_name}: {exc}")
             raise
     else:
         # Standard path: execute the optimized logical plan
@@ -304,7 +304,7 @@ def execute_odata_query(
             logger.debug(f"Created {len(rows)} rows with {len(rows[0].keys()) if rows else 0} keys")
 
         except Exception as exc:
-            logger.exception(f"Error executing logical plan for table {table_name} with orderby={orderby_expr}, filter={filter_expr}: {exc}")
+            logger.error(f"Error executing logical plan for table {table_name} with orderby={orderby_expr}, filter={filter_expr}: {exc}")
             raise
 
         # Get total count if requested
@@ -330,7 +330,7 @@ def execute_odata_query(
                 logger.debug(f"Count(*) query result: {total_count}")
 
             except Exception as exc:
-                logger.exception(f"Error executing count(*) query for table {table_name}: {exc}")
+                logger.error(f"Error executing count(*) query for table {table_name}: {exc}")
                 raise
 
     elapsed_ms = (time.time() - start_time) * 1000
@@ -658,7 +658,7 @@ def dataset_metadata(
             
             logger.debug(f"Loaded enriched metadata for {table_name} from catalog with {len(col_names)} columns")
         except Exception as exc:
-            logger.exception(f"Error loading enriched metadata from catalog for {table_name}: {exc}")
+            logger.error(f"Error loading enriched metadata from catalog for {table_name}: {exc}")
             # Fall back to schema-only query below
             col_names = []
     
