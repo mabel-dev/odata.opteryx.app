@@ -625,20 +625,23 @@ def dataset_metadata(
             # Get schema for column types and precision info
             schema = ds.schema()
             if schema:
-                for field in schema:
-                    col_name = field.name
-                    col_names.append(col_name)
-                    # Map Arrow/IcebergSchema type to EDM type
-                    edm_type = _orso_type_to_edm(field.type)
-                    col_types.append(edm_type)
-                    col_metadata[col_name] = {
-                        "type": edm_type,
-                        "arrow_type": str(field.type),
-                    }
+                # Schema is a RelationSchema object with columns attribute
+                if hasattr(schema, 'columns'):
+                    for field in schema.columns:
+                        col_name = field.name
+                        col_names.append(col_name)
+                        # Map Orso type to EDM type
+                        edm_type = _orso_type_to_edm(field.type)
+                        col_types.append(edm_type)
+                        col_metadata[col_name] = {
+                            "type": edm_type,
+                            "source_type": str(field.type),
+                            "nullable": field.nullable,
+                        }
             
             # Get statistics from description (min/max, cardinality, distribution)
             description = ds.describe()
-            if description:
+            if description and isinstance(description, dict):
                 for col_name, stats in description.items():
                     if col_name in col_metadata:
                         # Add stats to metadata
@@ -648,13 +651,14 @@ def dataset_metadata(
             # Get snapshot for last modified info
             snapshot = ds.snapshot()
             if snapshot:
-                snapshot_time = snapshot.get("timestamp_ms")
-                if snapshot_time:
-                    response.headers["X-Dataset-LastModified"] = str(snapshot_time)
+                # Snapshot is an object with attributes
+                timestamp_ms = getattr(snapshot, 'timestamp_ms', None)
+                if timestamp_ms:
+                    response.headers["X-Dataset-LastModified"] = str(timestamp_ms)
             
-            logger.debug(f"Loaded enriched metadata for {table_name} from catalog")
+            logger.debug(f"Loaded enriched metadata for {table_name} from catalog with {len(col_names)} columns")
         except Exception as exc:
-            logger.debug(f"Could not load enriched metadata from catalog for {table_name}: {exc}")
+            logger.exception(f"Error loading enriched metadata from catalog for {table_name}: {exc}")
             # Fall back to schema-only query below
             col_names = []
     
@@ -703,13 +707,17 @@ def dataset_metadata(
         
         # Add annotations if we have statistics
         if "min" in meta and meta["min"] is not None:
-            lines.append(f'          <Annotation Term="Org.OData.Measures.V1.Unit" String="min:{meta["min"]}"/>')
+            min_val = str(meta["min"]).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+            lines.append(f'          <Annotation Term="Custom.Statistics.Min" String="{min_val}"/>')
         if "max" in meta and meta["max"] is not None:
-            lines.append(f'          <Annotation Term="Org.OData.Measures.V1.Unit" String="max:{meta["max"]}"/>')
-        if "cardinality" in meta and meta["cardinality"] is not None:
-            lines.append(f'          <Annotation Term="Custom.Statistics.Cardinality" Int="{meta["cardinality"]}"/>')
+            max_val = str(meta["max"]).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+            lines.append(f'          <Annotation Term="Custom.Statistics.Max" String="{max_val}"/>')
+        if "approx_cardinality" in meta and meta["approx_cardinality"] is not None:
+            lines.append(f'          <Annotation Term="Custom.Statistics.Cardinality" Int="{meta["approx_cardinality"]}"/>')
+        if "null_count" in meta and meta["null_count"] is not None:
+            lines.append(f'          <Annotation Term="Custom.Statistics.NullCount" Int="{meta["null_count"]}"/>')
         if "distribution" in meta and meta["distribution"]:
-            dist_str = str(meta["distribution"]).replace('"', "&quot;")
+            dist_str = str(meta["distribution"]).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
             lines.append(f'          <Annotation Term="Custom.Statistics.Distribution" String="{dist_str}"/>')
         
         lines.append("        </Property>")
