@@ -657,9 +657,9 @@ def dataset_metadata(
             lines.append(f'          <Annotation Term="Custom.Statistics.DistinctValueCountEstimate" Int="{meta["approx_cardinality"]}"/>')
         if "null_count" in meta and meta["null_count"] is not None:
             lines.append(f'          <Annotation Term="Custom.Statistics.NullCount" Int="{meta["null_count"]}"/>')
-        if "distribution" in meta and meta["distribution"]:
+        if "distribution" in meta and meta["distribution"] and any(meta["distribution"]):
             # Distribution as a Collection of Int values instead of string
-            dist_values = ", ".join(str(v) for v in meta["distribution"])
+            # Skip if all values are zero (no meaningful distribution data)
             lines.append(f'          <Annotation Term="Custom.Statistics.Distribution">')
             lines.append(f'            <Collection>')
             for val in meta["distribution"]:
