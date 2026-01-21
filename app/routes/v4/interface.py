@@ -23,7 +23,6 @@ from orso.logging import get_logger
 from orso.types import OrsoTypes
 
 from app.auth.deps import require_authentication
-from app.auth.permissions import get_access_policies_from_claims
 from app.odata.odata_to_logical_plan import ODataLogicalPlanBuilder
 from app.odata.plan_optimizer import ODataLogicalPlanOptimizer
 
@@ -130,22 +129,6 @@ def _sanitize_value_for_odata(value: Any) -> Any:
         return str(value)
 
     return value
-
-
-def _map_py_type_to_edm(py_type: type) -> str:
-    try:
-        import uuid as _uuid
-    except Exception:
-        _uuid = None
-
-    if py_type is int:
-        return "Edm.Int64"
-    if py_type is float:
-        return "Edm.Double"
-    if py_type is bool:
-        return "Edm.Boolean"
-    if py_type is str:
-        return "Edm.String"
 
 
 def execute_odata_query(
@@ -341,33 +324,6 @@ def execute_odata_query(
         "total_count": total_count,
         "took_ms": elapsed_ms,
     }
-
-
-def _map_py_type_to_edm_complete(py_type: type) -> str:
-    """Map Python types to OData EDM types."""
-    import datetime as _dt
-    import decimal as _dec
-
-    try:
-        import uuid as _uuid
-    except Exception:
-        _uuid = None
-
-    if py_type is int:
-        return "Edm.Int64"
-    if py_type is float:
-        return "Edm.Double"
-    if py_type is bool:
-        return "Edm.Boolean"
-    if py_type is str:
-        return "Edm.String"
-    if _uuid and py_type is _uuid.UUID:
-        return "Edm.Guid"
-    if py_type is _dec.Decimal:
-        return "Edm.Double"
-    if py_type in (_dt.datetime, _dt.date, _dt.time):
-        return "Edm.DateTimeOffset"
-    return "Edm.String"
 
 
 def _orso_type_to_edm(orso_type: OrsoTypes) -> str:
@@ -612,56 +568,50 @@ def dataset_metadata(
     col_types = []
     col_metadata = {}  # Maps col_name -> {type, min, max, cardinality, description}
     
-    if OpteryxCatalog is not None:
-        try:
-            workspace = OpteryxCatalog(
-                "public",
-                firestore_project=GCP_PROJECT_ID,
-                firestore_database=FIRESTORE_DATABASE,
-                gcs_bucket=BUCKET_NAME,
-            )
-            ds = workspace.load_dataset(table_name)
-            
-            # Get schema for column types and precision info
-            schema = ds.schema()
-            if schema:
-                # Schema is a RelationSchema object with columns attribute
-                if hasattr(schema, 'columns'):
-                    for field in schema.columns:
-                        col_name = field.name
-                        col_names.append(col_name)
-                        # Map Orso type to EDM type
-                        edm_type = _orso_type_to_edm(field.type)
-                        col_types.append(edm_type)
-                        col_metadata[col_name] = {
-                            "type": edm_type,
-                            "source_type": str(field.type),
-                            "nullable": field.nullable,
-                        }
-            
-            # Get statistics from description (min/max, cardinality, distribution)
-            description = ds.describe()
-            if description and isinstance(description, dict):
-                for col_name, stats in description.items():
-                    if col_name in col_metadata:
-                        # Add stats to metadata
-                        if isinstance(stats, dict):
-                            col_metadata[col_name].update(stats)
-            
-            # Get snapshot for last modified info
-            snapshot = ds.snapshot()
-            if snapshot:
-                # Snapshot is an object with attributes
-                timestamp_ms = getattr(snapshot, 'timestamp_ms', None)
-                if timestamp_ms:
-                    response.headers["X-Dataset-LastModified"] = str(timestamp_ms)
-            
-            logger.debug(f"Loaded enriched metadata for {table_name} from catalog with {len(col_names)} columns")
-        except Exception as exc:
-            logger.error(f"Error loading enriched metadata from catalog for {table_name}: {exc}")
-            # Fall back to schema-only query below
-            col_names = []
+    workspace = OpteryxCatalog(
+        "public",
+        firestore_project=GCP_PROJECT_ID,
+        firestore_database=FIRESTORE_DATABASE,
+        gcs_bucket=BUCKET_NAME,
+    )
+    ds = workspace.load_dataset(table_name)
     
+    # Get schema for column types and precision info
+    schema = ds.schema()
+    if schema:
+        # Schema is a RelationSchema object with columns attribute
+        if hasattr(schema, 'columns'):
+            for field in schema.columns:
+                col_name = field.name
+                col_names.append(col_name)
+                # Map Orso type to EDM type
+                edm_type = _orso_type_to_edm(field.type)
+                col_types.append(edm_type)
+                col_metadata[col_name] = {
+                    "type": edm_type,
+                    "source_type": str(field.type),
+                    "nullable": field.nullable,
+                }
+    
+    # Get statistics from description (min/max, cardinality, distribution)
+    description = ds.describe()
+    if description and isinstance(description, dict):
+        for col_name, stats in description.items():
+            if col_name in col_metadata:
+                # Add stats to metadata
+                if isinstance(stats, dict):
+                    col_metadata[col_name].update(stats)
+    
+    # Get snapshot for last modified info
+    snapshot = ds.snapshot()
+    if snapshot:
+        # Snapshot is an object with attributes
+        timestamp_ms = getattr(snapshot, 'timestamp_ms', None)
+        if timestamp_ms:
+            response.headers["X-Dataset-LastModified"] = str(timestamp_ms)
+    
+    logger.debug(f"Loaded enriched metadata for {table_name} from catalog with {len(col_names)} columns")
+
     # Fallback: if catalog didn't provide metadata, query dataset for schema
     if not col_names:
         sql = f'SELECT * FROM "{table_name}" LIMIT 1'
