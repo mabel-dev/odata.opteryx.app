@@ -653,13 +653,19 @@ def dataset_metadata(
         if "max" in meta and meta["max"] is not None:
             max_val = str(meta["max"]).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
             lines.append(f'          <Annotation Term="Custom.Statistics.Max" String="{max_val}"/>')
-        if "approx_cardinality" in meta and meta["approx_cardinality"] is not None:
-            lines.append(f'          <Annotation Term="Custom.Statistics.Cardinality" Int="{meta["approx_cardinality"]}"/>')
+        if "approx_cardinality" in meta and meta["approx_cardinality"] is not None and meta["approx_cardinality"] > 0:
+            lines.append(f'          <Annotation Term="Custom.Statistics.DistinctValueCountEstimate" Int="{meta["approx_cardinality"]}"/>')
         if "null_count" in meta and meta["null_count"] is not None:
             lines.append(f'          <Annotation Term="Custom.Statistics.NullCount" Int="{meta["null_count"]}"/>')
         if "distribution" in meta and meta["distribution"]:
-            dist_str = str(meta["distribution"]).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
-            lines.append(f'          <Annotation Term="Custom.Statistics.Distribution" String="{dist_str}"/>')
+            # Distribution as a Collection of Int values instead of string
+            dist_values = ", ".join(str(v) for v in meta["distribution"])
+            lines.append(f'          <Annotation Term="Custom.Statistics.Distribution">')
+            lines.append(f'            <Collection>')
+            for val in meta["distribution"]:
+                lines.append(f'              <Int>{val}</Int>')
+            lines.append(f'            </Collection>')
+            lines.append(f'          </Annotation>')
         
         lines.append("        </Property>")
 
