@@ -576,7 +576,7 @@ def dataset_metadata(
             firestore_database=FIRESTORE_DATABASE,
             gcs_bucket=BUCKET_NAME,
         )
-        ds = workspace.load_dataset((collection, dataset,))
+        ds = workspace.load_dataset(f"{collection}.{dataset}")
         
         # Get schema for column types and precision info
         schema = ds.schema()
