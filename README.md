@@ -116,11 +116,17 @@ This returns an XML document describing EntityTypes, properties, and their data 
 | `$filter` | Filter results with comparison/logical operators | `$filter=age gt 21 and status eq 'active'` |
 | `$select` | Select specific columns | `$select=name,age,status` |
 | `$orderby` | Sort by one or more columns (asc/desc) | `$orderby=name asc, age desc` |
-| `$top` | Limit number of results (max 10000) | `$top=100` |
+| `$top` | Limit number of results (max 10000). If omitted, default is `100`. | `$top=100` |
 | `$skip` | Skip N results for pagination | `$skip=200` |
 | `$count` | Include total count of results | `$count=true` |
 | `$apply` | Aggregation and grouping operations | `$apply=groupby((Region), aggregate(sum(Sales) as Total))` |
+| `$expand` | Expand navigation properties (JOINs); **NOTE: `$expand` is not implemented yet** — queries using `$expand` or ordering by `Nav/$count` will currently error. |
 
+**Case-insensitive string matching:** Use `tolower()`/`toupper()` to perform case-insensitive comparisons. Example:
+
+```
+$filter=tolower(name) eq tolower('earth')&$top=10
+```
 ### Filter Operators
 
 **Comparison Operators:**
@@ -195,7 +201,10 @@ GET /api/v4/workspace/collection/dataset?$filter=year ge 2023&$apply=groupby((st
 - **Column Names:** Reference columns by their exact names in the dataset schema.
 - **Type Coercion:** Numeric values in comparisons should not be quoted (e.g., `age gt 21` not `age gt '21'`).
 - **String Values:** Always quote string literals (e.g., `vendor eq 'ABC'`).
-- **Maximum Results:** Default `$top` is 100 if not specified. Maximum allowed is 10,000 records per request.
+- **Maximum Results & Defaults:** Default `$top` is `100` if not specified. Maximum allowed is 10,000 records per request. While `$top` is optional, we recommend specifying it in client-generated queries to avoid unintended large responses.
+- **`$expand` and `Nav/$count` ordering:** `$expand` (navigation property expansion) and ordering by `Nav/$count` are currently **not implemented**. Queries using `$expand` or ordering by `Nav/$count` will produce an error. Use precomputed columns (for example `number_of_moons`) as a workaround for ordering by counts until `$expand` is implemented.
+- **Modulo and numeric coercion:** Currently, mixing floating/double and integer operands with the `mod` operator can raise an `IncorrectTypeError` (e.g., `round(n_nationkey) mod 5` where `ROUND()` yields DOUBLE). Prefer integer operands or explicit casts. This is a tracked issue and will be fixed by implementing numeric promotion for `%`.
+- **URL encoding:** Always URL-encode query strings (spaces, parentheses, `$` and other special characters). For example: `Satellites/$count%20desc` for `Satellites/$count desc`.
 
 ## Permission Model
 
