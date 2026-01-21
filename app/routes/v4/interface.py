@@ -6,6 +6,7 @@ This module provides OData protocol endpoints for querying Opteryx data.
 from __future__ import annotations
 
 import os
+import traceback
 from typing import Any
 from typing import List
 from typing import Optional
@@ -568,49 +569,57 @@ def dataset_metadata(
     col_types = []
     col_metadata = {}  # Maps col_name -> {type, min, max, cardinality, description}
     
-    workspace = OpteryxCatalog(
-        "public",
-        firestore_project=GCP_PROJECT_ID,
-        firestore_database=FIRESTORE_DATABASE,
-        gcs_bucket=BUCKET_NAME,
-    )
-    ds = workspace.load_dataset(table_name)
-    
-    # Get schema for column types and precision info
-    schema = ds.schema()
-    if schema:
-        # Schema is a RelationSchema object with columns attribute
-        if hasattr(schema, 'columns'):
-            for field in schema.columns:
-                col_name = field.name
-                col_names.append(col_name)
-                # Map Orso type to EDM type
-                edm_type = _orso_type_to_edm(field.type)
-                col_types.append(edm_type)
-                col_metadata[col_name] = {
-                    "type": edm_type,
-                    "source_type": str(field.type),
-                    "nullable": field.nullable,
-                }
-    
-    # Get statistics from description (min/max, cardinality, distribution)
-    description = ds.describe()
-    if description and isinstance(description, dict):
-        for col_name, stats in description.items():
-            if col_name in col_metadata:
-                # Add stats to metadata
-                if isinstance(stats, dict):
-                    col_metadata[col_name].update(stats)
-    
-    # Get snapshot for last modified info
-    snapshot = ds.snapshot()
-    if snapshot:
-        # Snapshot is an object with attributes
-        timestamp_ms = getattr(snapshot, 'timestamp_ms', None)
-        if timestamp_ms:
-            response.headers["X-Dataset-LastModified"] = str(timestamp_ms)
-    
-    logger.debug(f"Loaded enriched metadata for {table_name} from catalog with {len(col_names)} columns")
+    try:
+        workspace = OpteryxCatalog(
+            "public",
+            firestore_project=GCP_PROJECT_ID,
+            firestore_database=FIRESTORE_DATABASE,
+            gcs_bucket=BUCKET_NAME,
+        )
+        ds = workspace.load_dataset(table_name)
+        
+        # Get schema for column types and precision info
+        schema = ds.schema()
+        logger.debug(f"Schema from catalog: {schema}")
+        if schema:
+            # Schema is a RelationSchema object with columns attribute
+            if hasattr(schema, 'columns'):
+                for field in schema.columns:
+                    col_name = field.name
+                    col_names.append(col_name)
+                    # Map Orso type to EDM type
+                    edm_type = _orso_type_to_edm(field.type)
+                    col_types.append(edm_type)
+                    col_metadata[col_name] = {
+                        "type": edm_type,
+                        "source_type": str(field.type),
+                        "nullable": field.nullable,
+                    }
+        
+        # Get statistics from description (min/max, cardinality, distribution)
+        description = ds.describe()
+        logger.debug(f"Description keys: {list(description.keys()) if isinstance(description, dict) else 'not a dict'}")
+        if description and isinstance(description, dict):
+            for col_name, stats in description.items():
+                if col_name in col_metadata:
+                    # Add stats to metadata
+                    if isinstance(stats, dict):
+                        col_metadata[col_name].update(stats)
+        
+        # Get snapshot for last modified info
+        snapshot = ds.snapshot()
+        logger.debug(f"Snapshot: {snapshot}")
+        if snapshot:
+            # Snapshot is an object with attributes
+            timestamp_ms = getattr(snapshot, 'timestamp_ms', None)
+            if timestamp_ms:
+                response.headers["X-Dataset-LastModified"] = str(timestamp_ms)
+        
+        logger.debug(f"Loaded enriched metadata for {table_name} from catalog with {len(col_names)} columns")
+    except Exception as e:
+        tb_str = traceback.format_exc()
+        logger.error(f"Failed to load metadata from catalog: {e}\n{tb_str}")
+        raise
 
     # Fallback: if catalog didn't provide metadata, query dataset for schema
     if not col_names:
