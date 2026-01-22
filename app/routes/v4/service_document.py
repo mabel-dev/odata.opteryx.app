@@ -146,29 +146,33 @@ def _get_personal_datasets(db, identity: str) -> list[DatasetInfo]:
     logger.debug(f"Getting personal datasets for {identity}")
 
     try:
-        # Query personal datasets from the top-level 'personal' collection
-        datasets_coll = db.collection("personal").document(identity).collection("datasets")
-        for doc in datasets_coll.stream():
-            try:
-                data = doc.to_dict()
-                workspace = "personal"
-                collection_name = identity
-                name = data.get("name") or doc.id
+        # Query personal datasets and views from the top-level 'personal' collection
+        for child in ("datasets", "views"):
+            datasets_coll = db.collection("personal").document(identity).collection(child)
+            for doc in datasets_coll.stream():
+                try:
+                    data = doc.to_dict()
+                    workspace = "personal"
+                    collection_name = identity
+                    name = data.get("name") or doc.id
 
-                resource_name = f"{workspace}.{collection_name}.{name}"
-                resource_name = _normalize_resource_name(resource_name)
+                    resource_name = f"{workspace}.{collection_name}.{name}"
+                    resource_name = _normalize_resource_name(resource_name)
 
-                results.append(
-                    DatasetInfo(
-                        resource=resource_name,
-                        workspace=workspace,
-                        collection=collection_name,
-                        name=name,
+                    source_type = "View" if child == "views" else "Table"
+
+                    results.append(
+                        DatasetInfo(
+                            resource=resource_name,
+                            workspace=workspace,
+                            collection=collection_name,
+                            name=name,
+                            source=source_type,
+                        )
                     )
-                )
-            except Exception:
-                logger.debug(f"Skipping malformed personal dataset: {doc.id}")
-                continue
+                except Exception:
+                    logger.debug(f"Skipping malformed personal dataset: {doc.id}")
+                    continue
     except Exception as exc:
         logger.error(f"Failed to retrieve personal datasets for {identity}: {type(exc)} {exc}")
 
@@ -181,13 +185,15 @@ def _get_workspace_datasets(db, workspace_ids: set[str]) -> list[DatasetInfo]:
 
     try:
         for workspace_id in workspace_ids:
-            datasets = _query_collection_group(
-                db,
-                "datasets",
-                workspace_filter=workspace_id,
-                limit=1000,
-            )
-            results.extend(datasets)
+            # Query both datasets and views collection groups
+            for coll in ("datasets", "views"):
+                datasets = _query_collection_group(
+                    db,
+                    coll,
+                    workspace_filter=workspace_id,
+                    limit=1000,
+                )
+                results.extend(datasets)
     except Exception as exc:
         logger.error(f"Failed to retrieve datasets: {type(exc)} {exc}")
         raise HTTPException(
@@ -298,7 +304,8 @@ def get_service_document(
         # EntitySet url: workspace/collection/dataset (path segments)
         url = f"{dataset.workspace}/{dataset.collection}/{dataset.name}"
 
-        entity_sets.append({"name": name, "kind": "EntitySet", "url": url})
+        # Include source type so clients can distinguish Table vs View (backwards-compatible)
+        entity_sets.append({"name": name, "kind": "EntitySet", "url": url, "source": getattr(dataset, "source", "Table")})
 
     return {
         "@odata.context": "/api/v4/$metadata",
