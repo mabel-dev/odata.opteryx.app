@@ -10,13 +10,13 @@ BUCKET_NAME = os.environ.get("GCS_BUCKET")
 GCP_PROJECT_ID = os.environ.get("GCP_PROJECT_ID")
 
 workspace = OpteryxCatalog(
-    "public",
+    "opteryx",
     firestore_project=GCP_PROJECT_ID,
     firestore_database=FIRESTORE_DATABASE,
     gcs_bucket=BUCKET_NAME,
 )
 
-dataset = workspace.load_dataset("examples.vulnerabilities")
+dataset = workspace.load_dataset("ops.varlog")
 
 schema = dataset.schema()
 snapshot = dataset.snapshot()

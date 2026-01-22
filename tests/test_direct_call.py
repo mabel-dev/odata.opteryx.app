@@ -5,6 +5,18 @@ import os
 import sys
 from unittest.mock import Mock
 
+from pathlib import Path
+
+_tests_dir = Path(__file__).resolve().parent
+_project_root = _tests_dir.parent
+# The external dev packages live at the workspace root (one level up from repo root)
+_workspace_root = _project_root.parent
+# Make imports robust to file moves: ensure repo root and app/opteryx-core live on sys.path
+sys.path.insert(0, str(_project_root))
+sys.path.insert(0, str(_project_root / "app"))
+sys.path.insert(1, str(_workspace_root / "pyiceberg-firestore-gcs"))
+sys.path.insert(1, str(_workspace_root / "opteryx-core"))
+
 import opteryx
 from opteryx.connectors import OpteryxConnector
 from opteryx.planner.logical_planner import do_logical_planning_phase
@@ -14,11 +26,6 @@ from opteryx_catalog import OpteryxCatalog
 from app.routes.v4.interface import read_dataset
 
 os.environ["OPTERYX_DEBUG"] = "1"
-
-
-sys.path.insert(1, os.path.join(sys.path[0], "../pyiceberg-firestore-gcs"))
-sys.path.insert(1, os.path.join(sys.path[0], "../opteryx-core"))
-sys.path.insert(0, os.path.join(sys.path[0], "app"))
 
 
 FIRESTORE_DATABASE = os.environ.get("FIRESTORE_DATABASE")
@@ -32,13 +39,17 @@ workspace = OpteryxCatalog(
     gcs_bucket=BUCKET_NAME,
 )
 
-opteryx.set_default_connector(
-    OpteryxConnector,
-    catalog=OpteryxCatalog,
-    firestore_project=GCP_PROJECT_ID,
-    firestore_database=FIRESTORE_DATABASE,
-    gcs_bucket=BUCKET_NAME,
-)
+# Set default connector only if OpteryxConnector is available in this environment
+if 'OpteryxConnector' in globals() and OpteryxConnector is not None:
+    opteryx.set_default_connector(
+        OpteryxConnector,
+        catalog=OpteryxCatalog,
+        firestore_project=GCP_PROJECT_ID,
+        firestore_database=FIRESTORE_DATABASE,
+        gcs_bucket=BUCKET_NAME,
+    )
+else:
+    print("Note: OpteryxConnector is not available in this environment; skipping connector setup")
 
 print(opteryx.query("SELECT * FROM public.github.events WHERE actor_login = 'Copilot' LIMIT 10"))
 

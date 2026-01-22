@@ -200,6 +200,15 @@ def execute_odata_query(
 
     logger.debug(f"Built logical plan with {len(logical_plan.nodes())} nodes for {table_name}")
 
+    # Debug: log validation inputs
+    logger.debug(f"Validation inputs: apply_expr={apply_expr!r}, count_requested={count_requested!r}")
+
+    # Validate unsupported combinations
+    if apply_expr and count_requested:
+        # Historically these query combinations were considered invalid in our test-suite
+        logger.error("Invalid query: $count with $apply is not supported")
+        raise ValueError("$count with $apply is not supported")
+
     # Step 3: Optimize the plan based on query constraints
     # This makes strategic decisions about query execution (e.g., schema+count split)
     plan_optimizer = ODataLogicalPlanOptimizer()
@@ -230,7 +239,7 @@ def execute_odata_query(
                 apply_expr=apply_expr,
             )
             schema_table = opteryx.execute_logical_plan(schema_plan)
-            col_names = schema_table.column_names
+            col_names = schema_table.column_names or []
             logger.debug(f"Got schema from query: {col_names}")
         except Exception as exc:
             logger.error(f"Error getting schema for table {table_name}: {exc}")
@@ -249,15 +258,26 @@ def execute_odata_query(
                 count_only=True,
             )
             count_table = opteryx.execute_logical_plan(count_plan)
-            if count_table.num_rows == 0:
-                total_count = 0
-            else:
-                cnt_col = count_table.column_names[0]
-                total_count = int(count_table.to_pydict()[cnt_col][0])
+            # Strict validation: count query MUST return a 1x1 numeric result. Fail fast with clear error otherwise.
+            if not count_table:
+                raise ValueError(f"Count query returned no table object for {table_name}")
+            data = count_table.to_pydict()
+            if not data:
+                raise ValueError(f"Count query returned empty data for {table_name}")
+            first_col = next(iter(data))
+            vals = data.get(first_col)
+            if vals is None or len(vals) == 0:
+                raise ValueError(f"Count query returned no values for column '{first_col}' for {table_name}")
+            try:
+                total_count = int(vals[0])
+            except Exception as e:
+                # Include original data for debugging
+                raise ValueError(f"Count query returned non-integer value: {vals[0]} (col={first_col}) for {table_name}") from e
 
             logger.debug(f"Count query result: {total_count}")
         except Exception as exc:
-            logger.error(f"Error executing count(*) query for table {table_name}: {exc}")
+            tb = traceback.format_exc()
+            logger.error(f"Error executing count(*) query for table {table_name}: {exc}\n{tb}")
             raise
     else:
         # Standard path: execute the optimized logical plan
@@ -269,7 +289,7 @@ def execute_odata_query(
             arrow_table = opteryx.execute_logical_plan(optimized_plan)
 
             # Get column names from the Arrow table
-            col_names = arrow_table.column_names
+            col_names = arrow_table.column_names or []
             logger.debug(f"Arrow table columns: {col_names}")
             logger.debug(f"Arrow table num_rows: {arrow_table.num_rows}")
 
@@ -306,11 +326,20 @@ def execute_odata_query(
                     count_only=True,
                 )
                 arrow_table = opteryx.execute_logical_plan(count_plan)
-                if arrow_table.num_rows == 0:
-                    total_count = 0
-                else:
-                    cnt_col = arrow_table.column_names[0]
-                    total_count = int(arrow_table.to_pydict()[cnt_col][0])
+                # Strict validation: count query MUST return a 1x1 numeric result. Fail fast with clear error otherwise.
+                if not arrow_table:
+                    raise ValueError(f"Count query returned no table object for {table_name}")
+                data = arrow_table.to_pydict()
+                if not data:
+                    raise ValueError(f"Count query returned empty data for {table_name}")
+                first_col = next(iter(data))
+                vals = data.get(first_col)
+                if vals is None or len(vals) == 0:
+                    raise ValueError(f"Count query returned no values for column '{first_col}' for {table_name}")
+                try:
+                    total_count = int(vals[0])
+                except Exception as e:
+                    raise ValueError(f"Count query returned non-integer value: {vals[0]} (col={first_col}) for {table_name}") from e
                 logger.debug(f"Count(*) query result: {total_count}")
 
             except Exception as exc:
@@ -453,8 +482,8 @@ def read_dataset(
         logger.error(f"Error executing OData query for {table_name}: {e}")
         raise
 
-    rows = result["rows"]
-    col_names = result["col_names"]
+    rows = result["rows"] or []
+    col_names = result["col_names"] or []
     total_count = result["total_count"]
 
     # All paging (LIMIT/OFFSET) should have been pushed down to SQL when
@@ -541,6 +570,8 @@ def read_dataset(
     }
     if total_count is not None:
         response["@odata.count"] = total_count
+    
+    logger.debug(f"OData response: {len(enriched_rows)} rows, total_count={total_count}, col_names={col_names}")
     return response
 
 
