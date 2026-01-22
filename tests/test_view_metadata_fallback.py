@@ -98,8 +98,9 @@ def test_dataset_metadata_view_fallback(monkeypatch):
             return {'id': {'min': 1, 'max': 100}}
         def snapshot(self):
             return type('Snap', (), {'timestamp_ms': 1700000000000})()
-
-    class FakeCatalog:
+            @property
+            def metadata(self):
+                return type('M', (), {'timestamp_ms': 1700000000000, 'description': None, 'author': None, 'describer': None})()
         def __init__(self, *args, **kwargs):
             pass
 

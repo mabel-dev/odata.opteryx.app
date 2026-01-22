@@ -673,14 +673,20 @@ def dataset_metadata(
                     # Add stats to metadata
                     col_metadata[col_name].update(stats)
 
-        # Get snapshot for last modified info
-        snapshot = ds.snapshot()
-        logger.debug(f"Snapshot: {snapshot}")
-        if snapshot:
-            # Snapshot is an object with attributes
-            timestamp_ms = getattr(snapshot, 'timestamp_ms', None)
-            if timestamp_ms:
-                response.headers["X-Dataset-LastModified"] = str(timestamp_ms)
+        # Get snapshot for last modified info only for tables (views typically don't expose snapshot)
+        try:
+            snapshot = None
+            if source_type == "Table" and hasattr(ds, "snapshot") and callable(getattr(ds, "snapshot")):
+                snapshot = ds.snapshot()
+            logger.debug(f"Snapshot: {snapshot}")
+            if snapshot:
+                # Snapshot is an object with attributes
+                timestamp_ms = getattr(snapshot, 'timestamp_ms', None)
+                if timestamp_ms:
+                    response.headers["X-Dataset-LastModified"] = str(timestamp_ms)
+        except Exception:
+            # Be defensive: missing or failing snapshot should not break metadata
+            logger.debug("Snapshot unavailable or raised when retrieving last-modified", exc_info=True)
 
         logger.debug(f"Loaded enriched metadata for {table_name} from catalog with {len(col_names)} columns; source={source_type}")
     except HTTPException:
@@ -739,19 +745,50 @@ def dataset_metadata(
         
         lines.append("        </Property>")
 
-    lines.extend(
-        [
-            "      </EntityType>",
-            '      <EntityContainer Name="Container">',
-            f'        <EntitySet Name="{dataset}" EntityType="{schema_ns}.{entity_name}">',
-            f'          <Annotation Term="Custom.SourceType" String="{source_type}"/>',
-            '        </EntitySet>',
-            "      </EntityContainer>",
-            "    </Schema>",
-            "  </edmx:DataServices>",
-            "</edmx:Edmx>",
-        ]
-    )
+    lines.extend([
+        "      </EntityType>",
+        '      <EntityContainer Name="Container">',
+        f'        <EntitySet Name="{dataset}" EntityType="{schema_ns}.{entity_name}">',
+        f'          <Annotation Term="Custom.SourceType" String="{source_type}"/>',
+    ])
+
+    # If this is a view, try to enrich EntitySet with view metadata (definition, author, description, LLM flag)
+    if source_type == "View":
+        try:
+            definition = getattr(ds, "sql", None) or getattr(ds, "definition", None)
+            if definition:
+                def_val = str(definition).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+                lines.append(f'          <Annotation Term="Custom.Definition" String="{def_val}"/>')
+
+            meta = getattr(ds, "metadata", None)
+            if meta is not None:
+                author = getattr(meta, "author", None)
+                if author:
+                    lines.append(f'          <Annotation Term="Custom.Author" String="{str(author)}"/>')
+
+                description = getattr(meta, "description", None)
+                if description:
+                    desc_val = str(description).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+                    lines.append(f'          <Annotation Term="Custom.Description" String="{desc_val}"/>')
+
+                describer = getattr(meta, "describer", None)
+                llm_flag = isinstance(describer, str) and (describer.startswith("Gemini:") or describer.startswith("Llama-"))
+                lines.append(f'          <Annotation Term="Custom.LLMDescribed" Bool="{str(llm_flag).lower()}"/>')
+
+                # If metadata timestamp present and header not set, set last modified header
+                meta_ts = getattr(meta, "timestamp_ms", None)
+                if meta_ts and not response.headers.get("X-Dataset-LastModified"):
+                    response.headers["X-Dataset-LastModified"] = str(meta_ts)
+        except Exception:
+            logger.debug("Failed to extract view metadata for annotations", exc_info=True)
+
+    lines.extend([
+        '        </EntitySet>',
+        "      </EntityContainer>",
+        "    </Schema>",
+        "  </edmx:DataServices>",
+        "</edmx:Edmx>",
+    ])
 
     xml = "\n".join(lines)
     return Response(content=xml, media_type="application/xml")
