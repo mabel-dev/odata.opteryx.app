@@ -626,32 +626,52 @@ def dataset_metadata(
         response.headers["X-Dataset-Source"] = source_type
 
         # Get schema for column types and precision info
-        schema = ds.schema()
+        schema = None
+        try:
+            if hasattr(ds, "schema"):
+                schema = ds.schema()
+        except Exception:
+            schema = None
+
         logger.debug(f"Schema from catalog: {schema}")
-        if schema:
-            # Schema is a RelationSchema object with columns attribute
-            if hasattr(schema, 'columns'):
-                for field in schema.columns:
-                    col_name = field.name
-                    col_names.append(col_name)
-                    # Map Orso type to EDM type
-                    edm_type = _orso_type_to_edm(field.type)
-                    col_types.append(edm_type)
-                    col_metadata[col_name] = {
-                        "type": edm_type,
-                        "source_type": str(field.type),
-                        "nullable": field.nullable,
-                    }
+
+        if schema and hasattr(schema, "columns"):
+            for field in schema.columns:
+                col_name = field.name
+                col_names.append(col_name)
+                # Map Orso type to EDM type
+                edm_type = _orso_type_to_edm(field.type)
+                col_types.append(edm_type)
+                col_metadata[col_name] = {
+                    "type": edm_type,
+                    "source_type": str(field.type),
+                    "nullable": field.nullable,
+                }
+        else:
+            # If this is a view and the catalog object does not provide a schema,
+            # emit a minimal placeholder so the metadata document remains valid.
+            if source_type == "View":
+                # Single string key placeholder
+                col_names = ["id"]
+                col_metadata = {"id": {"type": "Edm.String", "nullable": True}}
+            else:
+                # For tables, lack of schema indicates invalid catalog state
+                raise HTTPException(status_code=404, detail="dataset schema unavailable in catalog")
 
         # Get statistics from description (min/max, cardinality, distribution)
-        description = ds.describe()
+        description = None
+        try:
+            if hasattr(ds, "describe"):
+                description = ds.describe()
+        except Exception:
+            description = None
+
         logger.debug(f"Description keys: {list(description.keys()) if isinstance(description, dict) else 'not a dict'}")
         if description and isinstance(description, dict):
             for col_name, stats in description.items():
-                if col_name in col_metadata:
+                if col_name in col_metadata and isinstance(stats, dict):
                     # Add stats to metadata
-                    if isinstance(stats, dict):
-                        col_metadata[col_name].update(stats)
+                    col_metadata[col_name].update(stats)
 
         # Get snapshot for last modified info
         snapshot = ds.snapshot()
