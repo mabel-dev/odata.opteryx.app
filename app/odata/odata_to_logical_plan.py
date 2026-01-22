@@ -119,10 +119,31 @@ class ODataLogicalPlanBuilder:
         agg_node = LogicalPlanNode(node_type=LogicalPlanStepType.AggregateAndGroup)
         # No group by -> global aggregation
         agg_node.group_by = []
-        agg_node.aggregations = [
-            {"function": "COUNT", "expression": None, "alias": "count"}
-        ]
-        return self._add_node(agg_node)
+        # Binder expects 'groups' attribute (use same empty list)
+        agg_node.groups = []
+        # Build aggregator Node(s) to match Opteryx SQL planner shape (NodeType.AGGREGATOR)
+        agg = Node(node_type=NodeType.AGGREGATOR)
+        # SQL planner represents COUNT(*) as a Node with value 'COUNT' and parameters [WILDCARD]
+        agg.value = "COUNT"
+        agg.parameters = [Node(node_type=NodeType.WILDCARD)]
+        agg.alias = "count"
+        agg_node.aggregates = [agg]
+        # Ensure 'projection' exists for physical planner
+        agg_node.projection = [agg]
+
+        # Add aggregate node first
+        agg_step_id = self._add_node(agg_node)
+
+        # Add a Project node so the aggregate result is projected (SQL planner does Aggregate -> Project -> Exit)
+        project_node = LogicalPlanNode(node_type=LogicalPlanStepType.Project)
+        # Project the aggregator node itself
+        project_node.columns = [agg]
+        project_node.order_by_columns = []
+        project_node.except_columns = []
+        self.current_step_id = agg_step_id
+        project_step_id = self._add_node(project_node)
+
+        return project_step_id
 
     def _add_node(self, node: LogicalPlanNode) -> str:
         """Add a node to the plan and connect it to the previous node.
