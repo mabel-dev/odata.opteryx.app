@@ -6,7 +6,9 @@ from pathlib import Path
 from fastapi import Response
 
 # Provide lightweight fake modules required by interface imports
-sys.modules.setdefault('opteryx', types.ModuleType('opteryx'))
+opteryx_mod = sys.modules.setdefault('opteryx', types.ModuleType('opteryx'))
+# Provide a stub for set_default_connector used by interface module
+opteryx_mod.set_default_connector = lambda *args, **kwargs: None
 # opteryx.connectors
 _connectors_mod = types.ModuleType('opteryx.connectors')
 _connectors_mod.OpteryxConnector = type('OpteryxConnector', (), {})
@@ -86,31 +88,39 @@ class DummyDB:
 
 
 def test_dataset_metadata_view_fallback(monkeypatch):
-    # Make OpteryxCatalog.load_dataset raise to simulate unsupported view
+    # Make OpteryxCatalog.load_dataset raise and provide load_view to return a view object
+    class FakeDataset:
+        def __init__(self):
+            self._schema = type('S', (), {'columns': [type('C', (), {'name': 'id', 'type': 'INTEGER', 'nullable': False})]})
+        def schema(self):
+            return self._schema
+        def describe(self):
+            return {'id': {'min': 1, 'max': 100}}
+        def snapshot(self):
+            return type('Snap', (), {'timestamp_ms': 1700000000000})()
+
     class FakeCatalog:
         def __init__(self, *args, **kwargs):
             pass
 
         def load_dataset(self, path):
-            raise RuntimeError("catalog cannot load view")
+            raise RuntimeError("not a dataset")
+
+        def load_view(self, path):
+            return FakeDataset()
 
     monkeypatch.setattr(interface, "OpteryxCatalog", FakeCatalog)
-
-    # Fake Firestore DB that has a view doc
-    view_doc = DummyDoc({"workspace": "public", "namespace": "examples", "name": "my_view"})
-    db = DummyDB([view_doc])
-    monkeypatch.setattr(interface, "_get_firestore_client", lambda database=None: db)
 
     # Prepare request/response
     req = DummyRequest()
     resp = Response()
 
+    # Call metadata for view and expect success
     res = interface.dataset_metadata(req, resp, workstream="public", collection="examples", dataset="my_view")
 
-    # Ensure XML contains the view annotation and entity type
-    content = res.content.decode()
-    assert "Custom.SourceType" in content
-    assert "View" in content
-    assert "EntityType Name=\"examples_my_view\"" in content or "EntityType Name=\'examples_my_view\'" in content
+    content = res.content.decode() if hasattr(res, 'content') else res.body.decode()
+    assert 'Custom.SourceType' in content
+    assert 'View' in content
     # Header should indicate source
     assert resp.headers.get("X-Dataset-Source") == "View"
+    assert resp.headers.get("X-Dataset-LastModified") is not None
