@@ -675,6 +675,7 @@ def dataset_metadata(
 
         # Get snapshot for last modified info only for tables (views typically don't expose snapshot)
         last_ts_ms = None
+        snapshot_info = {}
         try:
             snapshot = None
             if source_type == "Table" and hasattr(ds, "snapshot") and callable(getattr(ds, "snapshot")):
@@ -686,6 +687,20 @@ def dataset_metadata(
                 if timestamp_ms:
                     response.headers["X-Dataset-LastModified"] = str(timestamp_ms)
                     last_ts_ms = timestamp_ms
+                # Collect snapshot id and summary where available
+                snapshot_id = getattr(snapshot, 'snapshot_id', None)
+                if snapshot_id:
+                    snapshot_info['snapshot_id'] = str(snapshot_id)
+                    # Expose snapshot id in a header for quick visibility
+                    response.headers["X-Dataset-Snapshot-Id"] = str(snapshot_id)
+                summary = getattr(snapshot, 'summary', None)
+                if isinstance(summary, dict):
+                    total_records = summary.get("total-records")
+                    total_file_size = summary.get("total-files-size")
+                    if total_records is not None:
+                        snapshot_info['total_records'] = int(total_records)
+                    if total_file_size is not None:
+                        snapshot_info['total_file_size'] = int(total_file_size)
         except Exception:
             # Be defensive: missing or failing snapshot should not break metadata
             logger.debug("Snapshot unavailable or raised when retrieving last-modified", exc_info=True)
@@ -785,6 +800,32 @@ def dataset_metadata(
                     last_ts_ms = meta_ts
         except Exception:
             logger.debug("Failed to extract view metadata for annotations", exc_info=True)
+
+    # If this is a table, add snapshot and table-level metadata annotations
+    if source_type == "Table":
+        try:
+            # Snapshot annotations
+            if snapshot_info:
+                sid = snapshot_info.get("snapshot_id")
+                if sid:
+                    lines.append(f'          <Annotation Term="Custom.Snapshot.Id" String="{sid}"/>')
+                if "total_records" in snapshot_info:
+                    lines.append(f'          <Annotation Term="Custom.Snapshot.TotalRecords" Int="{snapshot_info["total_records"]}"/>')
+                if "total_file_size" in snapshot_info:
+                    lines.append(f'          <Annotation Term="Custom.Snapshot.TotalFileSize" Int="{snapshot_info["total_file_size"]}"/>')
+
+            # Table metadata
+            meta = getattr(ds, "metadata", None)
+            if meta is not None:
+                descr = getattr(meta, "description", None)
+                if descr:
+                    desc_val = str(descr).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+                    lines.append(f'          <Annotation Term="Custom.Description" String="{desc_val}"/>')
+                describer = getattr(meta, "describer", None)
+                llm_flag = isinstance(describer, str) and (describer.startswith("Gemini:") or describer.startswith("Llama-"))
+                lines.append(f'          <Annotation Term="Custom.LLMDescribed" Bool="{str(llm_flag).lower()}"/>')
+        except Exception:
+            logger.debug("Failed to extract table metadata for annotations", exc_info=True)
 
     # Add LastModified annotation if we have a timestamp
     if last_ts_ms:
