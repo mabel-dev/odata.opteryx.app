@@ -704,7 +704,9 @@ def dataset_metadata(
         [
             "      </EntityType>",
             '      <EntityContainer Name="Container">',
-            f'        <EntitySet Name="{dataset}" EntityType="{schema_ns}.{entity_name}" />',
+            f'        <EntitySet Name="{dataset}" EntityType="{schema_ns}.{entity_name}">',
+            f'          <Annotation Term="Custom.SourceType" String="Table"/>',
+            '        </EntitySet>',
             "      </EntityContainer>",
             "    </Schema>",
             "  </edmx:DataServices>",

@@ -70,11 +70,12 @@ def _parse_path_segments(path: str) -> tuple[str | None, str | None, str | None]
 class DatasetInfo:
     """Information about a dataset accessible to the user."""
 
-    def __init__(self, resource: str, workspace: str, collection: str, name: str):
+    def __init__(self, resource: str, workspace: str, collection: str, name: str, source: str = "Table"):
         self.resource = resource
         self.workspace = workspace
         self.collection = collection
         self.name = name
+        self.source = source
 
 
 def _query_collection_group(
@@ -128,12 +129,16 @@ def _query_collection_group(
                 resource_name = f"{workspace}.{collection_name}.{name}"
                 resource_name = _normalize_resource_name(resource_name)
 
+                # Determine source type based on collection group ('datasets' => Table, 'views' => View)
+                source_type = "View" if collection == "views" else "Table"
+
                 results.append(
                     DatasetInfo(
                         resource=resource_name,
                         workspace=workspace,
                         collection=collection_name,
                         name=name,
+                        source=source_type,
                     )
                 )
             except Exception:
@@ -475,10 +480,17 @@ def get_edmx_metadata(
         # EntitySet name uses dots (as in service document)
         entity_set_name = dataset.resource
 
-        ET.SubElement(
+        entity_set = ET.SubElement(
             entity_container,
             "{" + NS_EDM + "}EntitySet",
             attrib={"Name": entity_set_name, "EntityType": f"OData.{entity_type_name}"},
+        )
+
+        # Add annotation indicating source type (Table or View)
+        ET.SubElement(
+            entity_set,
+            "{" + NS_EDM + "}Annotation",
+            attrib={"Term": "Custom.SourceType", "String": dataset.source},
         )
 
     # Convert to XML string
