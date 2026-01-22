@@ -58,11 +58,12 @@ def _parse_path_segments(path: str) -> tuple[str | None, str | None, str | None]
 class DatasetInfo:
     """Information about a dataset accessible to the user."""
 
-    def __init__(self, resource: str, workspace: str, collection: str, name: str):
+    def __init__(self, resource: str, workspace: str, collection: str, name: str, source: str = "Table"):
         self.resource = resource
         self.workspace = workspace
         self.collection = collection
         self.name = name
+        self.source = source
 
 
 def _query_collection_group(
@@ -116,12 +117,16 @@ def _query_collection_group(
                 resource_name = f"{workspace}.{collection_name}.{name}"
                 resource_name = _normalize_resource_name(resource_name)
 
+                # Determine source type based on collection group ('datasets' => Table, 'views' => View)
+                source_type = "View" if collection == "views" else "Table"
+
                 results.append(
                     DatasetInfo(
                         resource=resource_name,
                         workspace=workspace,
                         collection=collection_name,
                         name=name,
+                        source=source_type,
                     )
                 )
             except Exception:
