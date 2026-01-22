@@ -12,7 +12,18 @@ _opteryx_catalog_mod = types.ModuleType('opteryx_catalog')
 _opteryx_catalog_mod.OpteryxCatalog = type('OpteryxCatalog', (), {'load_dataset': lambda self, path: None})
 sys.modules['opteryx_catalog'] = _opteryx_catalog_mod
 
-import app.routes.v4.service_document as sd
+# Import module directly by path to avoid importing package-level modules that pull heavy dependencies
+import importlib.util
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location(
+    "sd_module",
+    str(Path(__file__).resolve().parents[1] / "app" / "routes" / "v4" / "service_document.py"),
+)
+sd = importlib.util.module_from_spec(spec)
+loader = spec.loader
+assert loader is not None
+loader.exec_module(sd)
 
 
 class DummyState:

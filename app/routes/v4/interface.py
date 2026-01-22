@@ -648,9 +648,50 @@ def dataset_metadata(
         
         logger.debug(f"Loaded enriched metadata for {table_name} from catalog with {len(col_names)} columns")
     except Exception as e:
-        tb_str = traceback.format_exc()
-        logger.error(f"Failed to load metadata from catalog: {e}\n{tb_str}")
-        raise
+        # Catalog couldn't load dataset (possible for views). Try Firestore lookup for a view doc and return minimal metadata if present.
+        logger.warning(f"Failed to load metadata from catalog for {table_name}: {e}; attempting view fallback")
+        try:
+            from app.core import _get_firestore_client
+
+            db = _get_firestore_client(database=FIRESTORE_DATABASE)
+            is_view = False
+            schema_cols = None
+            if db is not None:
+                try:
+                    q = db.collection_group("views")
+                    q = q.where("workspace", "==", workstream).where("namespace", "==", collection).where("name", "==", dataset).limit(1)
+                    docs = list(q.stream())
+                    if docs:
+                        is_view = True
+                        data = docs[0].to_dict() or {}
+                        # If the view document carries a schema, use it
+                        if isinstance(data.get("schema"), list):
+                            schema_cols = data.get("schema")
+                except Exception:
+                    logger.debug("Firestore lookup for view fallback failed", exc_info=True)
+            
+            if is_view:
+                # Basic fallback: expose the view with minimal metadata
+                response.headers["X-Dataset-Source"] = "View"
+                if schema_cols:
+                    # Use provided schema list of dicts {name, type}
+                    for col in schema_cols:
+                        cn = col.get("name")
+                        if not cn:
+                            continue
+                        col_names.append(cn)
+                        col_metadata[cn] = {"type": col.get("type", "Edm.String"), "nullable": True}
+                else:
+                    # Minimal placeholder so XML is valid
+                    col_names = ["id"]
+                    col_metadata = {"id": {"type": "Edm.String", "nullable": True}}
+            else:
+                # Reraise original exception if not a view
+                raise
+        except Exception:
+            tb_str = traceback.format_exc()
+            logger.error(f"Failed to load metadata from catalog and no view fallback available: {e}\n{tb_str}")
+            raise
 
     # Build EDMX XML with annotations
     schema_ns = f"{collection}"
