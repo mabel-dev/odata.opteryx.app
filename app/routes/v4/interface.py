@@ -674,6 +674,7 @@ def dataset_metadata(
                     col_metadata[col_name].update(stats)
 
         # Get snapshot for last modified info only for tables (views typically don't expose snapshot)
+        last_ts_ms = None
         try:
             snapshot = None
             if source_type == "Table" and hasattr(ds, "snapshot") and callable(getattr(ds, "snapshot")):
@@ -684,6 +685,7 @@ def dataset_metadata(
                 timestamp_ms = getattr(snapshot, 'timestamp_ms', None)
                 if timestamp_ms:
                     response.headers["X-Dataset-LastModified"] = str(timestamp_ms)
+                    last_ts_ms = timestamp_ms
         except Exception:
             # Be defensive: missing or failing snapshot should not break metadata
             logger.debug("Snapshot unavailable or raised when retrieving last-modified", exc_info=True)
@@ -777,10 +779,21 @@ def dataset_metadata(
 
                 # If metadata timestamp present and header not set, set last modified header
                 meta_ts = getattr(meta, "timestamp_ms", None)
-                if meta_ts and not response.headers.get("X-Dataset-LastModified"):
-                    response.headers["X-Dataset-LastModified"] = str(meta_ts)
+                if meta_ts:
+                    if not response.headers.get("X-Dataset-LastModified"):
+                        response.headers["X-Dataset-LastModified"] = str(meta_ts)
+                    last_ts_ms = meta_ts
         except Exception:
             logger.debug("Failed to extract view metadata for annotations", exc_info=True)
+
+    # Add LastModified annotation if we have a timestamp
+    if last_ts_ms:
+        try:
+            import datetime as _dt
+            iso = _dt.datetime.utcfromtimestamp(last_ts_ms / 1000.0).replace(tzinfo=_dt.timezone.utc).isoformat()
+            lines.append(f'          <Annotation Term="Custom.LastModified" String="{iso}"/>')
+        except Exception:
+            pass
 
     lines.extend([
         '        </EntitySet>',

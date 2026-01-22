@@ -92,3 +92,6 @@ def test_view_metadata_includes_annotations(monkeypatch):
     assert 'Custom.LLMDescribed' in content
     # header from metadata timestamp
     assert resp.headers.get('X-Dataset-LastModified') == str(1700000000000)
+    # LastModified annotation present in metadata and in ISO format
+    assert 'Custom.LastModified' in content
+    assert '+00:00' in content or 'Z' in content
