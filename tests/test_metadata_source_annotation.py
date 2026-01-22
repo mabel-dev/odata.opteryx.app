@@ -16,7 +16,14 @@ _opteryx_catalog_mod = types.ModuleType('opteryx_catalog')
 _opteryx_catalog_mod.OpteryxCatalog = type('OpteryxCatalog', (), {'load_dataset': lambda self, path: None})
 sys.modules['opteryx_catalog'] = _opteryx_catalog_mod
 
-import app.routes.v4.metadata as metadata
+# Import the target module directly to avoid importing package __init__ modules
+import importlib.util
+from pathlib import Path
+
+_metadata_path = Path(__file__).parents[1] / "app" / "routes" / "v4" / "metadata.py"
+spec = importlib.util.spec_from_file_location("metadata_mod", str(_metadata_path))
+metadata = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(metadata)
 
 
 class DummyState:
