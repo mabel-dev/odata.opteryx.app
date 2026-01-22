@@ -85,6 +85,6 @@ def test_view_metadata_without_schema(monkeypatch):
     assert 'Custom.SourceType' in content
     assert 'View' in content
     assert '<Property Name="id"' in content or "<Property Name='id'" in content
-    # Header should indicate source and last modified
+    # Header should indicate source; no last-modified since metadata timestamp is missing
     assert resp.headers.get('X-Dataset-Source') == 'View'
-    assert resp.headers.get('X-Dataset-LastModified') is not None
+    assert resp.headers.get('X-Dataset-LastModified') is None
