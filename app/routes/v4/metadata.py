@@ -70,12 +70,13 @@ def _parse_path_segments(path: str) -> tuple[str | None, str | None, str | None]
 class DatasetInfo:
     """Information about a dataset accessible to the user."""
 
-    def __init__(self, resource: str, workspace: str, collection: str, name: str, source: str = "Table"):
+    def __init__(self, resource: str, workspace: str, collection: str, name: str, source: str = "Table", last_modified_ms: int | None = None):
         self.resource = resource
         self.workspace = workspace
         self.collection = collection
         self.name = name
         self.source = source
+        self.last_modified_ms = last_modified_ms
 
 
 def _query_collection_group(
@@ -132,6 +133,30 @@ def _query_collection_group(
                 # Determine source type based on collection group ('datasets' => Table, 'views' => View)
                 source_type = "View" if collection == "views" else "Table"
 
+                # Try to capture last modified information from Firestore doc (common field names)
+                last_modified = None
+                for key in ("last_modified", "updated_at", "updated", "timestamp_ms", "last_modified_ms"):
+                    val = data.get(key) if isinstance(data, dict) else None
+                    if val is not None:
+                        # If integer timestamp (ms) use directly
+                        if isinstance(val, int):
+                            last_modified = val
+                            break
+                        # If ISO datetime string, try to parse
+                        if isinstance(val, str):
+                            try:
+                                import datetime as _dt
+
+                                iso = val
+                                if iso.endswith("Z"):
+                                    iso = iso.replace("Z", "+00:00")
+                                dt = _dt.datetime.fromisoformat(iso)
+                                last_modified = int(dt.timestamp() * 1000)
+                                break
+                            except Exception:
+                                # ignore parse errors and continue
+                                pass
+
                 results.append(
                     DatasetInfo(
                         resource=resource_name,
@@ -139,6 +164,7 @@ def _query_collection_group(
                         collection=collection_name,
                         name=name,
                         source=source_type,
+                        last_modified_ms=last_modified,
                     )
                 )
             except Exception:
@@ -492,6 +518,40 @@ def get_edmx_metadata(
             "{" + NS_EDM + "}Annotation",
             attrib={"Term": "Custom.SourceType", "String": dataset.source},
         )
+
+        # Add last-modified annotation if available (try catalog first, then Firestore doc timestamp)
+        try:
+            # Try to get last modified from catalog snapshot
+            catalog = OpteryxCatalog(
+                dataset.workspace,
+                firestore_project=GCP_PROJECT_ID,
+                firestore_database=FIRESTORE_DATABASE,
+                gcs_bucket=BUCKET_NAME,
+            )
+            ds_obj = catalog.load_dataset(f"{dataset.collection}.{dataset.name}")
+            snapshot = ds_obj.snapshot()
+            ts = getattr(snapshot, "timestamp_ms", None)
+        except Exception:
+            ts = None
+
+        # Fallback to dataset.last_modified_ms (from Firestore doc)
+        if ts is None:
+            ts = getattr(dataset, "last_modified_ms", None)
+
+        if ts:
+            try:
+                import datetime as _dt
+
+                # Convert milliseconds to ISO 8601 UTC string
+                iso = _dt.datetime.utcfromtimestamp(ts / 1000.0).replace(tzinfo=_dt.timezone.utc).isoformat()
+                ET.SubElement(
+                    entity_set,
+                    "{" + NS_EDM + "}Annotation",
+                    attrib={"Term": "Custom.LastModified", "String": iso},
+                )
+            except Exception:
+                # If conversion fails, skip adding annotation
+                pass
 
     # Convert to XML string
     xml_str = ET.tostring(edmx, encoding="unicode", method="xml")
