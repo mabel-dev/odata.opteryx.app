@@ -88,27 +88,25 @@ class DummyDB:
 
 
 def test_dataset_metadata_view_fallback(monkeypatch):
-    # Make OpteryxCatalog.load_dataset raise and provide load_view to return a view object
-    class FakeDataset:
+    # Make OpteryxCatalog.load_dataset raise and provide load_view to return a view object with metadata timestamp
+    class FakeView:
         def __init__(self):
             self._schema = type('S', (), {'columns': [type('C', (), {'name': 'id', 'type': 'INTEGER', 'nullable': False})]})
         def schema(self):
             return self._schema
         def describe(self):
             return {'id': {'min': 1, 'max': 100}}
-        def snapshot(self):
-            return type('Snap', (), {'timestamp_ms': 1700000000000})()
-            @property
-            def metadata(self):
-                return type('M', (), {'timestamp_ms': 1700000000000, 'description': None, 'author': None, 'describer': None})()
+        @property
+        def metadata(self):
+            return type('M', (), {'timestamp_ms': 1700000000000, 'description': None, 'author': None, 'describer': None})()
+
+    class FakeCatalog:
         def __init__(self, *args, **kwargs):
             pass
-
         def load_dataset(self, path):
             raise RuntimeError("not a dataset")
-
         def load_view(self, path):
-            return FakeDataset()
+            return FakeView()
 
     monkeypatch.setattr(interface, "OpteryxCatalog", FakeCatalog)
 
