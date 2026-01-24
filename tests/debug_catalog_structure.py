@@ -1,4 +1,5 @@
 """Debug catalog structure to understand schema/snapshot/description formats."""
+
 import os
 import sys
 

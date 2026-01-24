@@ -3,7 +3,6 @@
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-import pytest
 
 from app.routes.v4.interface import router, require_authentication
 
@@ -40,7 +39,9 @@ def test_count_with_groupby_returns_group_count():
     except Exception as exc:
         # Skip if dataset not found in environment
         try:
-            if exc.__class__.__name__ == 'DatasetNotFoundError' or isinstance(exc, getattr(_opteryx, 'exceptions').DatasetNotFoundError):
+            if exc.__class__.__name__ == "DatasetNotFoundError" or isinstance(
+                exc, getattr(_opteryx, "exceptions").DatasetNotFoundError
+            ):
                 _pytest.skip("dataset not available in this environment")
         except Exception:
             pass

@@ -13,11 +13,11 @@ from opteryx.planner.logical_planner import LogicalPlan
 
 class ODataLogicalPlanOptimizer:
     """Optimize OData logical plans based on constraints and parameters.
-    
+
     Makes strategic decisions about query execution:
     - When to fetch schema + count separately from data
     - Other optimization heuristics specific to OData semantics
-    
+
     This separates optimization logic from core plan building, making
     it easier to understand and test query strategies.
     """
@@ -57,9 +57,7 @@ class ODataLogicalPlanOptimizer:
             "original_plan": logical_plan,
         }
 
-    def _should_use_schema_count_split(
-        self, top: Optional[int], count_requested: bool
-    ) -> bool:
+    def _should_use_schema_count_split(self, top: Optional[int], count_requested: bool) -> bool:
         """Determine if we should use the schema + count split optimization.
 
         This optimization is beneficial when:

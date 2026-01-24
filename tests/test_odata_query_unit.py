@@ -232,8 +232,12 @@ class TestODataApply:
 
         # Prefer direct SQL path if available (query_to_arrow), otherwise
         # fall back to logical plan path if execute_logical_plan is present.
-        if not hasattr(_opteryx, "query_to_arrow") and not hasattr(_opteryx, "execute_logical_plan"):
-            _pytest.skip("neither opteryx.query_to_arrow nor opteryx.execute_logical_plan available in this environment")
+        if not hasattr(_opteryx, "query_to_arrow") and not hasattr(
+            _opteryx, "execute_logical_plan"
+        ):
+            _pytest.skip(
+                "neither opteryx.query_to_arrow nor opteryx.execute_logical_plan available in this environment"
+            )
 
         try:
             result = execute_odata_query(
@@ -244,7 +248,10 @@ class TestODataApply:
             # If dataset is not present in this environment (local dev), skip this test
             try:
                 import opteryx as _opteryx
-                if exc.__class__.__name__ == 'DatasetNotFoundError' or isinstance(exc, getattr(_opteryx, 'exceptions').DatasetNotFoundError):
+
+                if exc.__class__.__name__ == "DatasetNotFoundError" or isinstance(
+                    exc, getattr(_opteryx, "exceptions").DatasetNotFoundError
+                ):
                     _pytest.skip("dataset not available in this environment")
             except Exception:
                 pass

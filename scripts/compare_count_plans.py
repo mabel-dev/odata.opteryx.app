@@ -11,10 +11,15 @@ This script:
 Run from repository root: python3 scripts/compare_count_plans.py
 """
 
-import os
-import sys
 import pprint
+import sys
 from pathlib import Path
+
+from opteryx.planner.logical_planner import do_logical_planning_phase
+from opteryx.third_party import sqloxide
+
+from app.odata.odata_to_logical_plan import ODataLogicalPlanBuilder
+from app.odata.plan_optimizer import ODataLogicalPlanOptimizer
 
 # Make imports work regardless of where this script is run from
 _repo_root = Path(__file__).resolve().parent.parent
@@ -22,12 +27,6 @@ sys.path.insert(0, str(_repo_root))
 sys.path.insert(0, str(_repo_root / "app"))
 sys.path.insert(1, str(_repo_root / "opteryx-core"))
 sys.path.insert(1, str(_repo_root / "pyiceberg-firestore-gcs"))
-
-from opteryx.planner.logical_planner import do_logical_planning_phase
-from opteryx.third_party import sqloxide
-
-from app.odata.odata_to_logical_plan import ODataLogicalPlanBuilder
-from app.odata.plan_optimizer import ODataLogicalPlanOptimizer
 
 
 def print_plan(plan, title):
@@ -77,10 +76,15 @@ def build_odata_schema_count_split(table_name: str):
     base_plan = builder.build(top=0)
 
     optimizer = ODataLogicalPlanOptimizer()
-    optimized_plan, strategy_info = optimizer.optimize_with_constraints(base_plan, top=0, count_requested=True)
+    optimized_plan, strategy_info = optimizer.optimize_with_constraints(
+        base_plan, top=0, count_requested=True
+    )
 
     # If optimizer suggests schema_count_split, show schema and count plans
-    details = {"strategy": strategy_info.get("strategy"), "description": strategy_info.get("description")}
+    details = {
+        "strategy": strategy_info.get("strategy"),
+        "description": strategy_info.get("description"),
+    }
 
     schema_builder = ODataLogicalPlanBuilder(table_name)
     schema_plan = schema_builder.build(top=1)
@@ -93,9 +97,12 @@ def build_odata_schema_count_split(table_name: str):
 
 def compare_aggregate_shapes(sql_plan, odata_plan):
     """Compare aggregate node shapes between SQL and OData COUNT plans."""
+
     def find_agg_node(plan):
         for _, node in plan.nodes(True):
-            if getattr(node, "node_type", None) is not None and str(getattr(node, "node_type")).endswith("AggregateAndGroup"):
+            if getattr(node, "node_type", None) is not None and str(
+                getattr(node, "node_type")
+            ).endswith("AggregateAndGroup"):
                 return node
         return None
 
@@ -123,7 +130,15 @@ def compare_aggregate_shapes(sql_plan, odata_plan):
                     for i, item in enumerate(val):
                         print(f"      Item[{i}] type: {type(item).__name__}")
                         # Print salient fields if available
-                        for field in ["node_type", "value", "parameters", "function", "alias", "expression", "query_column"]:
+                        for field in [
+                            "node_type",
+                            "value",
+                            "parameters",
+                            "function",
+                            "alias",
+                            "expression",
+                            "query_column",
+                        ]:
                             if hasattr(item, field):
                                 print(f"        {field}: {getattr(item, field)}")
                         # Print dir for diagnostics
@@ -211,17 +226,23 @@ def compare_count_plans_for_table(table_name: str):
     # Inspect aggregates
     sql_agg = None
     for _, n in sql_plan.nodes(True):
-        if getattr(n, "node_type", None) is not None and str(getattr(n, "node_type")).endswith("AggregateAndGroup"):
+        if getattr(n, "node_type", None) is not None and str(getattr(n, "node_type")).endswith(
+            "AggregateAndGroup"
+        ):
             sql_agg = n
             break
     odata_agg = None
     for _, n in odata_count_plan.nodes(True):
-        if getattr(n, "node_type", None) is not None and str(getattr(n, "node_type")).endswith("AggregateAndGroup"):
+        if getattr(n, "node_type", None) is not None and str(getattr(n, "node_type")).endswith(
+            "AggregateAndGroup"
+        ):
             odata_agg = n
             break
     count_agg = None
     for _, n in count_plan.nodes(True):
-        if getattr(n, "node_type", None) is not None and str(getattr(n, "node_type")).endswith("AggregateAndGroup"):
+        if getattr(n, "node_type", None) is not None and str(getattr(n, "node_type")).endswith(
+            "AggregateAndGroup"
+        ):
             count_agg = n
             break
 
@@ -236,6 +257,7 @@ def compare_count_plans_for_table(table_name: str):
 
     # Heuristic mismatch detection
     issues = []
+
     # If SQL aggregates are list of non-dict items but OData aggregates are dicts -> mismatch
     def agg_is_dicts(desc):
         if not desc or "aggregates" not in desc:
@@ -247,11 +269,15 @@ def compare_count_plans_for_table(table_name: str):
 
     if sql_desc and odata_desc:
         if not agg_is_dicts(sql_desc) and agg_is_dicts(odata_desc):
-            issues.append("OData count-only has aggregate entries as dicts while SQL plan has non-dict aggregate items. This may cause binder to expect Node-like objects and fail.")
+            issues.append(
+                "OData count-only has aggregate entries as dicts while SQL plan has non-dict aggregate items. This may cause binder to expect Node-like objects and fail."
+            )
 
     if sql_desc and count_desc:
         if not agg_is_dicts(sql_desc) and agg_is_dicts(count_desc):
-            issues.append("OData schema_count_split count plan has aggregate entries as dicts while SQL plan has non-dict aggregate items.")
+            issues.append(
+                "OData schema_count_split count plan has aggregate entries as dicts while SQL plan has non-dict aggregate items."
+            )
 
     if issues:
         print("\n✗ Issues detected:")
@@ -270,7 +296,7 @@ if __name__ == "__main__":
         ok = compare_count_plans_for_table(t)
         all_ok = all_ok and ok
 
-    print("\nSummary: All tables OK:" , all_ok)
+    print("\nSummary: All tables OK:", all_ok)
     if not all_ok:
         raise SystemExit(2)
     print("\nDone.")

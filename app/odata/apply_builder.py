@@ -13,10 +13,14 @@ insertion.
 
 from typing import Any
 
-from odata_query.apply import parse_apply, AggregateTransform, GroupByTransform, FilterTransform
-from opteryx.models import Node
+from odata_query.apply import AggregateTransform
+from odata_query.apply import FilterTransform
+from odata_query.apply import GroupByTransform
+from odata_query.apply import parse_apply
 from opteryx.managers.expression import NodeType
-from opteryx.planner.logical_planner import LogicalPlanNode, LogicalPlanStepType
+from opteryx.models import Node
+from opteryx.planner.logical_planner import LogicalPlanNode
+from opteryx.planner.logical_planner import LogicalPlanStepType
 
 
 class ApplyLogicalPlanBuilder:
@@ -43,7 +47,9 @@ class ApplyLogicalPlanBuilder:
         for transform in pipeline.transformations:
             if isinstance(transform, FilterTransform):
                 # Use existing filter helper on builder
-                odata_builder.current_step_id = odata_builder._add_filter_node(transform.filter_expr)
+                odata_builder.current_step_id = odata_builder._add_filter_node(
+                    transform.filter_expr
+                )
                 last_step = odata_builder.current_step_id
 
             elif isinstance(transform, GroupByTransform):

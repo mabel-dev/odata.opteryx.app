@@ -3,6 +3,7 @@
 # Get catalog configuration from environment
 import os
 import xml.etree.ElementTree as ET
+from functools import lru_cache
 from typing import Any
 
 from fastapi import APIRouter
@@ -14,7 +15,6 @@ from fastapi import status
 from google.cloud.firestore_v1.base_query import FieldFilter
 from opteryx_catalog import OpteryxCatalog
 from orso.logging import get_logger
-from functools import lru_cache
 
 from app.auth.deps import require_authentication
 from app.core import _get_firestore_client
@@ -70,7 +70,15 @@ def _parse_path_segments(path: str) -> tuple[str | None, str | None, str | None]
 class DatasetInfo:
     """Information about a dataset accessible to the user."""
 
-    def __init__(self, resource: str, workspace: str, collection: str, name: str, source: str = "Table", last_modified_ms: int | None = None):
+    def __init__(
+        self,
+        resource: str,
+        workspace: str,
+        collection: str,
+        name: str,
+        source: str = "Table",
+        last_modified_ms: int | None = None,
+    ):
         self.resource = resource
         self.workspace = workspace
         self.collection = collection
@@ -135,7 +143,13 @@ def _query_collection_group(
 
                 # Try to capture last modified information from Firestore doc (common field names)
                 last_modified = None
-                for key in ("last_modified", "updated_at", "updated", "timestamp_ms", "last_modified_ms"):
+                for key in (
+                    "last_modified",
+                    "updated_at",
+                    "updated",
+                    "timestamp_ms",
+                    "last_modified_ms",
+                ):
                     val = data.get(key) if isinstance(data, dict) else None
                     if val is not None:
                         # If integer timestamp (ms) use directly
@@ -310,6 +324,7 @@ def _map_py_type_to_edm(py_type) -> str:
 
     # Default fallback
     return "Edm.String"
+
 
 @lru_cache(maxsize=512)
 def _get_dataset_schema(dataset_info: DatasetInfo) -> list[tuple[str, str]]:
@@ -543,7 +558,11 @@ def get_edmx_metadata(
                 import datetime as _dt
 
                 # Convert milliseconds to ISO 8601 UTC string
-                iso = _dt.datetime.utcfromtimestamp(ts / 1000.0).replace(tzinfo=_dt.timezone.utc).isoformat()
+                iso = (
+                    _dt.datetime.utcfromtimestamp(ts / 1000.0)
+                    .replace(tzinfo=_dt.timezone.utc)
+                    .isoformat()
+                )
                 ET.SubElement(
                     entity_set,
                     "{" + NS_EDM + "}Annotation",

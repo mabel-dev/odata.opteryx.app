@@ -43,6 +43,7 @@ opteryx.set_default_connector(
     gcs_bucket=BUCKET_NAME,
 )
 
+
 def _sanitize_value_for_odata(value: Any) -> Any:
     """
     Aggressively normalize values for OData/JSON compatibility.
@@ -192,7 +193,9 @@ def execute_odata_query(
             apply_expr=apply_expr,
         )
     except ValueError as e:
-        logger.error(f"Failed to build logical plan for table {table_name}: filter={filter_expr}, select={select_cols}, orderby={orderby_expr}, error={e}")
+        logger.error(
+            f"Failed to build logical plan for table {table_name}: filter={filter_expr}, select={select_cols}, orderby={orderby_expr}, error={e}"
+        )
         raise
     except Exception as e:
         logger.error(f"Unexpected error building logical plan for table {table_name}: error={e}")
@@ -201,7 +204,9 @@ def execute_odata_query(
     logger.debug(f"Built logical plan with {len(logical_plan.nodes())} nodes for {table_name}")
 
     # Debug: log validation inputs
-    logger.debug(f"Validation inputs: apply_expr={apply_expr!r}, count_requested={count_requested!r}")
+    logger.debug(
+        f"Validation inputs: apply_expr={apply_expr!r}, count_requested={count_requested!r}"
+    )
 
     # Validate unsupported combinations
     if apply_expr and count_requested:
@@ -215,7 +220,9 @@ def execute_odata_query(
     optimized_plan, strategy_info = plan_optimizer.optimize_with_constraints(
         logical_plan, top, count_requested
     )
-    logger.debug(f"Applied optimization strategy: {strategy_info['strategy']} - {strategy_info['description']}")
+    logger.debug(
+        f"Applied optimization strategy: {strategy_info['strategy']} - {strategy_info['description']}"
+    )
 
     # Step 4: Execute based on optimization strategy
     strategy = strategy_info.get("strategy")
@@ -267,12 +274,16 @@ def execute_odata_query(
             first_col = next(iter(data))
             vals = data.get(first_col)
             if vals is None or len(vals) == 0:
-                raise ValueError(f"Count query returned no values for column '{first_col}' for {table_name}")
+                raise ValueError(
+                    f"Count query returned no values for column '{first_col}' for {table_name}"
+                )
             try:
                 total_count = int(vals[0])
             except Exception as e:
                 # Include original data for debugging
-                raise ValueError(f"Count query returned non-integer value: {vals[0]} (col={first_col}) for {table_name}") from e
+                raise ValueError(
+                    f"Count query returned non-integer value: {vals[0]} (col={first_col}) for {table_name}"
+                ) from e
 
             logger.debug(f"Count query result: {total_count}")
         except Exception as exc:
@@ -308,7 +319,9 @@ def execute_odata_query(
             logger.debug(f"Created {len(rows)} rows with {len(rows[0].keys()) if rows else 0} keys")
 
         except Exception as exc:
-            logger.error(f"Error executing logical plan for table {table_name} with orderby={orderby_expr}, filter={filter_expr}: {exc}")
+            logger.error(
+                f"Error executing logical plan for table {table_name} with orderby={orderby_expr}, filter={filter_expr}: {exc}"
+            )
             raise
 
         # Get total count if requested
@@ -335,11 +348,15 @@ def execute_odata_query(
                 first_col = next(iter(data))
                 vals = data.get(first_col)
                 if vals is None or len(vals) == 0:
-                    raise ValueError(f"Count query returned no values for column '{first_col}' for {table_name}")
+                    raise ValueError(
+                        f"Count query returned no values for column '{first_col}' for {table_name}"
+                    )
                 try:
                     total_count = int(vals[0])
                 except Exception as e:
-                    raise ValueError(f"Count query returned non-integer value: {vals[0]} (col={first_col}) for {table_name}") from e
+                    raise ValueError(
+                        f"Count query returned non-integer value: {vals[0]} (col={first_col}) for {table_name}"
+                    ) from e
                 logger.debug(f"Count(*) query result: {total_count}")
 
             except Exception as exc:
@@ -358,14 +375,14 @@ def execute_odata_query(
 
 def _orso_type_to_edm(orso_type: OrsoTypes) -> str:
     """Convert Orso/Opteryx type to OData EDM type.
-    
+
     Args:
         orso_type: Orso/Opteryx DataType
-        
+
     Returns:
         OData EDM type string
     """
-    
+
     # Handle Orso/Opteryx type strings
     if orso_type == OrsoTypes.INTEGER:
         return "Edm.Int64"
@@ -433,9 +450,13 @@ def read_dataset(
     parsed_qs = parse_qs(request.url.query)
     # Parameters for which duplicates are disallowed
     duplicate_sensitive = ["$top", "$apply", "$count", "$select", "$orderby"]
-    duplicates = [p for p in duplicate_sensitive if p in parsed_qs and len(parsed_qs.get(p, [])) > 1]
+    duplicates = [
+        p for p in duplicate_sensitive if p in parsed_qs and len(parsed_qs.get(p, [])) > 1
+    ]
     if duplicates:
-        raise HTTPException(status_code=400, detail=f"Multiple parameters not allowed: {', '.join(duplicates)}")
+        raise HTTPException(
+            status_code=400, detail=f"Multiple parameters not allowed: {', '.join(duplicates)}"
+        )
 
     if top is None:
         top = DEFAULT_TOP
@@ -570,8 +591,10 @@ def read_dataset(
     }
     if total_count is not None:
         response["@odata.count"] = total_count
-    
-    logger.debug(f"OData response: {len(enriched_rows)} rows, total_count={total_count}, col_names={col_names}")
+
+    logger.debug(
+        f"OData response: {len(enriched_rows)} rows, total_count={total_count}, col_names={col_names}"
+    )
     return response
 
 
@@ -594,12 +617,12 @@ def dataset_metadata(
     response.headers["OData-Version"] = "4.0"
 
     table_name = f"{workstream}.{collection}.{dataset}"
-    
+
     # Try to get enriched metadata from catalog
     col_names = []
     col_types = []
     col_metadata = {}  # Maps col_name -> {type, min, max, cardinality, description}
-    
+
     try:
         workspace = OpteryxCatalog(
             workstream,
@@ -666,7 +689,9 @@ def dataset_metadata(
         except Exception:
             description = None
 
-        logger.debug(f"Description keys: {list(description.keys()) if isinstance(description, dict) else 'not a dict'}")
+        logger.debug(
+            f"Description keys: {list(description.keys()) if isinstance(description, dict) else 'not a dict'}"
+        )
         if description and isinstance(description, dict):
             for col_name, stats in description.items():
                 if col_name in col_metadata and isinstance(stats, dict):
@@ -678,34 +703,42 @@ def dataset_metadata(
         snapshot_info = {}
         try:
             snapshot = None
-            if source_type == "Table" and hasattr(ds, "snapshot") and callable(getattr(ds, "snapshot")):
+            if (
+                source_type == "Table"
+                and hasattr(ds, "snapshot")
+                and callable(getattr(ds, "snapshot"))
+            ):
                 snapshot = ds.snapshot()
             logger.debug(f"Snapshot: {snapshot}")
             if snapshot:
                 # Snapshot is an object with attributes
-                timestamp_ms = getattr(snapshot, 'timestamp_ms', None)
+                timestamp_ms = getattr(snapshot, "timestamp_ms", None)
                 if timestamp_ms:
                     response.headers["X-Dataset-LastModified"] = str(timestamp_ms)
                     last_ts_ms = timestamp_ms
                 # Collect snapshot id and summary where available
-                snapshot_id = getattr(snapshot, 'snapshot_id', None)
+                snapshot_id = getattr(snapshot, "snapshot_id", None)
                 if snapshot_id:
-                    snapshot_info['snapshot_id'] = str(snapshot_id)
+                    snapshot_info["snapshot_id"] = str(snapshot_id)
                     # Expose snapshot id in a header for quick visibility
                     response.headers["X-Dataset-Snapshot-Id"] = str(snapshot_id)
-                summary = getattr(snapshot, 'summary', None)
+                summary = getattr(snapshot, "summary", None)
                 if isinstance(summary, dict):
                     total_records = summary.get("total-records")
                     total_file_size = summary.get("total-files-size")
                     if total_records is not None:
-                        snapshot_info['total_records'] = int(total_records)
+                        snapshot_info["total_records"] = int(total_records)
                     if total_file_size is not None:
-                        snapshot_info['total_file_size'] = int(total_file_size)
+                        snapshot_info["total_file_size"] = int(total_file_size)
         except Exception:
             # Be defensive: missing or failing snapshot should not break metadata
-            logger.debug("Snapshot unavailable or raised when retrieving last-modified", exc_info=True)
+            logger.debug(
+                "Snapshot unavailable or raised when retrieving last-modified", exc_info=True
+            )
 
-        logger.debug(f"Loaded enriched metadata for {table_name} from catalog with {len(col_names)} columns; source={source_type}")
+        logger.debug(
+            f"Loaded enriched metadata for {table_name} from catalog with {len(col_names)} columns; source={source_type}"
+        )
     except HTTPException:
         # re-raise HTTP exceptions as-is
         raise
@@ -736,61 +769,103 @@ def dataset_metadata(
     for col_name in col_names:
         meta = col_metadata.get(col_name, {})
         edm_type = meta.get("type", "Edm.String")
-        
+
         lines.append(f'        <Property Name="{col_name}" Type="{edm_type}" Nullable="true">')
-        
+
         # Add annotations if we have statistics
         if "min" in meta and meta["min"] is not None:
-            min_val = str(meta["min"]).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+            min_val = (
+                str(meta["min"])
+                .replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+                .replace('"', "&quot;")
+            )
             lines.append(f'          <Annotation Term="Custom.Statistics.Min" String="{min_val}"/>')
         if "max" in meta and meta["max"] is not None:
-            max_val = str(meta["max"]).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+            max_val = (
+                str(meta["max"])
+                .replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+                .replace('"', "&quot;")
+            )
             lines.append(f'          <Annotation Term="Custom.Statistics.Max" String="{max_val}"/>')
-        if "approx_cardinality" in meta and meta["approx_cardinality"] is not None and meta["approx_cardinality"] > 0:
-            lines.append(f'          <Annotation Term="Custom.Statistics.DistinctValueCountEstimate" Int="{meta["approx_cardinality"]}"/>')
+        if (
+            "approx_cardinality" in meta
+            and meta["approx_cardinality"] is not None
+            and meta["approx_cardinality"] > 0
+        ):
+            lines.append(
+                f'          <Annotation Term="Custom.Statistics.DistinctValueCountEstimate" Int="{meta["approx_cardinality"]}"/>'
+            )
         if "null_count" in meta and meta["null_count"] is not None:
-            lines.append(f'          <Annotation Term="Custom.Statistics.NullCount" Int="{meta["null_count"]}"/>')
+            lines.append(
+                f'          <Annotation Term="Custom.Statistics.NullCount" Int="{meta["null_count"]}"/>'
+            )
         if "distribution" in meta and meta["distribution"] and any(meta["distribution"]):
             # Distribution as a Collection of Int values instead of string
             # Skip if all values are zero (no meaningful distribution data)
-            lines.append(f'          <Annotation Term="Custom.Statistics.Distribution">')
-            lines.append(f'            <Collection>')
+            lines.append('          <Annotation Term="Custom.Statistics.Distribution">')
+            lines.append("            <Collection>")
             for val in meta["distribution"]:
-                lines.append(f'              <Int>{val}</Int>')
-            lines.append(f'            </Collection>')
-            lines.append(f'          </Annotation>')
-        
+                lines.append(f"              <Int>{val}</Int>")
+            lines.append("            </Collection>")
+            lines.append("          </Annotation>")
+
         lines.append("        </Property>")
 
-    lines.extend([
-        "      </EntityType>",
-        '      <EntityContainer Name="Container">',
-        f'        <EntitySet Name="{dataset}" EntityType="{schema_ns}.{entity_name}">',
-        f'          <Annotation Term="Custom.SourceType" String="{source_type}"/>',
-    ])
+    lines.extend(
+        [
+            "      </EntityType>",
+            '      <EntityContainer Name="Container">',
+            f'        <EntitySet Name="{dataset}" EntityType="{schema_ns}.{entity_name}">',
+            f'          <Annotation Term="Custom.SourceType" String="{source_type}"/>',
+        ]
+    )
 
     # If this is a view, try to enrich EntitySet with view metadata (definition, author, description, LLM flag)
     if source_type == "View":
         try:
             definition = getattr(ds, "sql", None) or getattr(ds, "definition", None)
             if definition:
-                def_val = str(definition).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+                def_val = (
+                    str(definition)
+                    .replace("&", "&amp;")
+                    .replace("<", "&lt;")
+                    .replace(">", "&gt;")
+                    .replace('"', "&quot;")
+                )
                 lines.append(f'          <Annotation Term="Custom.Definition" String="{def_val}"/>')
 
             meta = getattr(ds, "metadata", None)
             if meta is not None:
                 author = getattr(meta, "author", None)
                 if author:
-                    lines.append(f'          <Annotation Term="Custom.Author" String="{str(author)}"/>')
+                    lines.append(
+                        f'          <Annotation Term="Custom.Author" String="{str(author)}"/>'
+                    )
 
                 description = getattr(meta, "description", None)
                 if description:
-                    desc_val = str(description).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
-                    lines.append(f'          <Annotation Term="Custom.Description" String="{desc_val}"/>')
+                    desc_val = (
+                        str(description)
+                        .replace("&", "&amp;")
+                        .replace("<", "&lt;")
+                        .replace(">", "&gt;")
+                        .replace('"', "&quot;")
+                    )
+                    lines.append(
+                        f'          <Annotation Term="Custom.Description" String="{desc_val}"/>'
+                    )
 
                 describer = getattr(meta, "describer", None)
-                llm_flag = isinstance(describer, str) and (describer.startswith("Gemini:") or describer.startswith("Llama-"))
-                lines.append(f'          <Annotation Term="Custom.LLMDescribed" Bool="{str(llm_flag).lower()}"/>')
+                llm_flag = isinstance(describer, str) and (
+                    describer.startswith("Gemini:") or describer.startswith("Llama-")
+                )
+                lines.append(
+                    f'          <Annotation Term="Custom.LLMDescribed" Bool="{str(llm_flag).lower()}"/>'
+                )
 
                 # If metadata timestamp present and header not set, set last modified header
                 meta_ts = getattr(meta, "timestamp_ms", None)
@@ -808,22 +883,40 @@ def dataset_metadata(
             if snapshot_info:
                 sid = snapshot_info.get("snapshot_id")
                 if sid:
-                    lines.append(f'          <Annotation Term="Custom.Snapshot.Id" String="{sid}"/>')
+                    lines.append(
+                        f'          <Annotation Term="Custom.Snapshot.Id" String="{sid}"/>'
+                    )
                 if "total_records" in snapshot_info:
-                    lines.append(f'          <Annotation Term="Custom.Snapshot.TotalRecords" Int="{snapshot_info["total_records"]}"/>')
+                    lines.append(
+                        f'          <Annotation Term="Custom.Snapshot.TotalRecords" Int="{snapshot_info["total_records"]}"/>'
+                    )
                 if "total_file_size" in snapshot_info:
-                    lines.append(f'          <Annotation Term="Custom.Snapshot.TotalFileSize" Int="{snapshot_info["total_file_size"]}"/>')
+                    lines.append(
+                        f'          <Annotation Term="Custom.Snapshot.TotalFileSize" Int="{snapshot_info["total_file_size"]}"/>'
+                    )
 
             # Table metadata
             meta = getattr(ds, "metadata", None)
             if meta is not None:
                 descr = getattr(meta, "description", None)
                 if descr:
-                    desc_val = str(descr).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
-                    lines.append(f'          <Annotation Term="Custom.Description" String="{desc_val}"/>')
+                    desc_val = (
+                        str(descr)
+                        .replace("&", "&amp;")
+                        .replace("<", "&lt;")
+                        .replace(">", "&gt;")
+                        .replace('"', "&quot;")
+                    )
+                    lines.append(
+                        f'          <Annotation Term="Custom.Description" String="{desc_val}"/>'
+                    )
                 describer = getattr(meta, "describer", None)
-                llm_flag = isinstance(describer, str) and (describer.startswith("Gemini:") or describer.startswith("Llama-"))
-                lines.append(f'          <Annotation Term="Custom.LLMDescribed" Bool="{str(llm_flag).lower()}"/>')
+                llm_flag = isinstance(describer, str) and (
+                    describer.startswith("Gemini:") or describer.startswith("Llama-")
+                )
+                lines.append(
+                    f'          <Annotation Term="Custom.LLMDescribed" Bool="{str(llm_flag).lower()}"/>'
+                )
         except Exception:
             logger.debug("Failed to extract table metadata for annotations", exc_info=True)
 
@@ -831,18 +924,25 @@ def dataset_metadata(
     if last_ts_ms:
         try:
             import datetime as _dt
-            iso = _dt.datetime.utcfromtimestamp(last_ts_ms / 1000.0).replace(tzinfo=_dt.timezone.utc).isoformat()
+
+            iso = (
+                _dt.datetime.utcfromtimestamp(last_ts_ms / 1000.0)
+                .replace(tzinfo=_dt.timezone.utc)
+                .isoformat()
+            )
             lines.append(f'          <Annotation Term="Custom.LastModified" String="{iso}"/>')
         except Exception:
             pass
 
-    lines.extend([
-        '        </EntitySet>',
-        "      </EntityContainer>",
-        "    </Schema>",
-        "  </edmx:DataServices>",
-        "</edmx:Edmx>",
-    ])
+    lines.extend(
+        [
+            "        </EntitySet>",
+            "      </EntityContainer>",
+            "    </Schema>",
+            "  </edmx:DataServices>",
+            "</edmx:Edmx>",
+        ]
+    )
 
     xml = "\n".join(lines)
     return Response(content=xml, media_type="application/xml")
