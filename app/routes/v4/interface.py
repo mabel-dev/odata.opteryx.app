@@ -407,6 +407,13 @@ def _orso_type_to_edm(orso_type: OrsoTypes) -> str:
     return "Edm.String"
 
 
+def _role_allows_read(role: str | None) -> bool:
+    """Check if a given role string allows read access."""
+    if not role:
+        return False
+    return role.lower() in {"reader", "writer", "admin", "owner"}
+
+
 router = APIRouter(
     prefix="/api/v4",
     tags=["OData v4"],
@@ -618,10 +625,70 @@ def dataset_metadata(
 
     table_name = f"{workstream}.{collection}.{dataset}"
 
+    # Authorization: determine whether the authenticated user may view this dataset's metadata
+    # Get claims provided by the authentication dependency
+    claims = getattr(request.state, "claims", {}) or {}
+    identity = claims.get("identity")
+
+    from app.auth.permissions import get_access_policies_from_claims
+
+    # Default: no access
+    allowed = False
+    assigned_role = None
+    assigned_policy = None
+
+    # Build map: workspace -> [(role, policy), ...]
+    access_policies_list = get_access_policies_from_claims(claims)
+    workspace_policies: dict[str, list[tuple[str, str]]] = {}
+    for p in access_policies_list:
+        role = p.get("role")
+        pattern = p.get("pattern")
+        policy = p.get("policy", "none")
+        if not role or not pattern:
+            continue
+        workspace = pattern.split(".")[0] if "." in pattern else pattern
+        workspace_policies.setdefault(workspace, []).append((role, policy))
+
+    # Personal workspace handling
+    if workstream == "personal":
+        # the collection is the identity for personal workspaces
+        if collection == identity:
+            allowed = True
+            assigned_role = "owner"
+            assigned_policy = "always-allow-personal"
+        else:
+            # deny access to other users' personal workspaces
+            raise HTTPException(status_code=403, detail="forbidden: not allowed to view metadata")
+
+    # Public workspace -> read-only
+    if not allowed and workstream == "public":
+        allowed = True
+        assigned_role = "reader"
+        assigned_policy = "always-allow-public-read"
+
+    # Workspace-level policies
+    if not allowed:
+        policies = workspace_policies.get(workstream, [])
+        for role, policy in policies:
+            # Local helper checks for read-capable roles
+            def _role_allows_read(r: str | None) -> bool:
+                if not r:
+                    return False
+                return r.lower() in {"reader", "writer", "admin", "owner"}
+
+            if _role_allows_read(role):
+                allowed = True
+                assigned_role = role
+                assigned_policy = policy
+                break
+
+    if not allowed:
+        raise HTTPException(status_code=403, detail="forbidden: not allowed to view metadata")
+
     # Try to get enriched metadata from catalog
     col_names = []
     col_types = []
-    col_metadata = {}  # Maps col_name -> {type, min, max, cardinality, description}
+    col_metadata = {}  # Maps col_name -> {type, min, max, cardinality, description} 
 
     try:
         workspace = OpteryxCatalog(
@@ -823,6 +890,12 @@ def dataset_metadata(
             f'          <Annotation Term="Custom.SourceType" String="{source_type}"/>',
         ]
     )
+
+    # Add access annotations (role, policy) when available
+    if assigned_role:
+        lines.append(f'          <Annotation Term="Custom.Role" String="{assigned_role}"/>')
+    if assigned_policy:
+        lines.append(f'          <Annotation Term="Custom.Policy" String="{assigned_policy}"/>')
 
     # If this is a view, try to enrich EntitySet with view metadata (definition, author, description, LLM flag)
     if source_type == "View":
