@@ -40,7 +40,7 @@ workspace = OpteryxCatalog(
 )
 
 # Set default connector only if OpteryxConnector is available in this environment
-if 'OpteryxConnector' in globals() and OpteryxConnector is not None:
+if "OpteryxConnector" in globals() and OpteryxConnector is not None:
     opteryx.set_default_connector(
         OpteryxConnector,
         catalog=OpteryxCatalog,

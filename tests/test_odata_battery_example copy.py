@@ -32,8 +32,6 @@ from opteryx_catalog import OpteryxCatalog
 from app.routes.v4.interface import execute_odata_query
 
 
-
-
 FIRESTORE_DATABASE = os.environ.get("FIRESTORE_DATABASE")
 BUCKET_NAME = os.environ.get("GCS_BUCKET")
 GCP_PROJECT_ID = os.environ.get("GCP_PROJECT_ID")
@@ -266,7 +264,13 @@ def run_battery(test_cases: List[Tuple]) -> dict:
 
 
 EXTENDED_TEST_BATTERY = [
-    ("public.examples.vulnerabilities", "$filter=vendor eq 'Microsoft'&$count=true&$top=0", 0, 7, None),
+    (
+        "public.examples.vulnerabilities",
+        "$filter=vendor eq 'Microsoft'&$count=true&$top=0",
+        0,
+        7,
+        None,
+    ),
 ]
 
 

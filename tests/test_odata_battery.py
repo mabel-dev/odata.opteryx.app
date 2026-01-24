@@ -270,7 +270,12 @@ def run_battery(test_cases: List[Tuple]) -> dict:
                 "test_num": i,
                 "dataset": dataset,
                 "query_string": query_string,
-                "expected": {"rows": exp_rows, "columns": exp_cols, "count": exp_count, "error": exp_error},
+                "expected": {
+                    "rows": exp_rows,
+                    "columns": exp_cols,
+                    "count": exp_count,
+                    "error": exp_error,
+                },
                 **test_result,
             }
         )
@@ -834,6 +839,7 @@ PLANETS_TEST_BATTERY = [
 
 EXTENDED_TEST_BATTERY = PLANETS_TEST_BATTERY
 
+
 # All test tuples are explicit 6-tuples now.
 @pytest.mark.parametrize(
     "test_case",
@@ -847,10 +853,21 @@ def test_planets_battery(test_case):
     """
     if len(test_case) != 6:
         raise ValueError(f"Invalid test tuple length: {len(test_case)}")
-    dataset, query_string, expected_rows, expected_columns, expected_count, expected_error = test_case
+    dataset, query_string, expected_rows, expected_columns, expected_count, expected_error = (
+        test_case
+    )
 
-    res = run_test_case(dataset, query_string, expected_rows, expected_columns, expected_error, expected_count=expected_count)
-    assert res["passed"], f"{dataset} {query_string}: {res.get('reason') or res.get('error') or res}"
+    res = run_test_case(
+        dataset,
+        query_string,
+        expected_rows,
+        expected_columns,
+        expected_error,
+        expected_count=expected_count,
+    )
+    assert res["passed"], (
+        f"{dataset} {query_string}: {res.get('reason') or res.get('error') or res}"
+    )
 
 
 # Count tests are included directly in PLANETS_TEST_BATTERY so they run with the main battery

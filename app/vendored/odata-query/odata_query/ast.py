@@ -279,16 +279,16 @@ class List(_Literal):
         # Convert each element to a node, then extract Python values
         element_nodes = [item.to_opteryx_node() for item in self.val]
         value_list = [node.value for node in element_nodes]
-        
+
         # Determine the element type (all elements should have the same type)
         element_types = {node.type for node in element_nodes}
         element_type = element_types.pop() if len(element_types) == 1 else OrsoTypes.VARCHAR
-        
+
         return Node(
             node_type=NodeType.LITERAL,
             type=OrsoTypes.ARRAY,
             element_type=element_type,
-            value=value_list
+            value=value_list,
         )
 
 
@@ -351,7 +351,9 @@ class BinOp(_Node):
         if op_name is None:
             raise ValueError(f"Unknown binary operator: {type(self.op).__name__}")
 
-        return Node(node_type=NodeType.BINARY_OPERATOR, value=op_name, left=left_node, right=right_node)
+        return Node(
+            node_type=NodeType.BINARY_OPERATOR, value=op_name, left=left_node, right=right_node
+        )
 
 
 ###############################################################################
@@ -430,7 +432,13 @@ class Compare(_Node):
             if not eq_nodes:
                 # Empty IN () should be false
                 from orso.types import OrsoTypes
-                return Node(node_type=NodeType.COMPARISON_OPERATOR, value="Eq", left=left_node, right=Node(node_type=NodeType.LITERAL, type=OrsoTypes.BOOLEAN, value=False))
+
+                return Node(
+                    node_type=NodeType.COMPARISON_OPERATOR,
+                    value="Eq",
+                    left=left_node,
+                    right=Node(node_type=NodeType.LITERAL, type=OrsoTypes.BOOLEAN, value=False),
+                )
 
             result = eq_nodes[0]
             for en in eq_nodes[1:]:
@@ -574,21 +582,22 @@ class Call(_Node):
             # Swap parameters: indexof(string, substring) → POSITION(substring, string)
             string_node = arg_nodes[0]
             substring_node = arg_nodes[1]
-            
+
             # Create POSITION(substring, string) call
             position_call = Node(
                 node_type=NodeType.FUNCTION,
                 value="POSITION",
-                parameters=[substring_node, string_node]
+                parameters=[substring_node, string_node],
             )
-            
+
             # Subtract 1 to convert from 1-based to 0-based (POSITION(...) - 1)
             from orso.types import OrsoTypes
+
             return Node(
                 node_type=NodeType.BINARY_OPERATOR,
                 value="Minus",
                 left=position_call,
-                right=Node(node_type=NodeType.LITERAL, type=OrsoTypes.INTEGER, value=1)
+                right=Node(node_type=NodeType.LITERAL, type=OrsoTypes.INTEGER, value=1),
             )
 
         # Handle substring specially - OData is 0-based, SQL is 1-based
@@ -598,21 +607,22 @@ class Call(_Node):
         if func_name == "substring" and len(arg_nodes) >= 2:
             string_node = arg_nodes[0]
             start_node = arg_nodes[1]
-            
+
             # Add 1 to start position to convert from 0-based to 1-based
             from orso.types import OrsoTypes
+
             adjusted_start = Node(
                 node_type=NodeType.BINARY_OPERATOR,
                 value="Plus",
                 left=start_node,
-                right=Node(node_type=NodeType.LITERAL, type=OrsoTypes.INTEGER, value=1)
+                right=Node(node_type=NodeType.LITERAL, type=OrsoTypes.INTEGER, value=1),
             )
-            
+
             # Build parameter list with adjusted start
             params = [string_node, adjusted_start]
             if len(arg_nodes) > 2:  # If length is provided
                 params.append(arg_nodes[2])
-            
+
             return Node(node_type=NodeType.FUNCTION, value="SUBSTRING", parameters=params)
 
         # Convert startswith, endswith, contains to LIKE operators
@@ -669,7 +679,7 @@ class Call(_Node):
         # For all other functions, create a function call node
         # Map OData function names to SQL/Opteryx function names
         sql_func_name = func_name.upper()  # Default: uppercase the function name
-        
+
         # Explicit mappings for OData functions → Opteryx functions
         odata_to_sql_functions = {
             "tolower": "LOWER",
@@ -689,9 +699,9 @@ class Call(_Node):
             "floor": "FLOOR",
             "ceiling": "CEIL",  # Note: SQL uses CEIL, not CEILING
         }
-        
+
         sql_func_name = odata_to_sql_functions.get(func_name, sql_func_name)
-        
+
         return Node(node_type=NodeType.FUNCTION, value=sql_func_name, parameters=arg_nodes)
 
 

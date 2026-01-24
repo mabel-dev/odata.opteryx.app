@@ -1,6 +1,7 @@
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
+from fastapi import HTTPException
 from fastapi.responses import PlainTextResponse
 
 router = APIRouter(tags=["service"])

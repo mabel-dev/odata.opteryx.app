@@ -1,5 +1,5 @@
 from app.odata.odata_to_logical_plan import ODataLogicalPlanBuilder
-from opteryx.planner.logical_planner import LogicalPlanNode, LogicalPlanStepType
+from opteryx.planner.logical_planner import LogicalPlanStepType
 
 
 def test_count_only_plan_has_count_aggregate():

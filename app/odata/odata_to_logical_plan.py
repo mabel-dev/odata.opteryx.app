@@ -325,7 +325,10 @@ class ODataLogicalPlanBuilder:
         if self.current_step_id is not None:
             prev_node = self.plan._nodes.get(self.current_step_id)
 
-        if prev_node is not None and getattr(prev_node, "node_type", None) == LogicalPlanStepType.AggregateAndGroup:
+        if (
+            prev_node is not None
+            and getattr(prev_node, "node_type", None) == LogicalPlanStepType.AggregateAndGroup
+        ):
             # Build set of allowed columns: group_by source_column names + aggregation aliases
             allowed = set()
             if getattr(prev_node, "group_by", None):
@@ -342,7 +345,9 @@ class ODataLogicalPlanBuilder:
             if selected_cols_list != ["*"]:
                 for col in selected_cols_list:
                     if col not in allowed:
-                        raise ValueError(f"$select references column '{col}' which is not available after aggregation. Allowed: {sorted(list(allowed))}")
+                        raise ValueError(
+                            f"$select references column '{col}' which is not available after aggregation. Allowed: {sorted(list(allowed))}"
+                        )
 
         project_node = LogicalPlanNode(node_type=LogicalPlanStepType.Project)
 

@@ -71,9 +71,9 @@ def _normalize_claims(claims: Dict[str, Any]) -> Dict[str, Any]:
     # We will NOT write or rely on a separate "permissions" claim (that was incorrect).
     # Leave policies untouched and do not mutate the claims with derived permission keys.
     # Any conversion/formatting should be done by helpers when needed.
-    
+
     # Do NOT touch or create a "permissions" key here.
-    
+
     # Ensure policies, if present, are a list; otherwise leave as-is
     policies = claims.get("policies")
     if policies and not isinstance(policies, list):

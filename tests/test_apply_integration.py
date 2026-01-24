@@ -10,7 +10,10 @@ from app.routes.v4.interface import execute_odata_query
 import opteryx as _opteryx
 
 
-@pytest.mark.skipif(not hasattr(_opteryx, "execute_logical_plan"), reason="Opteryx logical-plan executor not available")
+@pytest.mark.skipif(
+    not hasattr(_opteryx, "execute_logical_plan"),
+    reason="Opteryx logical-plan executor not available",
+)
 def test_apply_groupby_orderby_select_count_integration():
     # Uses a dataset that may not exist locally; skip if missing
     try:
@@ -25,7 +28,9 @@ def test_apply_groupby_orderby_select_count_integration():
     except Exception as exc:
         # Skip if dataset not present
         try:
-            if exc.__class__.__name__ == "DatasetNotFoundError" or isinstance(exc, getattr(_opteryx, "exceptions", Exception)):
+            if exc.__class__.__name__ == "DatasetNotFoundError" or isinstance(
+                exc, getattr(_opteryx, "exceptions", Exception)
+            ):
                 pytest.skip("dataset not available in this environment")
         except Exception:
             pass

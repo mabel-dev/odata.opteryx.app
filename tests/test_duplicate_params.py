@@ -3,7 +3,6 @@
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-import pytest
 
 from app.routes.v4.interface import router, require_authentication
 
@@ -17,7 +16,9 @@ def _make_client():
 
 def test_duplicate_apply_rejected():
     client = _make_client()
-    res = client.get("/api/v4/public/github/events?$apply=aggregate($count as c)&$apply=aggregate($count as d)")
+    res = client.get(
+        "/api/v4/public/github/events?$apply=aggregate($count as c)&$apply=aggregate($count as d)"
+    )
     assert res.status_code == 400
     assert "Multiple parameters" in res.json().get("detail", "")
 

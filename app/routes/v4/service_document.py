@@ -58,12 +58,26 @@ def _parse_path_segments(path: str) -> tuple[str | None, str | None, str | None]
 class DatasetInfo:
     """Information about a dataset accessible to the user."""
 
-    def __init__(self, resource: str, workspace: str, collection: str, name: str, source: str = "Table"):
+    def __init__(
+        self,
+        resource: str,
+        workspace: str,
+        collection: str,
+        name: str,
+        source: str = "Table",
+        role: str | None = None,
+        policy: str | None = None,
+    ) -> None:
         self.resource = resource
         self.workspace = workspace
         self.collection = collection
         self.name = name
         self.source = source
+        self.policy = policy
+        self.role = role
+
+    def __repr__(self) -> str:
+        return f"\nDatasetInfo(resource={self.resource}, workspace={self.workspace}, collection={self.collection}, name={self.name}, source={self.source}, role={self.role}, policy={self.policy})"
 
 
 def _query_collection_group(
@@ -95,20 +109,8 @@ def _query_collection_group(
             try:
                 data = doc.to_dict()
                 workspace = data.get("workspace")
-                collection_name = data.get("namespace")
+                collection_name = data.get("collection")
                 name = data.get("name")
-
-                # Parse path segments to extract missing pieces
-                if not all([workspace, collection_name, name]):
-                    parsed_workspace, parsed_collection, parsed_table_name = _parse_path_segments(
-                        doc.reference.path
-                    )
-                    if not workspace:
-                        workspace = parsed_workspace
-                    if not collection_name:
-                        collection_name = parsed_collection
-                    if not name:
-                        name = parsed_table_name
 
                 # Fallback to document ID
                 name = name or doc.id
@@ -127,6 +129,8 @@ def _query_collection_group(
                         collection=collection_name,
                         name=name,
                         source=source_type,
+                        role=None,
+                        policy=None,
                     )
                 )
             except Exception:
@@ -168,6 +172,8 @@ def _get_personal_datasets(db, identity: str) -> list[DatasetInfo]:
                             collection=collection_name,
                             name=name,
                             source=source_type,
+                            role="owner",
+                            policy="always-allow-personal",
                         )
                     )
                 except Exception:
@@ -235,6 +241,7 @@ def get_service_document(
     # Get claims from request state (set by require_authentication dependency)
     claims = request.state.claims
     identity = claims.get("identity")
+
     if not identity:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing token identity"
@@ -250,10 +257,11 @@ def get_service_document(
     for p in access_policies_list:
         role = p.get("role")
         pattern = p.get("pattern")
+        policy = p.get("policy")
         if not role or not pattern:
             continue
         workspace = pattern.split(".")[0] if "." in pattern else pattern
-        access_policies.setdefault(workspace, []).append(role)
+        access_policies.setdefault(workspace, []).append((role, policy))
 
     db = _get_firestore_client(database="catalogs")
     if db is None:
@@ -270,6 +278,8 @@ def get_service_document(
     all_datasets.extend(_get_personal_datasets(db, identity))
     all_datasets.extend(_get_workspace_datasets(db, workspace_ids))
 
+    print(all_datasets)
+
     # Filter datasets by read permission
     filtered_datasets: list[DatasetInfo] = []
 
@@ -278,6 +288,7 @@ def get_service_document(
         if dataset.resource == f"personal.{identity}" or dataset.resource.startswith(
             f"personal.{identity}."
         ):
+            # Role and policy should already be set for personal datasets
             filtered_datasets.append(dataset)
             continue
 
@@ -287,14 +298,20 @@ def get_service_document(
 
         # Public datasets - read-only for all users
         if dataset.resource.startswith("public."):
+            dataset.role = "reader"
+            dataset.policy = "always-allow-public-read"
             filtered_datasets.append(dataset)
             continue
 
         # Workspace datasets - check if user has any read role for this workspace
         workspace = dataset.resource.split(".")[0]
-        roles = access_policies.get(workspace, [])
-        if any(_role_allows_read(role) for role in roles):
-            filtered_datasets.append(dataset)
+        role_policy_pairs = access_policies.get(workspace, [])
+        for role, policy in role_policy_pairs:
+            if _role_allows_read(role):
+                dataset.role = role
+                dataset.policy = policy
+                filtered_datasets.append(dataset)
+                break
 
     # Build OData service document
     entity_sets = []
@@ -304,8 +321,21 @@ def get_service_document(
         # EntitySet url: workspace/collection/dataset (path segments)
         url = f"{dataset.workspace}/{dataset.collection}/{dataset.name}"
 
-        # Include source type so clients can distinguish Table vs View (backwards-compatible)
-        entity_sets.append({"name": name, "kind": "EntitySet", "url": url, "source": getattr(dataset, "source", "Table")})
+        # Include source type, role, and policy so clients can distinguish Table vs View and understand permissions
+        entity_set = {
+            "name": name,
+            "kind": "EntitySet",
+            "url": url,
+            "source": getattr(dataset, "source", "Table"),
+        }
+
+        # Add role and policy if available
+        if dataset.role:
+            entity_set["role"] = dataset.role
+        if dataset.policy:
+            entity_set["policy"] = dataset.policy
+
+        entity_sets.append(entity_set)
 
     return {
         "@odata.context": "/api/v4/$metadata",
