@@ -7,8 +7,6 @@ ODataLogicalPlanBuilder can use.
 """
 
 import re
-import sys
-from pathlib import Path
 from typing import List
 from typing import Optional
 from typing import Tuple
@@ -17,10 +15,6 @@ from odata_query.grammar import ODataLexer
 from odata_query.grammar import ODataParser
 from opteryx.managers.expression import NodeType
 from opteryx.models import Node
-
-# CRITICAL: Set up vendored path BEFORE importing odata_query
-_vendored_path = str(Path(__file__).parent.parent / "vendored" / "odata-query")
-sys.path.insert(0, _vendored_path)
 
 
 class ODataExpressionParser:
