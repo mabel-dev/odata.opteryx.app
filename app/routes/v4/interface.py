@@ -792,11 +792,11 @@ def dataset_metadata(
                 summary = getattr(snapshot, "summary", None)
                 if isinstance(summary, dict):
                     total_records = summary.get("total-records")
-                    total_file_size = summary.get("total-files-size")
+                    total_data_size = summary.get("total-data-size")
                     if total_records is not None:
                         snapshot_info["total_records"] = int(total_records)
-                    if total_file_size is not None:
-                        snapshot_info["total_file_size"] = int(total_file_size)
+                    if total_data_size is not None:
+                        snapshot_info["total_data_size"] = int(total_data_size)
         except Exception:
             # Be defensive: missing or failing snapshot should not break metadata
             logger.debug(
@@ -963,9 +963,9 @@ def dataset_metadata(
                     lines.append(
                         f'          <Annotation Term="Custom.Snapshot.TotalRecords" Int="{snapshot_info["total_records"]}"/>'
                     )
-                if "total_file_size" in snapshot_info:
+                if "total_data_size" in snapshot_info:
                     lines.append(
-                        f'          <Annotation Term="Custom.Snapshot.TotalFileSize" Int="{snapshot_info["total_file_size"]}"/>'
+                        f'          <Annotation Term="Custom.Snapshot.TotalDataSize" Int="{snapshot_info["total_data_size"]}"/>'
                     )
 
             # Table metadata
