@@ -74,13 +74,14 @@ class FakeDatasetWithSnapshot:
             {
                 "timestamp_ms": 1600000000000,
                 "snapshot_id": "snap-12345",
-                "summary": {"total-records": 42, "total-files-size": 1024},
+                "summary": {"total-records": 42, "total-data-size": 1024},
             },
         )()
 
     @property
     def metadata(self):
         return type("M", (), {"description": "table desc", "describer": "Llama-xyz"})()
+
 
 
 class FakeCatalog:
@@ -113,7 +114,7 @@ def test_table_metadata_last_modified(monkeypatch):
     # Snapshot annotations
     assert "Custom.Snapshot.Id" in content
     assert "Custom.Snapshot.TotalRecords" in content
-    assert "Custom.Snapshot.TotalFileSize" in content
+    assert "Custom.Snapshot.TotalDataSize" in content
     # Description/LLM annotations
     assert "Custom.Description" in content
     assert "Custom.LLMDescribed" in content
