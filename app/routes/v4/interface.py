@@ -809,19 +809,6 @@ def dataset_metadata(
                     # Add stats to metadata and normalize naming
                     meta = col_metadata[col_name]
                     meta.update(stats)
-                    # Normalize upstream `approx_cardinality` to canonical `cardinality`
-                    if "approx_cardinality" in meta:
-                        meta["cardinality"] = meta.pop("approx_cardinality")
-                        meta.setdefault("cardinality_is_estimated", True)
-
-                    # If the description includes a small set of min-k hashes (<31),
-                    # use them to compute an exact cardinality and mark it non-estimated.
-                    kval = stats.get("min_k_hashes")
-                    if kval:
-                        if isinstance(kval, (list, tuple)) and 1 <= len(kval) < 31:
-                            uniq = len(set(kval))
-                            meta["cardinality"] = uniq
-                            meta["cardinality_is_estimated"] = False
 
         # Get snapshot for last modified info only for tables (views typically don't expose snapshot)
         last_ts_ms = None
@@ -929,8 +916,8 @@ def dataset_metadata(
             lines.append(f'          <Annotation Term="Custom.Statistics.Max" String="{max_val}"/>')
         if "cardinality" in meta and meta["cardinality"] is not None and meta["cardinality"] > 0:
             cardinality_key = "DistinctValueCount"
-            if bool(meta.get("cardinality_is_estimated", True)):
-                cardinality_key += "Estimated"
+            if not bool(meta.get("cardinality_is_exact", False)):
+                cardinality_key += "Estimate"
             lines.append(
                 f'          <Annotation Term="Custom.Statistics.{cardinality_key}" Int="{meta["cardinality"]}"/>'
             )
