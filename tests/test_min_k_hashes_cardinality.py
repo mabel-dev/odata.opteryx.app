@@ -99,7 +99,7 @@ def get_xml_for(min_k_hashes=None, approx=None):
 
 def test_min_k_hashes_small_sets():
     content = get_xml_for(min_k_hashes=[10, 20])
-    assert "Custom.Statistics.DistinctValueCountEstimate" in content
+    assert "Custom.Statistics.DistinctValueCount" in content
     assert 'Int="2"' in content
 
 
@@ -108,10 +108,11 @@ def test_min_k_hashes_threshold_exceeded():
     mk = list(range(32))
     content = get_xml_for(min_k_hashes=mk)
     assert "Custom.Statistics.DistinctValueCountEstimate" not in content
+    assert "Custom.Statistics.DistinctValueCount" not in content
 
 
 def test_min_k_hashes_overrides_larger_approx():
     # approx_cardinality present but larger than actual uniq -> should be replaced
     content = get_xml_for(min_k_hashes=[1, 2, 2], approx=100)
-    assert "Custom.Statistics.DistinctValueCountEstimate" in content
+    assert "Custom.Statistics.DistinctValueCount" in content
     assert 'Int="2"' in content

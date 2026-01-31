@@ -831,6 +831,10 @@ def dataset_metadata(
                                     isinstance(existing, int) and existing > uniq
                                 ):
                                     col_metadata[col_name]["approx_cardinality"] = uniq
+                                    # Mark that this cardinality was inferred exactly from
+                                    # a small set of min-k hashes so we can emit a precise
+                                    # DistinctValueCount annotation instead of an estimate.
+                                    col_metadata[col_name]["approx_cardinality_exact"] = True
                             break
 
         # Get snapshot for last modified info only for tables (views typically don't expose snapshot)
@@ -942,9 +946,17 @@ def dataset_metadata(
             and meta["approx_cardinality"] is not None
             and meta["approx_cardinality"] > 0
         ):
-            lines.append(
-                f'          <Annotation Term="Custom.Statistics.DistinctValueCountEstimate" Int="{meta["approx_cardinality"]}"/>'
-            )
+            # If we inferred the cardinality exactly from a small set of min-k
+            # hashes, report it as an exact DistinctValueCount. Otherwise keep
+            # the Estimate terminology for probabilistic values.
+            if meta.get("approx_cardinality_exact"):
+                lines.append(
+                    f'          <Annotation Term="Custom.Statistics.DistinctValueCount" Int="{meta["approx_cardinality"]}"/>'
+                )
+            else:
+                lines.append(
+                    f'          <Annotation Term="Custom.Statistics.DistinctValueCountEstimate" Int="{meta["approx_cardinality"]}"/>'
+                )
         if "null_count" in meta and meta["null_count"] is not None:
             lines.append(
                 f'          <Annotation Term="Custom.Statistics.NullCount" Int="{meta["null_count"]}"/>'
