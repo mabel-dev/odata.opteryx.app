@@ -806,36 +806,22 @@ def dataset_metadata(
         if description and isinstance(description, dict):
             for col_name, stats in description.items():
                 if col_name in col_metadata and isinstance(stats, dict):
-                    # Add stats to metadata
-                    col_metadata[col_name].update(stats)
+                    # Add stats to metadata and normalize naming
+                    meta = col_metadata[col_name]
+                    meta.update(stats)
+                    # Normalize upstream `approx_cardinality` to canonical `cardinality`
+                    if "approx_cardinality" in meta:
+                        meta["cardinality"] = meta.pop("approx_cardinality")
+                        meta.setdefault("cardinality_is_estimated", True)
 
-                    # If the description includes a small set of min-k hashes, use
-                    # them to infer exact cardinality when there are few unique hashes.
-                    # Some upstream descriptors store lists like `min_k_hashes` (list of ints).
-                    # If the count of unique hashes is <= 30, we can be confident
-                    # that there are that many distinct values and set
-                    # `approx_cardinality` accordingly (override when smaller).
-                    for kname, kval in stats.items():
-                        if (
-                            isinstance(kval, (list, tuple))
-                            and 1 <= len(kval) <= 32
-                            and all(isinstance(x, int) for x in kval)
-                            and "min" in kname.lower()
-                            and "hash" in kname.lower()
-                        ):
+                    # If the description includes a small set of min-k hashes (<31),
+                    # use them to compute an exact cardinality and mark it non-estimated.
+                    kval = stats.get("min_k_hashes")
+                    if kval:
+                        if isinstance(kval, (list, tuple)) and 1 <= len(kval) < 31:
                             uniq = len(set(kval))
-                            # Only infer when the unique count is small enough to be reliable
-                            if uniq <= 30:
-                                existing = col_metadata[col_name].get("approx_cardinality")
-                                if existing is None or (
-                                    isinstance(existing, int) and existing > uniq
-                                ):
-                                    col_metadata[col_name]["approx_cardinality"] = uniq
-                                    # Mark that this cardinality was inferred exactly from
-                                    # a small set of min-k hashes so we can emit a precise
-                                    # DistinctValueCount annotation instead of an estimate.
-                                    col_metadata[col_name]["approx_cardinality_exact"] = True
-                            break
+                            meta["cardinality"] = uniq
+                            meta["cardinality_is_estimated"] = False
 
         # Get snapshot for last modified info only for tables (views typically don't expose snapshot)
         last_ts_ms = None
@@ -941,22 +927,13 @@ def dataset_metadata(
                 .replace('"', "&quot;")
             )
             lines.append(f'          <Annotation Term="Custom.Statistics.Max" String="{max_val}"/>')
-        if (
-            "approx_cardinality" in meta
-            and meta["approx_cardinality"] is not None
-            and meta["approx_cardinality"] > 0
-        ):
-            # If we inferred the cardinality exactly from a small set of min-k
-            # hashes, report it as an exact DistinctValueCount. Otherwise keep
-            # the Estimate terminology for probabilistic values.
-            if meta.get("approx_cardinality_exact"):
-                lines.append(
-                    f'          <Annotation Term="Custom.Statistics.DistinctValueCount" Int="{meta["approx_cardinality"]}"/>'
-                )
-            else:
-                lines.append(
-                    f'          <Annotation Term="Custom.Statistics.DistinctValueCountEstimate" Int="{meta["approx_cardinality"]}"/>'
-                )
+        if "cardinality" in meta and meta["cardinality"] is not None and meta["cardinality"] > 0:
+            cardinality_key = "DistinctValueCount"
+            if bool(meta.get("cardinality_is_estimated", True)):
+                cardinality_key += "Estimated"
+            lines.append(
+                f'          <Annotation Term="Custom.Statistics.{cardinality_key}" Int="{meta["cardinality"]}"/>'
+            )
         if "null_count" in meta and meta["null_count"] is not None:
             lines.append(
                 f'          <Annotation Term="Custom.Statistics.NullCount" Int="{meta["null_count"]}"/>'

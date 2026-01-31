@@ -99,20 +99,33 @@ def get_xml_for(min_k_hashes=None, approx=None):
 
 def test_min_k_hashes_small_sets():
     content = get_xml_for(min_k_hashes=[10, 20])
-    assert "Custom.Statistics.DistinctValueCount" in content
+    assert "Custom.Statistics.Cardinality" in content
     assert 'Int="2"' in content
+    assert "CardinalityIsEstimated" in content
+    assert 'Bool="false"' in content
 
 
 def test_min_k_hashes_threshold_exceeded():
     # 32 unique hashes -> do not infer (threshold is 30)
     mk = list(range(32))
     content = get_xml_for(min_k_hashes=mk)
-    assert "Custom.Statistics.DistinctValueCountEstimate" not in content
-    assert "Custom.Statistics.DistinctValueCount" not in content
+    assert "Custom.Statistics.Cardinality" not in content
+    assert "Custom.Statistics.CardinalityIsEstimated" not in content
 
 
 def test_min_k_hashes_overrides_larger_approx():
     # approx_cardinality present but larger than actual uniq -> should be replaced
     content = get_xml_for(min_k_hashes=[1, 2, 2], approx=100)
-    assert "Custom.Statistics.DistinctValueCount" in content
+    assert "Custom.Statistics.Cardinality" in content
     assert 'Int="2"' in content
+    assert "CardinalityIsEstimated" in content
+    assert 'Bool="false"' in content
+
+
+def test_min_k_hashes_len_31_not_exact():
+    # 31 provided hashes -> even if unique count is small, we should NOT
+    # mark as exact (we only treat fewer than 31 provided hashes as exact)
+    mk = [i % 30 for i in range(31)]  # len=31, uniq=30
+    content = get_xml_for(min_k_hashes=mk)
+    assert "Custom.Statistics.Cardinality" not in content
+    assert "Custom.Statistics.CardinalityIsEstimated" not in content
