@@ -113,17 +113,28 @@ def _sanitize_value_for_odata(value: Any) -> Any:
         return value
 
     # Binary data -> None (OData clients struggle with binary in JSON)
+    import base64
+    import json
+
     if isinstance(value, (bytes, bytearray)):
-        return None
+        # Return base64-encoded string so binary columns can be represented
+        try:
+            return base64.b64encode(bytes(value)).decode("ascii")
+        except Exception:
+            return None
 
-    # Lists/arrays -> stringify for compatibility
-    # (OData collections are complex and have poor client support)
+    # Lists/arrays -> return JSON array of sanitized inner values
+    # Emit real arrays instead of stringifying to support Collection types
     if isinstance(value, (list, tuple)):
-        return str(value)
+        return [_sanitize_value_for_odata(v) for v in value]
 
-    # Dicts/structs -> stringify
+    # Dicts/structs (JSONB/STRUCT) -> encode as base64 JSON so we can expose as Edm.Binary
     if isinstance(value, dict):
-        return str(value)
+        try:
+            b = json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+            return base64.b64encode(b).decode("ascii")
+        except Exception:
+            return str(value)
 
     # Everything else -> convert to string as fallback
     # This handles UUIDs, enums, custom objects, etc.
@@ -688,7 +699,7 @@ def dataset_metadata(
     # Try to get enriched metadata from catalog
     col_names = []
     col_types = []
-    col_metadata = {}  # Maps col_name -> {type, min, max, cardinality, description} 
+    col_metadata = {}  # Maps col_name -> {type, min, max, cardinality, description}
 
     try:
         workspace = OpteryxCatalog(
@@ -729,7 +740,7 @@ def dataset_metadata(
             for field in schema.columns:
                 col_name = field.name
                 col_names.append(col_name)
-                # Map Orso type to EDM type
+                # Map Orso type to EDM type (fallback may be generic)
                 edm_type = _orso_type_to_edm(field.type)
                 col_types.append(edm_type)
                 col_metadata[col_name] = {
@@ -737,6 +748,39 @@ def dataset_metadata(
                     "source_type": str(field.type),
                     "nullable": field.nullable,
                 }
+
+            # Post-process column `source_type` to refine types for arrays/structs/binary
+            try:
+                import re
+
+                for col_name, meta in col_metadata.items():
+                    st = str(meta.get("source_type", "")).upper()
+                    # ARRAY -> Collection(Edm.<inner>) when inner exists
+                    if "ARRAY" in st:
+                        inner = None
+                        m = re.search(r"ARRAY\s*[<\(]\s*([^>\)]+)\s*[>\)]", st)
+                        if m:
+                            inner = m.group(1).strip().upper()
+                        if inner in ("INTEGER", "INT", "BIGINT", "TINYINT", "SMALLINT"):
+                            meta["type"] = "Collection(Edm.Int64)"
+                        elif inner in ("DOUBLE", "FLOAT", "REAL", "DECIMAL", "NUMERIC"):
+                            meta["type"] = "Collection(Edm.Double)"
+                        else:
+                            meta["type"] = "Collection(Edm.String)"
+                        meta["original_type"] = st
+
+                    # STRUCT/JSON -> expose as binary and annotate original type
+                    if any(x in st for x in ("STRUCT", "JSON", "JSONB")):
+                        meta["type"] = "Edm.Binary"
+                        meta["original_type"] = st
+
+                    # Blob/varbinary/binary -> binary EDM type
+                    if any(x in st for x in ("BLOB", "VARBINARY", "BINARY")):
+                        meta["type"] = "Edm.Binary"
+                        meta["original_type"] = st
+            except Exception:
+                # Be conservative: do not fail if introspection fails
+                logger.debug("Failed to post-process column types", exc_info=True)
         else:
             # If this is a view and the catalog object does not provide a schema,
             # emit a minimal placeholder so the metadata document remains valid.
@@ -764,6 +808,30 @@ def dataset_metadata(
                 if col_name in col_metadata and isinstance(stats, dict):
                     # Add stats to metadata
                     col_metadata[col_name].update(stats)
+
+                    # If the description includes a small set of min-k hashes, use
+                    # them to infer exact cardinality when there are few unique hashes.
+                    # Some upstream descriptors store lists like `min_k_hashes` (list of ints).
+                    # If the count of unique hashes is <= 30, we can be confident
+                    # that there are that many distinct values and set
+                    # `approx_cardinality` accordingly (override when smaller).
+                    for kname, kval in stats.items():
+                        if (
+                            isinstance(kval, (list, tuple))
+                            and 1 <= len(kval) <= 32
+                            and all(isinstance(x, int) for x in kval)
+                            and "min" in kname.lower()
+                            and "hash" in kname.lower()
+                        ):
+                            uniq = len(set(kval))
+                            # Only infer when the unique count is small enough to be reliable
+                            if uniq <= 30:
+                                existing = col_metadata[col_name].get("approx_cardinality")
+                                if existing is None or (
+                                    isinstance(existing, int) and existing > uniq
+                                ):
+                                    col_metadata[col_name]["approx_cardinality"] = uniq
+                            break
 
         # Get snapshot for last modified info only for tables (views typically don't expose snapshot)
         last_ts_ms = None
@@ -849,6 +917,17 @@ def dataset_metadata(
                 .replace('"', "&quot;")
             )
             lines.append(f'          <Annotation Term="Custom.Statistics.Min" String="{min_val}"/>')
+
+        # Emit original source type when we mapped to a different EDM type
+        if "original_type" in meta and meta["original_type"]:
+            ot = (
+                str(meta["original_type"])
+                .replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+                .replace('"', "&quot;")
+            )
+            lines.append(f'          <Annotation Term="Custom.OriginalType" String="{ot}"/>')
         if "max" in meta and meta["max"] is not None:
             max_val = (
                 str(meta["max"])
