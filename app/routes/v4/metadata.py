@@ -299,9 +299,31 @@ def _map_py_type_to_edm(py_type) -> str:
         if type_str in ("TIMESTAMP", "DATETIME", "DATE", "TIME"):
             return "Edm.DateTimeOffset"
 
-        # Arrays, structs, binary -> serialize as String for compatibility
-        if type_str in ("ARRAY", "LIST", "STRUCT", "BINARY", "BLOB", "VARBINARY"):
-            return "Edm.String"
+        # Arrays -> Collection of an inner EDM type when inner type is known
+        if type_str.startswith("ARRAY") or type_str in ("ARRAY", "LIST"):
+            # Try to extract inner type: ARRAY<INNER> or ARRAY(INNER)
+            import re
+
+            inner = None
+            m = re.search(r"ARRAY\s*[<\(]\s*([^>\)]+)\s*[>\)]", type_str)
+            if m:
+                inner = m.group(1).strip()
+            # Map some common inner types to EDM
+            inner_upper = (inner or "").upper()
+            if inner_upper in ("INTEGER", "INT", "BIGINT", "TINYINT", "SMALLINT"):
+                return "Collection(Edm.Int64)"
+            if inner_upper in ("DOUBLE", "FLOAT", "REAL", "DECIMAL", "NUMERIC"):
+                return "Collection(Edm.Double)"
+            # Default inner -> string
+            return "Collection(Edm.String)"
+
+        # Structs / JSON-like types -> expose as binary (base64) and annotate original type
+        if type_str in ("STRUCT", "JSON", "JSONB"):
+            return "Edm.Binary"
+
+        # BINARY/BLOB/VARBINARY -> binary type
+        if type_str in ("BINARY", "BLOB", "VARBINARY"):
+            return "Edm.Binary"
 
         # Default to string for unknown types
         return "Edm.String"

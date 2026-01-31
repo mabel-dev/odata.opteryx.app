@@ -83,7 +83,6 @@ class FakeDatasetWithSnapshot:
         return type("M", (), {"description": "table desc", "describer": "Llama-xyz"})()
 
 
-
 class FakeCatalog:
     def __init__(self, *args, **kwargs):
         pass
