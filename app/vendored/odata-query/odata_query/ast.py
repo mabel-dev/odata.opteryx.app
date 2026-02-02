@@ -12,6 +12,23 @@ from dateutil.parser import isoparse
 DURATION_PATTERN = re.compile(r"([+-])?P(\d+Y)?(\d+M)?(\d+D)?(?:T(\d+H)?(\d+M)?(\d+(?:\.\d+)?S)?)?")
 
 
+def try_parse_iso(value):
+    """Try to parse a string/bytes value as ISO datetime.
+
+    Uses Opteryx's parse_iso function to convert ISO-parseable strings to datetime.
+    Returns the parsed datetime if successful, otherwise returns None.
+    """
+    if not isinstance(value, (str, bytes)):
+        return None
+
+    try:
+        from opteryx.compiled.functions.timestamp import parse_iso as c_parse_iso
+
+        return c_parse_iso(value)
+    except (ValueError, TypeError, ImportError):
+        return None
+
+
 @dataclass(frozen=True)
 class _Node:
     """Base class for all AST nodes. Can override to_opteryx_node to customize conversion."""
@@ -155,7 +172,12 @@ class Date(_Literal):
         from opteryx.models import Node
         from orso.types import OrsoTypes
 
-        return Node(NodeType.LITERAL, type=OrsoTypes.DATE, value=self.py_val)
+        # Try to parse ISO string to datetime for proper filtering
+        parsed = try_parse_iso(self.val)
+        if parsed is not None:
+            return Node(NodeType.LITERAL, type=OrsoTypes.DATE, value=parsed)
+        # Fallback to string if parsing fails
+        return Node(NodeType.LITERAL, type=OrsoTypes.VARCHAR, value=self.val)
 
 
 @dataclass(frozen=True)
@@ -171,7 +193,12 @@ class Time(_Literal):
         from opteryx.models import Node
         from orso.types import OrsoTypes
 
-        return Node(NodeType.LITERAL, type=OrsoTypes.TIME, value=self.py_val)
+        # Try to parse ISO string to datetime for proper filtering
+        parsed = try_parse_iso(self.val)
+        if parsed is not None:
+            return Node(NodeType.LITERAL, type=OrsoTypes.TIME, value=parsed)
+        # Fallback to string if parsing fails
+        return Node(NodeType.LITERAL, type=OrsoTypes.VARCHAR, value=self.val)
 
 
 @dataclass(frozen=True)
@@ -187,7 +214,12 @@ class DateTime(_Literal):
         from opteryx.models import Node
         from orso.types import OrsoTypes
 
-        return Node(NodeType.LITERAL, type=OrsoTypes.TIMESTAMP, value=self.py_val)
+        # Try to parse ISO string to datetime for proper filtering
+        parsed = try_parse_iso(self.val)
+        if parsed is not None:
+            return Node(NodeType.LITERAL, type=OrsoTypes.TIMESTAMP, value=parsed)
+        # Fallback to string if parsing fails
+        return Node(NodeType.LITERAL, type=OrsoTypes.VARCHAR, value=self.val)
 
 
 @dataclass(frozen=True)
