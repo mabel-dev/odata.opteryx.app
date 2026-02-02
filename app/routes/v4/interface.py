@@ -59,14 +59,6 @@ def _sanitize_value_for_odata(value: Any) -> Any:
     if value is None:
         return None
 
-    # Debug logging for datetime values to diagnose timezone issues
-    if isinstance(value, (dt.datetime, dt.date, dt.time)):
-        logger.debug(
-            f"Datetime value: {value}, type: {type(value)}, tzinfo: {getattr(value, 'tzinfo', 'N/A')}"
-        )
-    elif isinstance(value, str) and "T" in value:
-        logger.debug(f"String with T (possible datetime): {value}")
-
     # Boolean - check first since bool is subclass of int in Python
     if isinstance(value, bool):
         return value
