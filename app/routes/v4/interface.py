@@ -248,7 +248,8 @@ def execute_odata_query(
                 skip=None,
                 apply_expr=apply_expr,
             )
-            schema_table = opteryx.execute_logical_plan(schema_plan)
+            session = opteryx.session()
+            schema_table = session.execute_logical_plan(schema_plan)
             col_names = schema_table.column_names or []
             logger.debug(f"Got schema from query: {col_names}")
         except Exception as exc:
@@ -267,7 +268,8 @@ def execute_odata_query(
                 apply_expr=apply_expr,
                 count_only=True,
             )
-            count_table = opteryx.execute_logical_plan(count_plan)
+            session = opteryx.session()
+            count_table = session.execute_logical_plan(count_plan)
             # Strict validation: count query MUST return a 1x1 numeric result. Fail fast with clear error otherwise.
             if not count_table:
                 raise ValueError(f"Count query returned no table object for {table_name}")
@@ -300,7 +302,8 @@ def execute_odata_query(
 
         try:
             # Execute the logical plan using Opteryx executor
-            arrow_table = opteryx.execute_logical_plan(optimized_plan)
+            session = opteryx.session()
+            arrow_table = session.execute_logical_plan(optimized_plan)
 
             # Get column names from the Arrow table
             col_names = arrow_table.column_names or []
@@ -341,7 +344,8 @@ def execute_odata_query(
                     apply_expr=apply_expr,
                     count_only=True,
                 )
-                arrow_table = opteryx.execute_logical_plan(count_plan)
+                session = opteryx.session()
+                arrow_table = session.execute_logical_plan(count_plan)
                 # Strict validation: count query MUST return a 1x1 numeric result. Fail fast with clear error otherwise.
                 if not arrow_table:
                     raise ValueError(f"Count query returned no table object for {table_name}")

@@ -278,8 +278,6 @@ def get_service_document(
     all_datasets.extend(_get_personal_datasets(db, identity))
     all_datasets.extend(_get_workspace_datasets(db, workspace_ids))
 
-    print(all_datasets)
-
     # Filter datasets by read permission
     filtered_datasets: list[DatasetInfo] = []
 
