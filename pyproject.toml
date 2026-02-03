@@ -17,7 +17,7 @@ dependencies = [
     "orjson==3.11.6",
     "orso==0.0.226",
     "opteryx-catalog==0.4.*",
-    "opteryx-core==0.5.*",
+    "opteryx-core==0.6.*",
     "python-jose[cryptography]==3.5.0",
     "python-multipart==0.0.22",
     "requests==2.32.5",
