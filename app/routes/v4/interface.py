@@ -912,10 +912,17 @@ def dataset_metadata(
             lines.append(f'          <Annotation Term="Custom.Statistics.Max" String="{max_val}"/>')
         if "cardinality" in meta and meta["cardinality"] is not None and meta["cardinality"] > 0:
             cardinality_key = "DistinctValueCount"
-            if not bool(meta.get("cardinality_is_exact", False)):
+            cardinality_value = meta["cardinality"]
+            is_estimate = not bool(meta.get("cardinality_is_exact", False))
+
+            # Cap cardinality estimate at total record count (can't have more unique values than rows)
+            if is_estimate and "total_records" in snapshot_info:
+                cardinality_value = min(cardinality_value, snapshot_info["total_records"])
+
+            if is_estimate:
                 cardinality_key += "Estimate"
             lines.append(
-                f'          <Annotation Term="Custom.Statistics.{cardinality_key}" Int="{meta["cardinality"]}"/>'
+                f'          <Annotation Term="Custom.Statistics.{cardinality_key}" Int="{cardinality_value}"/>'
             )
         if "null_count" in meta and meta["null_count"] is not None:
             lines.append(

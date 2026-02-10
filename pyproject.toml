@@ -39,6 +39,7 @@ ensure_newline_before_comments = true
 line-length = 100
 indent-width = 4
 target-version = 'py313'
+exclude = ["app/vendored/", "tests/"]
 
 [tool.ruff.format]
 docstring-code-format = true

@@ -143,17 +143,9 @@ class ODataExpressionParser:
         if not apply_expr:
             return None
 
-        # Try the vendored parser first for full pipeline support
-        try:
-            from odata_query.apply import parse_apply
+        from odata_query.apply import parse_apply
 
-            pipeline = parse_apply(apply_expr)
-            # If vendored parser succeeds, return parsed structure
-            # For now, fall through to regex parsers below for compatibility
-        except Exception:
-            pass
-
-        # Fall back to regex parsers for common patterns
+        parse_apply(apply_expr)
 
         # Try global aggregate pattern: aggregate(sum(price) as total, count(*) as cnt)
         aggregate_only_match = re.match(
