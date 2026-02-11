@@ -9,7 +9,7 @@ description = "Opteryx OData Service"
 requires-python = '>=3.13'
 dependencies = [
     "brotli-asgi==1.6.0",
-    "cryptography==46.0.4",
+    "cryptography==46.0.5",
     "fastapi==0.128.5",
     "google-cloud-firestore==2.23.0",
     "google-cloud-secret-manager==2.26.0",
