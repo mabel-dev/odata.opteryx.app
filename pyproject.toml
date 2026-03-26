@@ -20,7 +20,7 @@ dependencies = [
     "opteryx-core==0.6.*",
     "python-jose[cryptography]==3.5.0",
     "python-multipart==0.0.22",
-    "requests==2.32.5",
+    "requests==2.33.0",
     "sly==0.5",
     "uvicorn[standard]==0.38.0",
 ]
