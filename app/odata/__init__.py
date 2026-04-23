@@ -1,7 +1,7 @@
 """OData v4 support for Opteryx.
 
 This package provides OData v4 query parameter parsing and conversion
-to Opteryx logical plans for optimized execution.
+for Opteryx, forwarding to the shared opteryx-core implementation.
 """
 
 # CRITICAL: Setup vendored odata_query BEFORE any imports that use it
@@ -15,8 +15,18 @@ if _vendored_path not in sys.path:
     sys.path.insert(0, _vendored_path)
 # isort: on
 
-# Now safe to import modules that depend on odata_query
-from app.odata.odata_to_logical_plan import ODataLogicalPlanBuilder
-from app.odata.odata_to_logical_plan import build_logical_plan
+from opteryx.odata import (
+    ODataExpressionParser,
+    ODataLogicalPlanBuilder,
+    ODataLogicalPlanOptimizer,
+    ApplyLogicalPlanBuilder,
+    build_logical_plan,
+)
 
-__all__ = ["ODataLogicalPlanBuilder", "build_logical_plan"]
+__all__ = [
+    "ODataExpressionParser",
+    "ODataLogicalPlanBuilder",
+    "ODataLogicalPlanOptimizer",
+    "ApplyLogicalPlanBuilder",
+    "build_logical_plan",
+]

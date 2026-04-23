@@ -11,6 +11,7 @@ from orso.logging import get_logger
 
 from app.auth.deps import require_authentication
 from app.core import _get_firestore_client
+from opteryx.odata import build_service_document
 
 logger = get_logger()
 router = APIRouter(prefix="/api/v4")
@@ -311,34 +312,20 @@ def get_service_document(
                 filtered_datasets.append(dataset)
                 break
 
-    # Build OData service document
     entity_sets = []
     for dataset in filtered_datasets:
-        # EntitySet name: workspace.collection.dataset (dots)
-        name = dataset.resource
-        # EntitySet url: workspace/collection/dataset (path segments)
-        url = f"{dataset.workspace}/{dataset.collection}/{dataset.name}"
+        entity_sets.append(
+            {
+                "name": dataset.resource,
+                "kind": "EntitySet",
+                "url": f"{dataset.workspace}/{dataset.collection}/{dataset.name}",
+                "source": getattr(dataset, "source", "Table"),
+                "role": getattr(dataset, "role", None),
+                "policy": getattr(dataset, "policy", None),
+            }
+        )
 
-        # Include source type, role, and policy so clients can distinguish Table vs View and understand permissions
-        entity_set = {
-            "name": name,
-            "kind": "EntitySet",
-            "url": url,
-            "source": getattr(dataset, "source", "Table"),
-        }
-
-        # Add role and policy if available
-        if dataset.role:
-            entity_set["role"] = dataset.role
-        if dataset.policy:
-            entity_set["policy"] = dataset.policy
-
-        entity_sets.append(entity_set)
-
-    return {
-        "@odata.context": "/api/v4/$metadata",
-        "value": entity_sets,
-    }
+    return build_service_document(entity_sets)
 
 
 __all__ = ["router"]
