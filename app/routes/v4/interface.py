@@ -24,8 +24,10 @@ from orso.logging import get_logger
 from orso.types import OrsoTypes
 
 from app.auth.deps import require_authentication
-from app.odata.odata_to_logical_plan import ODataLogicalPlanBuilder
-from app.odata.plan_optimizer import ODataLogicalPlanOptimizer
+from opteryx.odata import execute_odata_query as _execute_odata_query_core
+from opteryx.odata import sanitize_value_for_odata as _sanitize_value_for_odata_core
+from opteryx.odata import ODataLogicalPlanBuilder
+from opteryx.odata import ODataLogicalPlanOptimizer
 
 logger = get_logger()
 logger.setLevel(5)
@@ -45,95 +47,8 @@ opteryx.set_default_connector(
 
 
 def _sanitize_value_for_odata(value: Any) -> Any:
-    """
-    Aggressively normalize values for OData/JSON compatibility.
-
-    OData clients are strict about type matching. We prioritize compatibility
-    over precision, converting everything to basic JSON-compatible primitives.
-
-    Returns: int, float, str, bool, or None only
-    """
-    import datetime as dt
-    import decimal
-
-    if value is None:
-        return None
-
-    # Boolean - check first since bool is subclass of int in Python
-    if isinstance(value, bool):
-        return value
-
-    # Numeric types -> int or float
-    if isinstance(value, int):
-        return value
-
-    if isinstance(value, (float, decimal.Decimal)):
-        # Convert Decimal to float, handle NaN/Infinity
-        f = float(value)
-        # OData doesn't handle NaN/Infinity well, convert to None
-        if not (f == f):  # NaN check (NaN != NaN)
-            return None
-        if f == float("inf") or f == float("-inf"):
-            return None
-        return f
-
-    # Datetime types -> ISO 8601 string with timezone (OData requires timezone)
-    if isinstance(value, dt.datetime):
-        # If naive datetime (no timezone), assume UTC
-        if value.tzinfo is None:
-            return value.isoformat() + "Z"
-        else:
-            return value.isoformat()
-
-    if isinstance(value, dt.date):
-        # Date -> convert to datetime at midnight UTC
-        return value.isoformat() + "T00:00:00Z"
-
-    if isinstance(value, dt.time):
-        # Time alone -> convert to today's date with that time in UTC
-        return f"1970-01-01T{value.isoformat()}Z"
-
-    # String that looks like a datetime without timezone -> add Z suffix
-    if isinstance(value, str):
-        # Check if it's an ISO datetime string without timezone
-        # Formats: "1988-10-01T04:00:00" (needs Z), "1988-10-01T04:00:00Z" (OK), "1988-10-01T04:00:00+00:00" (OK)
-        if "T" in value and len(value) >= 19:
-            # Has time component
-            if not (value.endswith("Z") or "+" in value[-6:] or "-" in value[-6:]):
-                # No timezone indicator, add Z
-                return value + "Z"
-        return value
-
-    # Binary data -> None (OData clients struggle with binary in JSON)
-    import base64
-    import json
-
-    if isinstance(value, (bytes, bytearray)):
-        # Return base64-encoded string so binary columns can be represented
-        try:
-            return base64.b64encode(bytes(value)).decode("ascii")
-        except Exception:
-            return None
-
-    # Lists/arrays -> return JSON array of sanitized inner values
-    # Emit real arrays instead of stringifying to support Collection types
-    if isinstance(value, (list, tuple)):
-        return [_sanitize_value_for_odata(v) for v in value]
-
-    # Dicts/structs (JSONB/STRUCT) -> encode as base64 JSON so we can expose as Edm.Binary
-    if isinstance(value, dict):
-        try:
-            b = json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-            return base64.b64encode(b).decode("ascii")
-        except Exception:
-            return str(value)
-
-    # Everything else -> convert to string as fallback
-    # This handles UUIDs, enums, custom objects, etc.
-    if not isinstance(value, str):
-        return str(value)
-
-    return value
+    """Normalize values for OData/JSON compatibility using the shared core helper."""
+    return _sanitize_value_for_odata_core(value)
 
 
 def execute_odata_query(
@@ -148,236 +63,20 @@ def execute_odata_query(
 ) -> dict:
     """Execute an OData query and return results.
 
-    This function orchestrates the core OData query execution pipeline:
-    1. Build logical plan from OData parameters (parsing + plan construction)
-    2. Optimize the plan based on constraints (e.g., top=0 with count)
-    3. Execute via Opteryx, handling optimization strategy
-
-    Args:
-        table_name: Full table name (e.g., "workstream.collection.dataset")
-        filter_expr: OData $filter expression
-        orderby_expr: OData $orderby expression
-        select_cols: OData $select columns
-        top: $top limit (1-10000, default: DEFAULT_TOP)
-        skip: $skip offset
-        count_requested: Whether to include total count
-        apply_expr: OData $apply expression
-
-    Returns:
-        dict with keys:
-            - rows: list of dicts containing the result rows
-            - col_names: list of column names
-            - total_count: total count (if requested), None otherwise
-            - took_ms: execution time in milliseconds
-
-    Raises:
-        ValueError: If OData query is invalid
-        Exception: If execution fails
+    This wrapper delegates the core execution logic to opteryx-core.
     """
-    import time
-
-    start_time = time.time()
-
-    # Step 1: Set defaults
-    if top is None:
-        top = DEFAULT_TOP
-
-    # Step 2: Build logical plan from OData parameters
-    # This parses each OData expression ($filter, $orderby, etc.) and builds
-    # a structured representation of the query
-    plan_builder = ODataLogicalPlanBuilder(table_name)
-    try:
-        logical_plan = plan_builder.build(
-            filter_expr=filter_expr,
-            select_cols=select_cols,
-            orderby_expr=orderby_expr,
-            top=top,
-            skip=skip,
-            apply_expr=apply_expr,
-        )
-    except ValueError as e:
-        logger.error(
-            f"Failed to build logical plan for table {table_name}: filter={filter_expr}, select={select_cols}, orderby={orderby_expr}, error={e}"
-        )
-        raise
-    except Exception as e:
-        logger.error(f"Unexpected error building logical plan for table {table_name}: error={e}")
-        raise
-
-    logger.debug(f"Built logical plan with {len(logical_plan.nodes())} nodes for {table_name}")
-
-    # Debug: log validation inputs
-    logger.debug(
-        f"Validation inputs: apply_expr={apply_expr!r}, count_requested={count_requested!r}"
+    return _execute_odata_query_core(
+        table_name=table_name,
+        filter_expr=filter_expr,
+        orderby_expr=orderby_expr,
+        select_cols=select_cols,
+        top=top,
+        skip=skip,
+        apply_expr=apply_expr,
+        count_requested=count_requested,
+        plan_builder_cls=ODataLogicalPlanBuilder,
+        plan_optimizer_cls=ODataLogicalPlanOptimizer,
     )
-
-    # Validate unsupported combinations
-    if apply_expr and count_requested:
-        # Historically these query combinations were considered invalid in our test-suite
-        logger.error("Invalid query: $count with $apply is not supported")
-        raise ValueError("$count with $apply is not supported")
-
-    # Step 3: Optimize the plan based on query constraints
-    # This makes strategic decisions about query execution (e.g., schema+count split)
-    plan_optimizer = ODataLogicalPlanOptimizer()
-    optimized_plan, strategy_info = plan_optimizer.optimize_with_constraints(
-        logical_plan, top, count_requested
-    )
-    logger.debug(
-        f"Applied optimization strategy: {strategy_info['strategy']} - {strategy_info['description']}"
-    )
-
-    # Step 4: Execute based on optimization strategy
-    strategy = strategy_info.get("strategy")
-
-    if strategy == "schema_count_split":
-        # Special optimization: top=0 with count_requested
-        # Fetch schema and count separately, no data rows
-        rows = []
-        col_names = []
-        total_count = None
-
-        # Get schema by running a query with top=1
-        try:
-            schema_builder = ODataLogicalPlanBuilder(table_name)
-            schema_plan = schema_builder.build(
-                filter_expr=filter_expr,
-                select_cols=select_cols,
-                orderby_expr=None,
-                top=1,
-                skip=None,
-                apply_expr=apply_expr,
-            )
-            session = opteryx.session()
-            schema_table = session.execute_logical_plan(schema_plan)
-            col_names = schema_table.column_names or []
-            logger.debug(f"Got schema from query: {col_names}")
-        except Exception as exc:
-            logger.error(f"Error getting schema for table {table_name}: {exc}")
-            raise
-
-        # Get total count
-        try:
-            count_builder = ODataLogicalPlanBuilder(table_name)
-            count_plan = count_builder.build(
-                filter_expr=filter_expr,
-                select_cols=None,
-                orderby_expr=None,
-                top=None,
-                skip=None,
-                apply_expr=apply_expr,
-                count_only=True,
-            )
-            session = opteryx.session()
-            count_table = session.execute_logical_plan(count_plan)
-            # Strict validation: count query MUST return a 1x1 numeric result. Fail fast with clear error otherwise.
-            if not count_table:
-                raise ValueError(f"Count query returned no table object for {table_name}")
-            data = count_table.to_pydict()
-            if not data:
-                raise ValueError(f"Count query returned empty data for {table_name}")
-            first_col = next(iter(data))
-            vals = data.get(first_col)
-            if vals is None or len(vals) == 0:
-                raise ValueError(
-                    f"Count query returned no values for column '{first_col}' for {table_name}"
-                )
-            try:
-                total_count = int(vals[0])
-            except Exception as e:
-                # Include original data for debugging
-                raise ValueError(
-                    f"Count query returned non-integer value: {vals[0]} (col={first_col}) for {table_name}"
-                ) from e
-
-            logger.debug(f"Count query result: {total_count}")
-        except Exception as exc:
-            tb = traceback.format_exc()
-            logger.error(f"Error executing count(*) query for table {table_name}: {exc}\n{tb}")
-            raise
-    else:
-        # Standard path: execute the optimized logical plan
-        rows = []
-        col_names = []
-
-        try:
-            # Execute the logical plan using Opteryx executor
-            session = opteryx.session()
-            arrow_table = session.execute_logical_plan(optimized_plan)
-
-            # Get column names from the Arrow table
-            col_names = arrow_table.column_names or []
-            logger.debug(f"Arrow table columns: {col_names}")
-            logger.debug(f"Arrow table num_rows: {arrow_table.num_rows}")
-
-            # Convert Arrow table to list of dicts
-            columns_dict = arrow_table.to_pydict()
-
-            rows = []
-            for i in range(arrow_table.num_rows):
-                row_dict = {}
-                for col in col_names:
-                    value = columns_dict[col][i]
-                    # Sanitize values to ensure OData compatibility
-                    row_dict[col] = _sanitize_value_for_odata(value)
-                rows.append(row_dict)
-
-            logger.debug(f"Created {len(rows)} rows with {len(rows[0].keys()) if rows else 0} keys")
-
-        except Exception as exc:
-            logger.error(
-                f"Error executing logical plan for table {table_name} with orderby={orderby_expr}, filter={filter_expr}: {exc}"
-            )
-            raise
-
-        # Get total count if requested
-        total_count = None
-        if count_requested:
-            try:
-                count_builder = ODataLogicalPlanBuilder(table_name)
-                count_plan = count_builder.build(
-                    filter_expr=filter_expr,
-                    select_cols=None,
-                    orderby_expr=None,
-                    top=None,
-                    skip=None,
-                    apply_expr=apply_expr,
-                    count_only=True,
-                )
-                session = opteryx.session()
-                arrow_table = session.execute_logical_plan(count_plan)
-                # Strict validation: count query MUST return a 1x1 numeric result. Fail fast with clear error otherwise.
-                if not arrow_table:
-                    raise ValueError(f"Count query returned no table object for {table_name}")
-                data = arrow_table.to_pydict()
-                if not data:
-                    raise ValueError(f"Count query returned empty data for {table_name}")
-                first_col = next(iter(data))
-                vals = data.get(first_col)
-                if vals is None or len(vals) == 0:
-                    raise ValueError(
-                        f"Count query returned no values for column '{first_col}' for {table_name}"
-                    )
-                try:
-                    total_count = int(vals[0])
-                except Exception as e:
-                    raise ValueError(
-                        f"Count query returned non-integer value: {vals[0]} (col={first_col}) for {table_name}"
-                    ) from e
-                logger.debug(f"Count(*) query result: {total_count}")
-
-            except Exception as exc:
-                logger.error(f"Error executing count(*) query for table {table_name}: {exc}")
-                raise
-
-    elapsed_ms = (time.time() - start_time) * 1000
-
-    return {
-        "rows": rows,
-        "col_names": col_names,
-        "total_count": total_count,
-        "took_ms": elapsed_ms,
-    }
 
 
 def _orso_type_to_edm(orso_type: OrsoTypes) -> str:
