@@ -19,7 +19,7 @@ dependencies = [
     "opteryx-catalog==0.4.*",
     "opteryx-core==0.6.*",
     "python-jose[cryptography]==3.5.0",
-    "python-multipart==0.0.30",
+    "python-multipart==0.0.31",
     "requests==2.34.2",
     "sly==0.5",
     "uvicorn[standard]==0.38.0",
