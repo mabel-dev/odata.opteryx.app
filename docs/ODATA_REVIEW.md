@@ -39,7 +39,7 @@ No `pyarrow` references exist in `app/` (only transitively under opteryx-core).
 - `rugo`/`draken` are **not** added as direct deps — the app does not import them directly; they arrive transitively through opteryx-core (the correct fleet pattern).
 
 **orso → opteryx/draken migration**
-- `orso.logging.{get_logger,set_log_name}` → new self-contained [`app/logging.py`](../app/logging.py) shim (avoids depending on the corrupted `opteryx.logging`; preserves the `set_log_name` API). Updated 10 importers.
+- `orso.logging.{get_logger,set_log_name}` → new self-contained [`app/logging.py`](../app/logging.py) shim (avoids depending on the corrupted `opteryx.logging`; preserves the `set_log_name` API). Updated 10 importers. The shim also re-implements orso's custom **`AUDIT` (80)** and **`ALERT` (90)** levels and the `logger.audit(...)`/`logger.alert(...)` methods (with dict→JSON encoding) — the audit middleware calls `logger.audit(payload)`, which a stock stdlib logger lacks.
 - `orso.types.OrsoTypes` → `opteryx.types.logical_type` `ColumnType` constructors for expression literals, and canonical **type strings** for catalog-driven EDM mapping.
 
 **OData engine restored into the repo** (per decision: self-contained service)
