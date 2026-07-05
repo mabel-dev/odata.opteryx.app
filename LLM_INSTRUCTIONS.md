@@ -10,7 +10,7 @@ Base URL: `GET https://odata.opteryx.app/api/v4/{workspace}/{collection}/{datase
 - `$top` - Optional (default `100`). Limit results (0-10000): `$top=50`. LLMs should include an explicit `$top` to avoid returning excessively large result sets.
 - `$skip` - Offset for pagination: `$skip=100`
 - `$count` - Include total count: `$count=true`
-- `$apply` - Aggregation: `$apply=groupby((col), aggregate(sum(amount) as Total))`
+- `$apply` - Aggregation: `$apply=groupby((col), aggregate(amount with sum as Total))`
 
 ## Key Rules
 
@@ -20,6 +20,8 @@ Base URL: `GET https://odata.opteryx.app/api/v4/{workspace}/{collection}/{datase
 4. **Use exact column names** from schema
 5. **Use `$orderby` with pagination** for consistent results
 6. **`$expand` MUST NOT be generated**.
+7. **Null filtering requires explicit `or x eq null`**: The `ne` operator excludes nulls (SQL 3VL semantics). Use `(age ne 21) or (age eq null)` to include nulls.
+8. **LIKE patterns are literal**: Functions like `contains()`, `startswith()`, `endswith()` do NOT treat `%` or `_` as wildcards. Example: `contains(sku, 'A_B')` matches the literal string `'A_B'`, not a pattern.
 
 ## Common Patterns
 
@@ -35,17 +37,17 @@ $orderby=salary desc&$top=10&$select=name,department,salary
 
 **Aggregation (count by group):**
 ```
-$apply=groupby((department), aggregate(count(*) as Count))
+$apply=groupby((department), aggregate($count as Count))
 ```
 
 **Multiple aggregations:**
 ```
-$apply=groupby((region,product), aggregate(sum(sales) as Total, avg(price) as Avg, count(*) as Records))
+$apply=groupby((region,product), aggregate(sales with sum as Total, price with average as Avg, $count as Records))
 ```
 
 **Top N by metric:**
 ```
-$apply=groupby((product), aggregate(sum(revenue) as Revenue))&$orderby=Revenue desc&$top=5
+$apply=groupby((product), aggregate(revenue with sum as Revenue))&$orderby=Revenue desc&$top=5
 ```
 
 OUTPUT FORMAT (REQUIRED)
@@ -55,12 +57,23 @@ When asked to GENERATE a query string, output EXACTLY one URL-encoded query stri
 ?$select=name%2Cnumber_of_moons&$orderby=number_of_moons%20desc&$top=1
 ```
 
-Supported functions you may use directly:
+Supported functions you may use directly (in `$filter` expressions):
 - Comparison: `eq`, `ne`, `gt`, `ge`, `lt`, `le`
 - Logical: `and`, `or`, `not`
 - String funcs: `contains()`, `startswith()`, `endswith()`, `tolower()`, `toupper()`, `indexof()`, `substring()`, `length()`
-- Aggregates: `sum()`, `count(*)`, `count(col)`, `avg()`, `min()`, `max()`
+
+(Aggregates are only used in `$apply` expressions, see Aggregation Functions below.)
 
 ## Aggregation Functions
 
-`sum()`, `count(*)`, `count(col)`, `avg()`, `min()`, `max()`
+In `$apply` expressions, aggregations use the format: `column with method as alias` or `$count as alias`
+
+Supported methods:
+- `sum` - sum numeric values: `amount with sum as Total`
+- `average` - arithmetic mean: `price with average as AvgPrice`
+- `min` - minimum value: `value with min as MinVal`
+- `max` - maximum value: `value with max as MaxVal`
+- `count` - count non-null values: `status with count as StatusCount`
+- `$count` - count all records: `$count as TotalCount`
+
+Example: `$apply=groupby((region), aggregate(revenue with sum as Total, $count as Count, price with average as AvgPrice))`

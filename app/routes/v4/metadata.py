@@ -18,6 +18,7 @@ from app.logging import get_logger
 
 from app.auth.deps import require_authentication
 from app.core import _get_firestore_client
+from app.odata.edm_types import column_type_to_edm
 
 logger = get_logger()
 router = APIRouter(prefix="/api/v4")
@@ -258,103 +259,6 @@ def _role_allows_read(role: str | None) -> bool:
     return role_lower in {"reader", "writer", "admin", "owner"}
 
 
-def _map_py_type_to_edm(py_type) -> str:
-    """
-    Map a column type to an EDM type.
-
-    Accepts either a canonical Opteryx type string (as returned by the catalog,
-    e.g. ``"INTEGER"``, ``"DECIMAL(38, 9)"``, ``"ARRAY<VARCHAR>"``), a type-like
-    object exposing ``.name``, or a Python ``type`` (legacy path).
-
-    Uses a simplified, highly compatible set of EDM types to avoid
-    serialization and client compatibility issues. We prefer broader
-    types over precise types to maximize OData client compatibility.
-    """
-    import datetime as _dt
-    import decimal as _dec
-
-    try:
-        import uuid as _uuid
-    except Exception:
-        _uuid = None
-
-    # Handle canonical type strings (from the catalog) and type-like objects.
-    # NOTE: the catalog returns plain strings, which have no ``.name`` attribute,
-    # so this branch must accept ``str`` too — otherwise every catalog column
-    # falls through to the Python-type path below and mislabels as Edm.String.
-    if isinstance(py_type, str) or hasattr(py_type, "name"):
-        type_str = str(py_type).upper()
-        # Base category without parameters/element: "DECIMAL(38, 9)" -> "DECIMAL".
-        base = type_str.split("(", 1)[0].split("<", 1)[0].strip()
-
-        # Integer types -> Always Int64 for maximum range and compatibility
-        if base in ("INTEGER", "BIGINT", "TINYINT", "SMALLINT", "INT"):
-            return "Edm.Int64"
-
-        # All numeric types -> Double (avoids Decimal IEEE754Compatible issues)
-        if base in ("DOUBLE", "FLOAT", "REAL", "DECIMAL", "NUMERIC"):
-            return "Edm.Double"
-
-        # Boolean
-        if base in ("BOOLEAN", "BOOL"):
-            return "Edm.Boolean"
-
-        # String types
-        if base in ("VARCHAR", "NVARCHAR", "VARIANT", "TEXT", "CHAR", "STRING"):
-            return "Edm.String"
-
-        # Date/Time -> Use only DateTimeOffset for all temporal types
-        # This avoids Date/TimeOfDay serialization issues
-        if base in ("TIMESTAMP", "DATETIME", "DATE", "TIME"):
-            return "Edm.DateTimeOffset"
-
-        # Arrays -> Collection of an inner EDM type when inner type is known
-        if type_str.startswith("ARRAY") or base in ("ARRAY", "LIST"):
-            # Try to extract inner type: ARRAY<INNER> or ARRAY(INNER)
-            import re
-
-            inner = None
-            m = re.search(r"ARRAY\s*[<\(]\s*([^>\)]+)\s*[>\)]", type_str)
-            if m:
-                inner = m.group(1).strip()
-            # Map some common inner types to EDM
-            inner_upper = (inner or "").upper()
-            if inner_upper in ("INTEGER", "INT", "BIGINT", "TINYINT", "SMALLINT"):
-                return "Collection(Edm.Int64)"
-            if inner_upper in ("DOUBLE", "FLOAT", "REAL", "DECIMAL", "NUMERIC"):
-                return "Collection(Edm.Double)"
-            # Default inner -> string
-            return "Collection(Edm.String)"
-
-        # BINARY/BLOB/VARBINARY -> binary type
-        if base in ("BINARY", "BLOB", "VARBINARY"):
-            return "Edm.Binary"
-
-        # Structs / JSON-like types -> expose as binary (base64)
-        if base in ("STRUCT", "JSON", "JSONB"):
-            return "Edm.Binary"
-
-        # Default to string for unknown types
-        return "Edm.String"
-
-    # Handle Python types (legacy path)
-    if py_type is int:
-        return "Edm.Int64"
-    if py_type is float:
-        return "Edm.Double"
-    if py_type is bool:
-        return "Edm.Boolean"
-    if py_type is str:
-        return "Edm.String"
-    if _uuid and py_type is _uuid.UUID:
-        return "Edm.String"  # Serialize UUIDs as strings
-    if py_type is _dec.Decimal:
-        return "Edm.Double"  # Avoid Decimal type issues
-    if py_type in (_dt.datetime, _dt.date, _dt.time):
-        return "Edm.DateTimeOffset"
-
-    # Default fallback
-    return "Edm.String"
 
 
 @lru_cache(maxsize=512)
@@ -387,7 +291,7 @@ def _get_dataset_schema(dataset_info: DatasetInfo) -> list[tuple[str, str]]:
         for column in schema.columns:
             col_name = column.name
             # Map Opteryx type to EDM type
-            edm_type = _map_py_type_to_edm(column.type)
+            edm_type = column_type_to_edm(column.type)
             columns.append((col_name, edm_type))
 
         return columns
@@ -528,11 +432,14 @@ def get_edmx_metadata(
 
         # Add properties
         for col_name, edm_type in columns:
-            ET.SubElement(
-                entity_type,
-                "{" + NS_EDM + "}Property",
-                attrib={"Name": col_name, "Type": edm_type, "Nullable": "true"},
-            )
+            # First property is the key and must not be nullable
+            is_key = col_name == columns[0][0]
+            attrib = {"Name": col_name, "Type": edm_type}
+            if not is_key:
+                attrib["Nullable"] = "true"
+            else:
+                attrib["Nullable"] = "false"
+            ET.SubElement(entity_type, "{" + NS_EDM + "}Property", attrib=attrib)
 
         entity_types_created.add(entity_type_name)
 
@@ -549,8 +456,8 @@ def get_edmx_metadata(
         if entity_type_name not in entity_types_created:
             continue
 
-        # EntitySet name uses dots (as in service document)
-        entity_set_name = dataset.resource
+        # EntitySet name uses underscores (CSDL SimpleIdentifier compliance)
+        entity_set_name = dataset.resource.replace(".", "_")
 
         entity_set = ET.SubElement(
             entity_container,

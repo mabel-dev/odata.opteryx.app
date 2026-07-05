@@ -462,15 +462,10 @@ class Compare(_Node):
 
             # Fold into a chain of ORs
             if not eq_nodes:
-                # Empty IN () should be false
+                # Empty IN () should return a constant-false literal, not col = false
                 from opteryx.types.logical_type import ARRAY, BOOLEAN, DATE, FLOAT64, INT64, INTERVAL, NULL, TIME, TIMESTAMP, VARCHAR
 
-                return Node(
-                    node_type=NodeType.COMPARISON_OPERATOR,
-                    value="Eq",
-                    left=left_node,
-                    right=Node(node_type=NodeType.LITERAL, type=BOOLEAN, value=False),
-                )
+                return Node(node_type=NodeType.LITERAL, type=BOOLEAN, value=False)
 
             result = eq_nodes[0]
             for en in eq_nodes[1:]:
@@ -657,15 +652,31 @@ class Call(_Node):
 
             return Node(node_type=NodeType.FUNCTION, value="SUBSTRING", parameters=params)
 
+        # Helper function to escape LIKE metacharacters
+        def escape_like_literal(s: str, escape_char: str = "\\") -> str:
+            """Escape SQL LIKE metacharacters in a literal string.
+
+            Escapes the escape character first to avoid double-escaping, then
+            escapes % and _ so they match literally in LIKE patterns.
+            """
+            s = str(s)
+            # Escape the escape character first
+            s = s.replace(escape_char, escape_char + escape_char)
+            # Escape wildcards
+            s = s.replace("%", escape_char + "%")
+            s = s.replace("_", escape_char + "_")
+            return s
+
         # Convert startswith, endswith, contains to LIKE operators
         if func_name == "startswith" and len(arg_nodes) == 2:
             # startswith(field, 'value') → field LIKE 'value%'
             col_node = arg_nodes[0]
             pattern = arg_nodes[1]
-            # Append '%' to the pattern literal
+            # Escape metacharacters and append '%' to the pattern literal
             if pattern.node_type == NodeType.LITERAL:
+                escaped_value = escape_like_literal(str(pattern.value))
                 new_pattern = Node(
-                    node_type=NodeType.LITERAL, type=pattern.type, value=str(pattern.value) + "%"
+                    node_type=NodeType.LITERAL, type=pattern.type, value=escaped_value + "%"
                 )
                 return Node(
                     node_type=NodeType.COMPARISON_OPERATOR,
@@ -678,10 +689,11 @@ class Call(_Node):
             # endswith(field, 'value') → field LIKE '%value'
             col_node = arg_nodes[0]
             pattern = arg_nodes[1]
-            # Prepend '%' to the pattern literal
+            # Escape metacharacters and prepend '%' to the pattern literal
             if pattern.node_type == NodeType.LITERAL:
+                escaped_value = escape_like_literal(str(pattern.value))
                 new_pattern = Node(
-                    node_type=NodeType.LITERAL, type=pattern.type, value="%" + str(pattern.value)
+                    node_type=NodeType.LITERAL, type=pattern.type, value="%" + escaped_value
                 )
                 return Node(
                     node_type=NodeType.COMPARISON_OPERATOR,
@@ -694,12 +706,13 @@ class Call(_Node):
             # contains(field, 'value') → field LIKE '%value%'
             col_node = arg_nodes[0]
             pattern = arg_nodes[1]
-            # Wrap pattern with '%' on both sides
+            # Escape metacharacters and wrap pattern with '%' on both sides
             if pattern.node_type == NodeType.LITERAL:
+                escaped_value = escape_like_literal(str(pattern.value))
                 new_pattern = Node(
                     node_type=NodeType.LITERAL,
                     type=pattern.type,
-                    value="%" + str(pattern.value) + "%",
+                    value="%" + escaped_value + "%",
                 )
                 return Node(
                     node_type=NodeType.COMPARISON_OPERATOR,

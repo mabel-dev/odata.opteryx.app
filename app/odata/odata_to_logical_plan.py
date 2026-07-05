@@ -60,6 +60,12 @@ class ODataLogicalPlanBuilder:
         If `count_only` is True, the builder will construct a plan that
         returns a single COUNT(*) aggregate (after any filters/applies).
 
+        OData query evaluation order (per Data Aggregation extension §3):
+        - Scan → Expand → Apply → Filter → Select → OrderBy → Limit → Exit
+
+        Note: When $apply is present, $filter applies to the aggregated output.
+        When $apply is absent, $filter applies to the input rows.
+
         Args:
             filter_expr: OData $filter expression
             select_cols: OData $select expression (comma-separated columns)
@@ -76,10 +82,6 @@ class ODataLogicalPlanBuilder:
         # Start with a Scan node to read the table
         self.current_step_id = self._add_scan_node()
 
-        # Apply WHERE clause from $filter
-        if filter_expr:
-            self.current_step_id = self._add_filter_node(filter_expr)
-
         # Apply JOINs from $expand (must come before aggregations)
         if expand_expr:
             self.current_step_id = self._add_expand_nodes(expand_expr)
@@ -87,6 +89,10 @@ class ODataLogicalPlanBuilder:
         # Apply aggregations from $apply
         if apply_expr:
             self.current_step_id = self._add_apply_nodes(apply_expr)
+
+        # Apply WHERE clause from $filter (after $apply if present, before if absent)
+        if filter_expr:
+            self.current_step_id = self._add_filter_node(filter_expr)
 
         # If caller asked for a COUNT-only plan, add the count node and exit
         if count_only:
@@ -214,11 +220,7 @@ class ODataLogicalPlanBuilder:
         # Delegate parsing + plan construction to ApplyLogicalPlanBuilder, which
         # uses the vendored OData-standard $apply grammar
         # (e.g. ``groupby((country), aggregate(price with sum as total))``).
-        #
-        # NOTE: do NOT also validate via ``expression_parser.parse_apply`` here.
-        # That helper implements an incompatible ``sum(price) as total`` grammar,
-        # so running both made every $apply expression fail one validator or the
-        # other. ApplyLogicalPlanBuilder.parse_apply is the single source of truth.
+        # This is the single source of truth for $apply parsing.
         from app.odata.apply_builder import ApplyLogicalPlanBuilder
 
         try:

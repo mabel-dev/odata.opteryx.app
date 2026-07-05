@@ -6,15 +6,11 @@ OData query strings into normalized, parsed representations that the
 ODataLogicalPlanBuilder can use.
 """
 
-import re
 import sys
 from pathlib import Path
 from typing import List
 from typing import Optional
 from typing import Tuple
-
-from opteryx.expression import NodeType
-from opteryx.models import Node
 
 # CRITICAL: Set up vendored path BEFORE importing odata_query
 # ruff: noqa: E402
@@ -28,13 +24,15 @@ from odata_query.grammar import ODataParser
 
 class ODataExpressionParser:
     """Parse OData query expressions into AST and structured data.
-    
-    Handles all parsing of OData query string components:
+
+    Handles parsing of OData query string components:
     - $filter: WHERE clause expressions
-    - $orderby: ORDER BY specifications  
+    - $orderby: ORDER BY specifications
     - $select: Column projection specifications
-    - $apply: Aggregation pipeline syntax
-    
+
+    Note: $apply (aggregation) expressions are handled by ApplyLogicalPlanBuilder,
+    which uses the vendored odata-query parse_apply() function directly.
+
     Separates parsing concerns from plan building, allowing reuse
     and clearer separation of responsibilities.
     """
@@ -62,7 +60,7 @@ class ODataExpressionParser:
                 right=BinaryOp(price gt 100)
             )
         """
-        if not filter_expr:
+        if not filter_expr or not filter_expr.strip():
             return None
 
         try:
@@ -70,8 +68,66 @@ class ODataExpressionParser:
             ast = self.parser.parse(self.lexer.tokenize(filter_expr))
             # Convert AST to Opteryx expression node using the AST node's built-in method
             return ast.to_opteryx_node()
+        except NotImplementedError as e:
+            # Catch unsupported OData constructs and provide a user-friendly error
+            raise ValueError(
+                f"Unsupported filter construct: {self._describe_unsupported(ast)}"
+            ) from e
         except Exception as e:
+            # Try to infer what unsupported construct caused the parse error
+            error_msg = self._infer_unsupported_construct(filter_expr, str(e))
+            if error_msg:
+                raise ValueError(error_msg) from e
             raise ValueError(f"Failed to parse $filter expression: {filter_expr}") from e
+
+    def _describe_unsupported(self, ast_node) -> str:
+        """Map AST node types to user-friendly descriptions.
+
+        Searches recursively through the AST to find unsupported constructs.
+        """
+        # First check the node itself
+        node_type = type(ast_node).__name__
+        descriptions = {
+            "Lambda": "lambda operators (any/all) are not supported",
+            "CollectionLambda": "lambda operators (any/all) are not supported",
+            "GUID": "GUID literals are not supported",
+            "Geography": "geography literals are not supported",
+            "Call": "this function is not supported",
+        }
+
+        if node_type in descriptions:
+            return descriptions[node_type]
+
+        # Search recursively for unsupported constructs in child nodes
+        for attr_name in ("left", "right", "operand", "centre", "expression", "owner"):
+            if hasattr(ast_node, attr_name):
+                child = getattr(ast_node, attr_name)
+                if child is not None:
+                    result = self._describe_unsupported(child)
+                    # If we found something other than the generic message, return it
+                    if result != f"{type(child).__name__} is not supported":
+                        return result
+
+        return f"{node_type} is not supported"
+
+    def _infer_unsupported_construct(self, filter_expr: str, error_msg: str) -> Optional[str]:
+        """Try to infer what unsupported construct caused a parse error.
+
+        Returns a user-friendly error message if we can identify the construct,
+        or None if we cannot.
+        """
+        # Look for known patterns that indicate unsupported constructs
+        lower_expr = filter_expr.lower()
+
+        # GUID literals: guid'...'
+        if "guid'" in lower_expr:
+            return "Unsupported filter construct: GUID literals are not supported"
+
+        # Geography literals: geography'...'
+        if "geography'" in lower_expr:
+            return "Unsupported filter construct: geography literals are not supported"
+
+        return None
 
     def parse_orderby(self, orderby_expr: str) -> List[Tuple[str, str]]:
         """Parse OData $orderby expression into column/direction tuples.
@@ -130,123 +186,3 @@ class ODataExpressionParser:
         # Split by comma and strip whitespace
         return [col.strip() for col in select_cols.split(",")]
 
-    def parse_apply(self, apply_expr: str) -> dict:
-        """Parse OData $apply expression into aggregation specification.
-
-        Supports two forms:
-        1. Global aggregation: aggregate(sum(price) as total, count(*) as cnt)
-        2. Group-by aggregation: groupby((col1, col2), aggregate(...))
-
-        Args:
-            apply_expr: OData $apply expression string
-
-        Returns:
-            dict with keys:
-                - type: "aggregate" or "groupby"
-                - groupby_cols: List of column names (for groupby only)
-                - aggregations: List of dicts with 'function', 'expression', 'alias'
-
-        Raises:
-            ValueError: If $apply syntax is invalid
-        """
-        if not apply_expr:
-            return None
-
-        # NOTE: this regex-based parser implements a non-standard
-        # ``sum(price) as total`` grammar and is retained only for backward
-        # compatibility. The active $apply path uses ApplyLogicalPlanBuilder,
-        # which follows the OData-standard ``price with sum as total`` grammar.
-
-        # Fall back to regex parsers for common patterns
-        
-        # Try global aggregate pattern: aggregate(sum(price) as total, count(*) as cnt)
-        aggregate_only_match = re.match(
-            r"^\s*aggregate\s*\(\s*(.*)\s*\)\s*$", apply_expr, re.IGNORECASE
-        )
-        if aggregate_only_match:
-            aggregate_str = aggregate_only_match.group(1)
-            aggregations = self._parse_aggregates(aggregate_str)
-            return {
-                "type": "aggregate",
-                "groupby_cols": [],
-                "aggregations": aggregations,
-            }
-
-        # Try groupby pattern: groupby((col1, col2), aggregate(...))
-        groupby_match = re.match(
-            r"groupby\s*\(\s*\((.*?)\)\s*,\s*aggregate\s*\((.*)\)\s*\)",
-            apply_expr,
-            re.IGNORECASE,
-        )
-        if groupby_match:
-            groupby_cols_str = groupby_match.group(1)
-            aggregate_str = groupby_match.group(2)
-            groupby_cols = [col.strip() for col in groupby_cols_str.split(",")]
-            aggregations = self._parse_aggregates(aggregate_str)
-            return {
-                "type": "groupby",
-                "groupby_cols": groupby_cols,
-                "aggregations": aggregations,
-            }
-
-        raise ValueError(f"Invalid $apply syntax: '{apply_expr}'")
-
-    def _parse_aggregates(self, aggregate_str: str) -> List[dict]:
-        """Parse OData aggregate expressions.
-
-        Args:
-            aggregate_str: String like "sum(price) as total, count(*) as cnt"
-
-        Returns:
-            List of dicts with 'function', 'expression', and 'alias' keys
-        """
-        aggregates = []
-
-        # Split by comma (but be careful about nested parens)
-        parts = []
-        current = ""
-        paren_depth = 0
-        for char in aggregate_str:
-            if char == "(":
-                paren_depth += 1
-            elif char == ")":
-                paren_depth -= 1
-            elif char == "," and paren_depth == 0:
-                parts.append(current.strip())
-                current = ""
-                continue
-            current += char
-        if current.strip():
-            parts.append(current.strip())
-
-        # Parse each aggregate: "sum(price) as total" or "count(*)"
-        for part in parts:
-            agg_match = re.match(
-                r"(\w+)\s*\(\s*(.*?)\s*\)(?:\s+as\s+(\w+))?", part, re.IGNORECASE
-            )
-            if not agg_match:
-                raise ValueError(f"Invalid aggregate expression: '{part}'")
-
-            func_name = agg_match.group(1).upper()
-            expr_str = agg_match.group(2).strip()
-            alias = agg_match.group(3) or func_name.lower()
-
-            # Parse the expression inside the aggregate
-            if expr_str == "*":
-                # count(*) - pass None for expr
-                expr_node = None
-            else:
-                # For simple identifiers, create a Node
-                expr_node = Node(
-                    node_type=NodeType.IDENTIFIER, source_column=expr_str
-                )
-
-            aggregates.append(
-                {
-                    "function": func_name,
-                    "expression": expr_node,
-                    "alias": alias,
-                }
-            )
-
-        return aggregates
