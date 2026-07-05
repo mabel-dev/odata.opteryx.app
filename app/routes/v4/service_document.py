@@ -222,7 +222,11 @@ def _role_allows_read(role: str | None) -> bool:
     "/",
     status_code=status.HTTP_200_OK,
     summary="OData v4 Service Document",
-    description="Returns the OData v4 service document with accessible EntitySets.",
+    description="Returns the OData v4 service document listing all accessible EntitySets grouped by workspace and collection.",
+    responses={
+        200: {"description": "Service document with EntitySet list and access metadata"},
+        401: {"description": "Missing or invalid authentication"},
+    },
     dependencies=[Depends(require_authentication)],
 )
 def get_service_document(
@@ -232,8 +236,27 @@ def get_service_document(
     """
     Return OData v4 service document listing all accessible EntitySets.
 
-    The service document provides a list of all EntitySets (datasets) that the
-    authenticated user has permission to access.
+    The service document is the entry point for OData clients. It lists all datasets
+    (EntitySets) the authenticated user can access, organized by workspace and collection.
+
+    Response includes:
+    - @odata.context: service root URL
+    - value: array of EntitySet objects with:
+        * name: fully-qualified dataset name (workspace.collection.dataset)
+        * kind: always "EntitySet"
+        * url: relative URL for querying (workspace/collection/dataset)
+        * source: "Table" or "View" indicating dataset type
+        * role: user's permission level (reader, writer, admin, owner)
+        * policy: access-control policy that grants permission
+
+    Access control:
+    - Personal workspace (personal.{identity}): owned datasets accessible only to owner
+    - Public workspace: read-only access for all authenticated users
+    - Team workspaces: access granted by role-based policies in JWT claims
+
+    Example: GET /api/v4/
+
+    Requires authentication via bearer token or basic auth.
     """
     # Add OData-Version header
     response.headers["OData-Version"] = "4.0"
