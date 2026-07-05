@@ -23,6 +23,7 @@ RUN pip install --no-cache-dir uv && \
 
 # Copy service code
 COPY app ./app
+COPY .well-known ./.well-known
 RUN chown -R norris:norris /home/norris
 USER norris
 
