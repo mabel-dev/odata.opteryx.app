@@ -412,27 +412,85 @@ router = APIRouter(
 )
 
 
-@router.get("/{workstream}/{collection}/{dataset}")
+@router.get(
+    "/{workstream}/{collection}/{dataset}",
+    summary="Query dataset rows",
+    description="Retrieve data from a dataset with OData v4 query parameters ($filter, $select, $orderby, $top, $skip, $apply, $count). Returns paginated results with total count and nextLink for server-driven paging.",
+    responses={
+        200: {"description": "Query succeeded; returns rows and pagination metadata"},
+        400: {"description": "Invalid query: malformed $filter, unsupported $top value (not 0-10000), invalid $count value, or invalid $apply expression"},
+        401: {"description": "Missing or invalid authentication (no bearer token or basic auth)"},
+        403: {"description": "Forbidden: authenticated but no permission for dataset"},
+        501: {"description": "Unsupported query feature: $search or $expand not implemented"},
+    },
+)
 def read_dataset(
     request: Request,
     response: Response,
     workstream: str,
     collection: str,
     dataset: str,
-    filter: Optional[str] = Query(None, alias="$filter"),
-    top: Optional[int] = Query(None, alias="$top"),
-    skip: Optional[int] = Query(None, alias="$skip"),
-    orderby: Optional[str] = Query(None, alias="$orderby"),
-    count: Optional[str] = Query(None, alias="$count"),
-    select: Optional[str] = Query(None, alias="$select"),
-    search: Optional[str] = Query(None, alias="$search"),
-    apply: Optional[str] = Query(None, alias="$apply"),
+    filter: Optional[str] = Query(
+        None,
+        alias="$filter",
+        description="OData $filter expression for row filtering. Operators: eq (equal), ne (not equal), lt/le/gt/ge (comparison), and/or/not (logical), contains/startswith/endswith (string). Case-sensitive. Example: vendor eq 'Oracle' and price gt 100"
+    ),
+    top: Optional[int] = Query(
+        None,
+        alias="$top",
+        description="Limit result rows (0-10000, default 100). Value 0 with $count=true returns count only. Returns @odata.nextLink if result is truncated."
+    ),
+    skip: Optional[int] = Query(
+        None,
+        alias="$skip",
+        description="Skip N rows for pagination (server-driven). Example: &$skip=100 to fetch rows 101+. Combine with $top for paging."
+    ),
+    orderby: Optional[str] = Query(
+        None,
+        alias="$orderby",
+        description="Sort by column(s): 'col1 asc, col2 desc'. Default ascending. Example: &$orderby=created_date desc"
+    ),
+    count: Optional[str] = Query(
+        None,
+        alias="$count",
+        description="Include total row count in response: 'true' or 'false' (default false). Use with $top=0 to get count only."
+    ),
+    select: Optional[str] = Query(
+        None,
+        alias="$select",
+        description="Select specific columns: 'col1,col2,col3' or '*' for all (default all). Reduces payload size."
+    ),
+    search: Optional[str] = Query(
+        None,
+        alias="$search",
+        description="Full-text search (not implemented; returns 501)"
+    ),
+    apply: Optional[str] = Query(
+        None,
+        alias="$apply",
+        description="Data aggregation: groupby((col), aggregate(sum(amount) as Total, $count as Count)). Supports min, max, average, sum, countdistinct."
+    ),
 ) -> Any:
     """Read rows from a specified dataset.
 
-    This implementation exposes OData-style query string names (e.g. `$filter`).
-    For performance and safety we require a `$top` limit to be provided and it
-    must be in the range 1..10000.
+    Query OData datasets with standard OData v4 query parameters. Returns rows in
+    JSON with @odata.context, value array, and optional @odata.count / @odata.nextLink.
+
+    Request body:
+    - Specify filters, selection, ordering, aggregation as OData query parameters
+
+    Response:
+    - value: array of row objects
+    - @odata.context: metadata reference (e.g., /api/v4/$metadata#workstream_collection_dataset)
+    - @odata.count (if $count=true): total matching rows
+    - @odata.nextLink (if result truncated): URL for next page
+
+    Common examples:
+    - GET /ws/coll/data?$filter=status eq 'active' - filter rows
+    - GET /ws/coll/data?$select=name,price&$top=50 - select columns, limit 50
+    - GET /ws/coll/data?$orderby=created desc&$skip=100 - sort and paginate
+    - GET /ws/coll/data?$apply=groupby((vendor),aggregate(sum(amount) as Total))
+    - GET /ws/coll/data?$count=true&$top=0 - get row count only
 
     Requires authentication via bearer token or basic auth.
     """
@@ -594,7 +652,17 @@ def read_dataset(
     return response
 
 
-@router.get("/{workstream}/{collection}/{dataset}/$metadata")
+@router.get(
+    "/{workstream}/{collection}/{dataset}/$metadata",
+    summary="Per-dataset OData EDMX metadata",
+    description="Returns OData $metadata (EDMX) for a single dataset, including column types, nullability, cardinality, and min/max values as custom annotations.",
+    responses={
+        200: {"description": "EDMX metadata document returned as XML"},
+        401: {"description": "Missing or invalid authentication"},
+        403: {"description": "Forbidden: no permission to view dataset metadata"},
+        404: {"description": "Dataset not found in catalog"},
+    },
+)
 def dataset_metadata(
     request: Request,
     response: Response,
@@ -602,10 +670,25 @@ def dataset_metadata(
     collection: str,
     dataset: str,
 ) -> Any:
-    """Return OData $metadata (EDMX) for the given dataset with enriched column information.
+    """Return per-dataset OData $metadata (EDMX) with enriched column statistics.
 
-    Queries the catalog to get actual column types, cardinality, min/max values,
-    and distribution information, then emits an EDMX Schema with annotations.
+    The EDMX response includes:
+    - Schema definition with EntityType describing columns, types, and nullability
+    - EntitySet declaration for this dataset
+    - Custom annotations for statistics:
+      * Custom.Statistics.Min/Max: min/max column values (if available)
+      * Custom.Statistics.DistinctValueCount: cardinality (exact or estimated)
+      * Custom.Statistics.Distribution: histogram of value distribution
+      * Custom.OriginalType: source database type (for mapped types like DECIMAL→Edm.Double)
+      * Custom.Snapshot.TotalRecords: row count at last snapshot (table only)
+
+    Also includes access-control annotations:
+    - Custom.Role: user's assigned role (reader, writer, admin, owner)
+    - Custom.Policy: policy that granted access
+
+    Content-Type: application/xml (EDMX)
+
+    Example: GET /api/v4/workspace/collection/dataset/$metadata
 
     Requires authentication via bearer token or basic auth.
     """

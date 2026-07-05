@@ -304,8 +304,13 @@ def _get_dataset_schema(dataset_info: DatasetInfo) -> list[tuple[str, str]]:
 @router.get(
     "/$metadata",
     status_code=status.HTTP_200_OK,
-    summary="OData v4 EDMX Metadata Document",
-    description="Returns the OData v4 EDMX metadata document describing all accessible EntityTypes.",
+    summary="OData v4 Service-wide EDMX Metadata",
+    description="Returns the complete OData v4 EDMX metadata document describing all EntityTypes and EntitySets accessible to the authenticated user.",
+    responses={
+        200: {"description": "EDMX metadata document (XML)"},
+        401: {"description": "Missing or invalid authentication"},
+        504: {"description": "Firestore unavailable; cannot enumerate datasets"},
+    },
     dependencies=[Depends(require_authentication)],
 )
 def get_edmx_metadata(
@@ -313,11 +318,40 @@ def get_edmx_metadata(
     response: Response,
 ) -> Any:
     """
-    Return OData v4 EDMX metadata document.
+    Return service-wide OData v4 EDMX metadata document.
 
-    The metadata document provides a complete description of the data model,
-    including EntityTypes (with properties and types) and EntitySets for all
-    datasets the authenticated user has access to.
+    The metadata document provides a complete, machine-readable description of the entire
+    OData service data model. It lists all EntityTypes (dataset schemas) and EntitySets
+    (queryable collections) that the authenticated user has access to.
+
+    Response structure (XML):
+    - Edmx element (version 4.0)
+      * DataServices (wrapper)
+        - Schema (namespace OData)
+          * EntityType elements: one per dataset, with Properties describing columns
+            - Name: fully-qualified dataset name (workspace_collection_dataset)
+            - Key: first column used as primary key
+            - Properties: column definitions with Name, Type, Nullable
+            - Annotations: Custom.SourceType (Table/View), Custom.LastModified
+          * EntityContainer (wrapper for EntitySets)
+            - EntitySet elements: one per dataset
+              * Name: underscored dataset name (CSDL SimpleIdentifier)
+              * EntityType: reference to matching EntityType
+              * Annotations: source type, access control, last modified timestamp
+
+    Custom annotations:
+    - Custom.SourceType: "Table" or "View"
+    - Custom.LastModified: ISO 8601 timestamp of last modification
+    - Per-dataset column statistics available at /{ws}/{coll}/{ds}/$metadata
+
+    Access control: Filtered by authenticated user's permissions. Personal/public
+    workspaces handled automatically. Returns 504 if catalog service unavailable.
+
+    Example: GET /api/v4/$metadata
+
+    Content-Type: application/xml
+
+    Requires authentication via bearer token or basic auth.
     """
     # Set OData-Version header and XML content type
     response.headers["OData-Version"] = "4.0"
