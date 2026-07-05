@@ -14,11 +14,9 @@ dependencies = [
     "google-cloud-firestore==2.25.0",
     "google-cloud-secret-manager==2.26.0",
     "google-cloud-storage==3.9.0",
-    # msgspec replaces orjson: orjson ships no free-threaded (cp314t) wheels,
-    # msgspec does and is comparably fast. See app/responses.py.
-    "msgspec==0.21.1",
+    "orjson==3.11.7",
     "opteryx-catalog==0.4.*",
-    "opteryx-core==0.8.*",
+    "opteryx-core==0.9.*",
     "python-jose[cryptography]==3.5.0",
     "python-multipart==0.0.22",
     "requests==2.32.5",
