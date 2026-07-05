@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Tests for ApplyLogicalPlanBuilder integration with ODataLogicalPlanBuilder."""
 
+import pytest
+from unittest.mock import MagicMock
+
 from app.odata.apply_builder import ApplyLogicalPlanBuilder
 from app.odata.odata_to_logical_plan import ODataLogicalPlanBuilder
 
@@ -57,3 +60,33 @@ def test_filter_in_pipeline_applies_before_groupby():
         if getattr(n, "node_type", None) and n.node_type.name == "Filter":
             assert getattr(n, "condition", None) is not None, "Filter node missing parsed condition"
             break
+
+
+def test_unknown_transform_raises_error():
+    """Test that unknown $apply transformations raise ValueError, not silently skip."""
+    builder = ODataLogicalPlanBuilder("public.test_table")
+    builder.current_step_id = builder._add_scan_node()
+
+    # Mock an unknown transform class
+    class UnknownTransform:
+        pass
+
+    # Create a mock pipeline with the unknown transform
+    mock_pipeline = MagicMock()
+    mock_pipeline.transformations = [UnknownTransform()]
+
+    apl_builder = ApplyLogicalPlanBuilder()
+
+    # Monkey-patch parse_apply to return our mock pipeline
+    import app.odata.apply_builder as apply_builder_module
+    original_parse = apply_builder_module.parse_apply
+
+    try:
+        apply_builder_module.parse_apply = lambda _: mock_pipeline
+
+        # Verify that an unknown transform raises ValueError with the transform name
+        with pytest.raises(ValueError, match="Unsupported \\$apply transformation: UnknownTransform"):
+            apl_builder.apply_pipeline_to_builder(builder, "unknown()")
+    finally:
+        # Restore original parse_apply
+        apply_builder_module.parse_apply = original_parse

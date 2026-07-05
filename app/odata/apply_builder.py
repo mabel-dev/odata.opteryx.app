@@ -93,7 +93,7 @@ class ApplyLogicalPlanBuilder:
                 odata_builder.current_step_id = last_step
 
             else:
-                # Unknown transform - skip (future work: raise)
-                continue
+                transform_type = type(transform).__name__
+                raise ValueError(f"Unsupported $apply transformation: {transform_type}")
 
         return last_step

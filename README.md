@@ -119,8 +119,9 @@ This returns an XML document describing EntityTypes, properties, and their data 
 | `$top` | Limit number of results (max 10000). If omitted, default is `100`. | `$top=100` |
 | `$skip` | Skip N results for pagination | `$skip=200` |
 | `$count` | Include total count of results | `$count=true` |
-| `$apply` | Aggregation and grouping operations | `$apply=groupby((Region), aggregate(sum(Sales) as Total))` |
-| `$expand` | Expand navigation properties (JOINs); **NOTE: `$expand` is not implemented yet** — queries using `$expand` or ordering by `Nav/$count` will currently error. |
+| `$apply` | Aggregation and grouping operations | `$apply=groupby((Region), aggregate(Sales with sum as Total))` |
+| `$search` | Full-text search | *(Not implemented)* — returns 501 Not Implemented |
+| `$expand` | Expand navigation properties (JOINs) | *(Not implemented)* — returns 501 Not Implemented |
 
 **Case-insensitive string matching:** Use `tolower()`/`toupper()` to perform case-insensitive comparisons. Example:
 
@@ -149,19 +150,19 @@ $filter=tolower(name) eq tolower('earth')&$top=10
 
 ### Aggregation (`$apply`)
 
-The `$apply` parameter supports grouping and aggregation for analytics queries:
+The `$apply` parameter supports grouping and aggregation for analytics queries using OData v4 standard syntax:
 
 ```
-$apply=groupby((column1, column2), aggregate(sum(amount) as Total, count(*) as Count, avg(price) as AvgPrice, min(value) as Min, max(value) as Max))
+$apply=groupby((column1, column2), aggregate(amount with sum as Total, $count as Count, price with average as AvgPrice, value with min as Min, value with max as Max))
 ```
 
-**Supported Aggregations:**
-- `sum()` - sum numeric values
-- `count()` - count records
-- `count(*)` - count all records
-- `avg()` - average numeric values
-- `min()` - minimum value
-- `max()` - maximum value
+**Supported Aggregation Methods:**
+- `column with sum as alias` - sum numeric values
+- `$count as alias` - count all records
+- `column with count as alias` - count non-null values in column
+- `column with average as alias` - average numeric values
+- `column with min as alias` - minimum value
+- `column with max as alias` - maximum value
 
 ### Query Examples
 
@@ -187,13 +188,127 @@ GET /api/v4/workspace/collection/dataset?$select=name,email,phone&$top=1000
 
 **Aggregation query (analytics):**
 ```
-GET /api/v4/workspace/collection/dataset?$apply=groupby((region,product_type), aggregate(sum(revenue) as TotalRevenue, count(*) as TransactionCount, avg(order_value) as AvgOrderValue))
+GET /api/v4/workspace/collection/dataset?$apply=groupby((region,product_type), aggregate(revenue with sum as TotalRevenue, $count as TransactionCount, order_value with average as AvgOrderValue))
 ```
 
 **Combined query:**
 ```
 GET /api/v4/workspace/collection/dataset?$filter=year ge 2023&$apply=groupby((status), aggregate(count(*) as Count))&$select=status,Count
 ```
+
+## Known Differences from OData Specification
+
+This service implements several intentional design choices that diverge from the OData v4.01 specification to maximize compatibility with SQL semantics and client tooling.
+
+### Null Handling in Filters
+
+This service implements **SQL three-valued logic (3VL)** for null handling in filter expressions, which differs from the strict OData v4.01 specification.
+
+**OData v4.01 specification behavior:**
+- `x ne 'value'` returns **true** when `x` is null (null is not equal to any value)
+- Filters like `status ne 'inactive'` would **include** null-status rows
+
+**This service's behavior:**
+- `x ne 'value'` returns **null** when `x` is null (unknown comparison)
+- Rows where the filter expression evaluates to null are **excluded** from results
+- Filters like `status ne 'inactive'` **exclude** null-status rows
+
+**Implication:** If you need to include null values in your results, use `or x eq null`:
+
+**Example:**
+```
+GET /api/v4/workspace/collection/dataset?$filter=status ne 'inactive'
+```
+Returns rows where status is NOT 'inactive', **excluding** null-status rows.
+
+To include null-status rows:
+```
+GET /api/v4/workspace/collection/dataset?$filter=(status ne 'inactive') or (status eq null)
+```
+
+### Response Value Type Mappings
+
+The OData v4 interface coerces database column types to JSON-compatible OData types. These mappings differ from strict CSDL in some cases to maximize client compatibility.
+
+| Source Type | Mapped to | JSON Wire Format | Notes |
+|---|---|---|---|
+| DECIMAL, NUMERIC | Edm.Double | JSON number (float) | Precision loss on large numbers (>2^53). For precise decimals, use the SQL interface. |
+| DATE | Edm.DateTimeOffset | ISO 8601 datetime string (midnight UTC) | Example: `"2024-01-15T00:00:00Z"` |
+| TIME | Edm.DateTimeOffset | ISO 8601 datetime string (1970-01-01) | Example: `"1970-01-01T14:30:00Z"` |
+| TIMESTAMP | Edm.DateTimeOffset | ISO 8601 datetime string with timezone | Example: `"2024-01-15T14:30:00+00:00"` |
+| NaN, ±Infinity | null | JSON null | OData JSON does not represent these; converted to null. |
+| STRUCT, JSON, JSONB | Edm.Binary | base64-encoded JSON string | Original type available via `Custom.OriginalType` annotation in metadata. |
+| ARRAY\<T\> | Collection(Edm.T) | JSON array | Inner element type inferred from first non-null element. |
+| BLOB, VARBINARY, BINARY | Edm.Binary | base64-encoded binary string | Binary data encoded as base64. |
+
+**Dual-interface note:** SQL queries return the same underlying values but with different wire representations (e.g., DECIMAL as a Decimal, not a float). When migrating queries between SQL and OData, verify that precision/type handling is acceptable for your use case.
+
+### Pagination and Result Limits
+
+**Default `$top` value:** If `$top` is not specified, the service defaults to `$top=100`.
+
+**Server-driven paging:** Results exceeding the `$top` limit are truncated, and an `@odata.nextLink` is included in the response. Follow the nextLink to fetch the next page:
+
+```
+GET /api/v4/workspace/collection/dataset?$filter=status eq 'active'&$top=50&$skip=0
+```
+
+Response includes:
+```json
+{
+  "@odata.context": "/api/v4/$metadata#workspace_collection_dataset",
+  "value": [ /* 50 rows */ ],
+  "@odata.nextLink": "/api/v4/workspace/collection/dataset?$filter=status%20eq%20%27active%27&$top=50&$skip=50"
+}
+```
+
+**Max `$top` value:** The maximum allowed `$top` is 10,000 rows per request.
+
+**`$top=0` behavior:** `$top=0` returns zero rows and is useful with `$count=true` to fetch the total filtered count without data:
+
+```
+GET /api/v4/workspace/collection/dataset?$filter=status eq 'active'&$top=0&$count=true
+```
+
+Response:
+```json
+{
+  "@odata.context": "/api/v4/$metadata#workspace_collection_dataset",
+  "value": [],
+  "@odata.count": 12847
+}
+```
+
+**SQL interface note:** The SQL interface has no implicit `$top` default and returns all matching rows (subject to other limits). When switching between SQL and OData or vice versa, be aware that row counts and result sizes may differ.
+
+### Type Safety for LLM-Generated Queries
+
+When LLMs or automated tools generate OData queries, be aware of these type-coercion behaviors and common pitfalls:
+
+1. **String literals are case-sensitive:**
+   ```
+   $filter=vendor eq 'Oracle'  ≠  vendor eq 'oracle'
+   ```
+   Exact case matching is required.
+
+2. **LIKE-pattern escaping:** Functions like `contains()`, `startswith()`, `endswith()` treat `%` and `_` as literal characters, not SQL wildcards:
+   ```
+   $filter=contains(sku, 'A_B')  # Matches the literal string 'A_B', not 'A' + any-char + 'B'
+   ```
+
+3. **Null filtering requires explicit `or x eq null`:** The `ne` operator does not include nulls:
+   ```
+   $filter=age ne 21              # Excludes null-age rows
+   $filter=age ne 21 or age eq null  # Includes null-age rows
+   ```
+
+4. **Numeric types in filters:** Do not quote numeric literals:
+   ```
+   $filter=age gt 21      # Correct
+   $filter=age gt '21'    # Incorrect (string comparison, may not work as expected)
+   ```
+
+5. **DECIMAL precision:** Large DECIMAL values are converted to float, losing precision beyond ~15 significant digits. If precision is critical, use the SQL interface directly.
 
 ### Important Notes
 
