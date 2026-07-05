@@ -2,6 +2,11 @@
 Implementation of a subset of the
 `OData formal grammar <https://docs.oasis-open.org/odata/odata/v4.01/csprd06/abnf/odata-abnf-construction-rules.txt>`_ .
 Implemented with `SLY <https://sly.readthedocs.io/en/latest/>`_.
+
+NOTE: This grammar emits 36 reduce/reduce conflicts at parse time. These indicate
+potential ambiguities in edge cases but have not been linked to any concrete mis-parse.
+Resolve only if a real mis-parse is demonstrated and attributed to these conflicts.
+See: https://github.com/joocer/odata-opteryx/issues/???
 """
 
 import re
