@@ -11,13 +11,13 @@ The conversion flow is:
 
 from typing import Optional
 
-from opteryx.managers.expression import NodeType
+from opteryx.expression import NodeType
 from opteryx.models import Node
 from opteryx.models.logical_column import LogicalColumn
 from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import LogicalPlanNode
 from opteryx.planner.logical_planner import LogicalPlanStepType
-from orso.tools import random_string
+from opteryx.utils import random_string
 
 from app.odata.expression_parser import ODataExpressionParser
 
@@ -119,31 +119,10 @@ class ODataLogicalPlanBuilder:
         agg_node = LogicalPlanNode(node_type=LogicalPlanStepType.AggregateAndGroup)
         # No group by -> global aggregation
         agg_node.group_by = []
-        # Binder expects 'groups' attribute (use same empty list)
-        agg_node.groups = []
-        # Build aggregator Node(s) to match Opteryx SQL planner shape (NodeType.AGGREGATOR)
-        agg = Node(node_type=NodeType.AGGREGATOR)
-        # SQL planner represents COUNT(*) as a Node with value 'COUNT' and parameters [WILDCARD]
-        agg.value = "COUNT"
-        agg.parameters = [Node(node_type=NodeType.WILDCARD)]
-        agg.alias = "count"
-        agg_node.aggregates = [agg]
-        # Ensure 'projection' exists for physical planner
-        agg_node.projection = [agg]
-
-        # Add aggregate node first
-        agg_step_id = self._add_node(agg_node)
-
-        # Add a Project node so the aggregate result is projected (SQL planner does Aggregate -> Project -> Exit)
-        project_node = LogicalPlanNode(node_type=LogicalPlanStepType.Project)
-        # Project the aggregator node itself
-        project_node.columns = [agg]
-        project_node.order_by_columns = []
-        project_node.except_columns = []
-        self.current_step_id = agg_step_id
-        project_step_id = self._add_node(project_node)
-
-        return project_step_id
+        agg_node.aggregations = [
+            {"function": "COUNT", "expression": None, "alias": "count"}
+        ]
+        return self._add_node(agg_node)
 
     def _add_node(self, node: LogicalPlanNode) -> str:
         """Add a node to the plan and connect it to the previous node.
@@ -232,15 +211,17 @@ class ODataLogicalPlanBuilder:
             - min(expr) - MINIMUM aggregate
             - max(expr) - MAXIMUM aggregate
         """
-        # Use the dedicated expression parser for $apply parsing
+        # Delegate parsing + plan construction to ApplyLogicalPlanBuilder, which
+        # uses the vendored OData-standard $apply grammar
+        # (e.g. ``groupby((country), aggregate(price with sum as total))``).
+        #
+        # NOTE: do NOT also validate via ``expression_parser.parse_apply`` here.
+        # That helper implements an incompatible ``sum(price) as total`` grammar,
+        # so running both made every $apply expression fail one validator or the
+        # other. ApplyLogicalPlanBuilder.parse_apply is the single source of truth.
         from app.odata.apply_builder import ApplyLogicalPlanBuilder
 
         try:
-            # Parse the apply expression into structured format
-            # (validation happens in the parser)
-            self.expression_parser.parse_apply(apply_expr)
-
-            # For full pipeline support, delegate to ApplyLogicalPlanBuilder
             apply_builder = ApplyLogicalPlanBuilder()
             return apply_builder.apply_pipeline_to_builder(self, apply_expr)
         except ValueError as e:
@@ -325,10 +306,7 @@ class ODataLogicalPlanBuilder:
         if self.current_step_id is not None:
             prev_node = self.plan._nodes.get(self.current_step_id)
 
-        if (
-            prev_node is not None
-            and getattr(prev_node, "node_type", None) == LogicalPlanStepType.AggregateAndGroup
-        ):
+        if prev_node is not None and getattr(prev_node, "node_type", None) == LogicalPlanStepType.AggregateAndGroup:
             # Build set of allowed columns: group_by source_column names + aggregation aliases
             allowed = set()
             if getattr(prev_node, "group_by", None):
@@ -345,9 +323,7 @@ class ODataLogicalPlanBuilder:
             if selected_cols_list != ["*"]:
                 for col in selected_cols_list:
                     if col not in allowed:
-                        raise ValueError(
-                            f"$select references column '{col}' which is not available after aggregation. Allowed: {sorted(list(allowed))}"
-                        )
+                        raise ValueError(f"$select references column '{col}' which is not available after aggregation. Allowed: {sorted(list(allowed))}")
 
         project_node = LogicalPlanNode(node_type=LogicalPlanStepType.Project)
 

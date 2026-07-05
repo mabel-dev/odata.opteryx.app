@@ -48,7 +48,7 @@ class Identifier(_Node):
 
     def to_opteryx_node(self):
         """Convert to Opteryx LogicalColumn."""
-        from opteryx.managers.expression import NodeType
+        from opteryx.expression import NodeType
         from opteryx.models.logical_column import LogicalColumn
 
         # LogicalColumn constructor: (node_type, source_column, ...)
@@ -80,11 +80,11 @@ class Null(_Literal):
         return None
 
     def to_opteryx_node(self):
-        from opteryx.managers.expression import NodeType
+        from opteryx.expression import NodeType
         from opteryx.models import Node
-        from orso.types import OrsoTypes
+        from opteryx.types.logical_type import ARRAY, BOOLEAN, DATE, FLOAT64, INT64, INTERVAL, NULL, TIME, TIMESTAMP, VARCHAR
 
-        return Node(NodeType.LITERAL, type=OrsoTypes.NULL, value=None)
+        return Node(NodeType.LITERAL, type=NULL, value=None)
 
 
 @dataclass(frozen=True)
@@ -96,11 +96,11 @@ class Integer(_Literal):
         return int(self.val)
 
     def to_opteryx_node(self):
-        from opteryx.managers.expression import NodeType
+        from opteryx.expression import NodeType
         from opteryx.models import Node
-        from orso.types import OrsoTypes
+        from opteryx.types.logical_type import ARRAY, BOOLEAN, DATE, FLOAT64, INT64, INTERVAL, NULL, TIME, TIMESTAMP, VARCHAR
 
-        return Node(NodeType.LITERAL, type=OrsoTypes.INTEGER, value=self.py_val)
+        return Node(NodeType.LITERAL, type=INT64, value=self.py_val)
 
 
 @dataclass(frozen=True)
@@ -112,11 +112,11 @@ class Float(_Literal):
         return float(self.val)
 
     def to_opteryx_node(self):
-        from opteryx.managers.expression import NodeType
+        from opteryx.expression import NodeType
         from opteryx.models import Node
-        from orso.types import OrsoTypes
+        from opteryx.types.logical_type import ARRAY, BOOLEAN, DATE, FLOAT64, INT64, INTERVAL, NULL, TIME, TIMESTAMP, VARCHAR
 
-        return Node(NodeType.LITERAL, type=OrsoTypes.DOUBLE, value=self.py_val)
+        return Node(NodeType.LITERAL, type=FLOAT64, value=self.py_val)
 
 
 @dataclass(frozen=True)
@@ -128,11 +128,11 @@ class Boolean(_Literal):
         return self.val.lower() == "true"
 
     def to_opteryx_node(self):
-        from opteryx.managers.expression import NodeType
+        from opteryx.expression import NodeType
         from opteryx.models import Node
-        from orso.types import OrsoTypes
+        from opteryx.types.logical_type import ARRAY, BOOLEAN, DATE, FLOAT64, INT64, INTERVAL, NULL, TIME, TIMESTAMP, VARCHAR
 
-        return Node(NodeType.LITERAL, type=OrsoTypes.BOOLEAN, value=self.py_val)
+        return Node(NodeType.LITERAL, type=BOOLEAN, value=self.py_val)
 
 
 @dataclass(frozen=True)
@@ -144,11 +144,11 @@ class String(_Literal):
         return self.val
 
     def to_opteryx_node(self):
-        from opteryx.managers.expression import NodeType
+        from opteryx.expression import NodeType
         from opteryx.models import Node
-        from orso.types import OrsoTypes
+        from opteryx.types.logical_type import ARRAY, BOOLEAN, DATE, FLOAT64, INT64, INTERVAL, NULL, TIME, TIMESTAMP, VARCHAR
 
-        return Node(NodeType.LITERAL, type=OrsoTypes.VARCHAR, value=self.val)
+        return Node(NodeType.LITERAL, type=VARCHAR, value=self.val)
 
 
 @dataclass(frozen=True)
@@ -168,16 +168,16 @@ class Date(_Literal):
         return dt.date.fromisoformat(self.val)
 
     def to_opteryx_node(self):
-        from opteryx.managers.expression import NodeType
+        from opteryx.expression import NodeType
         from opteryx.models import Node
-        from orso.types import OrsoTypes
+        from opteryx.types.logical_type import ARRAY, BOOLEAN, DATE, FLOAT64, INT64, INTERVAL, NULL, TIME, TIMESTAMP, VARCHAR
 
         # Try to parse ISO string to datetime for proper filtering
         parsed = try_parse_iso(self.val)
         if parsed is not None:
-            return Node(NodeType.LITERAL, type=OrsoTypes.DATE, value=parsed)
+            return Node(NodeType.LITERAL, type=DATE, value=parsed)
         # Fallback to string if parsing fails
-        return Node(NodeType.LITERAL, type=OrsoTypes.VARCHAR, value=self.val)
+        return Node(NodeType.LITERAL, type=VARCHAR, value=self.val)
 
 
 @dataclass(frozen=True)
@@ -189,16 +189,16 @@ class Time(_Literal):
         return dt.time.fromisoformat(self.val)
 
     def to_opteryx_node(self):
-        from opteryx.managers.expression import NodeType
+        from opteryx.expression import NodeType
         from opteryx.models import Node
-        from orso.types import OrsoTypes
+        from opteryx.types.logical_type import ARRAY, BOOLEAN, DATE, FLOAT64, INT64, INTERVAL, NULL, TIME, TIMESTAMP, VARCHAR
 
         # Try to parse ISO string to datetime for proper filtering
         parsed = try_parse_iso(self.val)
         if parsed is not None:
-            return Node(NodeType.LITERAL, type=OrsoTypes.TIME, value=parsed)
+            return Node(NodeType.LITERAL, type=TIME(), value=parsed)
         # Fallback to string if parsing fails
-        return Node(NodeType.LITERAL, type=OrsoTypes.VARCHAR, value=self.val)
+        return Node(NodeType.LITERAL, type=VARCHAR, value=self.val)
 
 
 @dataclass(frozen=True)
@@ -210,16 +210,16 @@ class DateTime(_Literal):
         return isoparse(self.val)
 
     def to_opteryx_node(self):
-        from opteryx.managers.expression import NodeType
+        from opteryx.expression import NodeType
         from opteryx.models import Node
-        from orso.types import OrsoTypes
+        from opteryx.types.logical_type import ARRAY, BOOLEAN, DATE, FLOAT64, INT64, INTERVAL, NULL, TIME, TIMESTAMP, VARCHAR
 
         # Try to parse ISO string to datetime for proper filtering
         parsed = try_parse_iso(self.val)
         if parsed is not None:
-            return Node(NodeType.LITERAL, type=OrsoTypes.TIMESTAMP, value=parsed)
+            return Node(NodeType.LITERAL, type=TIMESTAMP(), value=parsed)
         # Fallback to string if parsing fails
-        return Node(NodeType.LITERAL, type=OrsoTypes.VARCHAR, value=self.val)
+        return Node(NodeType.LITERAL, type=VARCHAR, value=self.val)
 
 
 @dataclass(frozen=True)
@@ -248,11 +248,11 @@ class Duration(_Literal):
         return delta
 
     def to_opteryx_node(self):
-        from opteryx.managers.expression import NodeType
+        from opteryx.expression import NodeType
         from opteryx.models import Node
-        from orso.types import OrsoTypes
+        from opteryx.types.logical_type import ARRAY, BOOLEAN, DATE, FLOAT64, INT64, INTERVAL, NULL, TIME, TIMESTAMP, VARCHAR
 
-        return Node(NodeType.LITERAL, type=OrsoTypes.INTERVAL, value=self.py_val)
+        return Node(NodeType.LITERAL, type=INTERVAL, value=self.py_val)
 
     def unpack(
         self,
@@ -304,9 +304,9 @@ class List(_Literal):
         return [v.py_val for v in self.val]
 
     def to_opteryx_node(self):
-        from opteryx.managers.expression import NodeType
+        from opteryx.expression import NodeType
         from opteryx.models import Node
-        from orso.types import OrsoTypes
+        from opteryx.types.logical_type import ARRAY, BOOLEAN, DATE, FLOAT64, INT64, INTERVAL, NULL, TIME, TIMESTAMP, VARCHAR
 
         # Convert each element to a node, then extract Python values
         element_nodes = [item.to_opteryx_node() for item in self.val]
@@ -314,12 +314,12 @@ class List(_Literal):
 
         # Determine the element type (all elements should have the same type)
         element_types = {node.type for node in element_nodes}
-        element_type = element_types.pop() if len(element_types) == 1 else OrsoTypes.VARCHAR
+        element_type = element_types.pop() if len(element_types) == 1 else VARCHAR
 
         return Node(
             node_type=NodeType.LITERAL,
-            type=OrsoTypes.ARRAY,
-            element_type=element_type,
+            type=ARRAY(element_type),
+            element_type=None,
             value=value_list,
         )
 
@@ -365,7 +365,7 @@ class BinOp(_Node):
 
     def to_opteryx_node(self):
         """Convert a binary arithmetic expression to an Opteryx BINARY_OPERATOR node."""
-        from opteryx.managers.expression import NodeType
+        from opteryx.expression import NodeType
         from opteryx.models import Node
 
         left_node = self.left.to_opteryx_node()
@@ -438,14 +438,14 @@ class Compare(_Node):
     right: _Node
 
     def to_opteryx_node(self):
-        from opteryx.managers.expression import NodeType
+        from opteryx.expression import NodeType
         from opteryx.models import Node
 
         left_node = self.left.to_opteryx_node()
         right_node = self.right.to_opteryx_node()
 
         # Check if comparing to NULL - convert to IS NULL / IS NOT NULL unary operators
-        if right_node.node_type == NodeType.LITERAL and right_node.type == "NULL":
+        if right_node.node_type == NodeType.LITERAL and str(right_node.type) == "NULL":
             if isinstance(self.comparator, Eq):
                 return Node(node_type=NodeType.UNARY_OPERATOR, value="IsNull", centre=left_node)
             elif isinstance(self.comparator, NotEq):
@@ -463,13 +463,13 @@ class Compare(_Node):
             # Fold into a chain of ORs
             if not eq_nodes:
                 # Empty IN () should be false
-                from orso.types import OrsoTypes
+                from opteryx.types.logical_type import ARRAY, BOOLEAN, DATE, FLOAT64, INT64, INTERVAL, NULL, TIME, TIMESTAMP, VARCHAR
 
                 return Node(
                     node_type=NodeType.COMPARISON_OPERATOR,
                     value="Eq",
                     left=left_node,
-                    right=Node(node_type=NodeType.LITERAL, type=OrsoTypes.BOOLEAN, value=False),
+                    right=Node(node_type=NodeType.LITERAL, type=BOOLEAN, value=False),
                 )
 
             result = eq_nodes[0]
@@ -525,7 +525,7 @@ class BoolOp(_Node):
     right: _Node
 
     def to_opteryx_node(self):
-        from opteryx.managers.expression import NodeType
+        from opteryx.expression import NodeType
         from opteryx.models import Node
 
         op_map = {
@@ -568,7 +568,7 @@ class UnaryOp(_Node):
     operand: _Node
 
     def to_opteryx_node(self):
-        from opteryx.managers.expression import NodeType
+        from opteryx.expression import NodeType
         from opteryx.models import Node
 
         if isinstance(self.op, Not):
@@ -593,7 +593,7 @@ class Call(_Node):
     args: ListType[_Node]
 
     def to_opteryx_node(self):
-        from opteryx.managers.expression import NodeType
+        from opteryx.expression import NodeType
         from opteryx.models import Node
 
         # Get function name
@@ -623,13 +623,13 @@ class Call(_Node):
             )
 
             # Subtract 1 to convert from 1-based to 0-based (POSITION(...) - 1)
-            from orso.types import OrsoTypes
+            from opteryx.types.logical_type import ARRAY, BOOLEAN, DATE, FLOAT64, INT64, INTERVAL, NULL, TIME, TIMESTAMP, VARCHAR
 
             return Node(
                 node_type=NodeType.BINARY_OPERATOR,
                 value="Minus",
                 left=position_call,
-                right=Node(node_type=NodeType.LITERAL, type=OrsoTypes.INTEGER, value=1),
+                right=Node(node_type=NodeType.LITERAL, type=INT64, value=1),
             )
 
         # Handle substring specially - OData is 0-based, SQL is 1-based
@@ -641,13 +641,13 @@ class Call(_Node):
             start_node = arg_nodes[1]
 
             # Add 1 to start position to convert from 0-based to 1-based
-            from orso.types import OrsoTypes
+            from opteryx.types.logical_type import ARRAY, BOOLEAN, DATE, FLOAT64, INT64, INTERVAL, NULL, TIME, TIMESTAMP, VARCHAR
 
             adjusted_start = Node(
                 node_type=NodeType.BINARY_OPERATOR,
                 value="Plus",
                 left=start_node,
-                right=Node(node_type=NodeType.LITERAL, type=OrsoTypes.INTEGER, value=1),
+                right=Node(node_type=NodeType.LITERAL, type=INT64, value=1),
             )
 
             # Build parameter list with adjusted start

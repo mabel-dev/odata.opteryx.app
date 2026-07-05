@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "opteryx-odata"
 version = "0.0.16"
 description = "Opteryx OData Service"
-requires-python = '>=3.13'
+requires-python = '>=3.14'
 dependencies = [
     "brotli-asgi==1.6.0",
     "cryptography==46.0.5",
@@ -14,10 +14,11 @@ dependencies = [
     "google-cloud-firestore==2.25.0",
     "google-cloud-secret-manager==2.26.0",
     "google-cloud-storage==3.9.0",
-    "orjson==3.11.7",
-    "orso==0.0.242",
+    # msgspec replaces orjson: orjson ships no free-threaded (cp314t) wheels,
+    # msgspec does and is comparably fast. See app/responses.py.
+    "msgspec==0.21.1",
     "opteryx-catalog==0.4.*",
-    "opteryx-core==0.6.*",
+    "opteryx-core==0.8.*",
     "python-jose[cryptography]==3.5.0",
     "python-multipart==0.0.22",
     "requests==2.32.5",

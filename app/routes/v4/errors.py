@@ -4,7 +4,7 @@ from fastapi import HTTPException
 from fastapi import Request
 from fastapi import status
 from fastapi.responses import JSONResponse
-from orso.logging import get_logger
+from app.logging import get_logger
 
 logger = get_logger()
 

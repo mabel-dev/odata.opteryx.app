@@ -4,9 +4,9 @@ import sys
 from brotli_asgi import BrotliMiddleware
 from fastapi import FastAPI
 from fastapi import HTTPException
-from fastapi.responses import ORJSONResponse
-from orso.logging import get_logger
-from orso.logging import set_log_name
+from app.logging import get_logger
+from app.logging import set_log_name
+from app.responses import MsgspecJSONResponse
 
 from app.middleware.audit import AuditMiddleware
 from app.middleware.cors import configure_cors
@@ -26,7 +26,7 @@ set_log_name("opteryx.odata")
 logger = get_logger()
 logger.setLevel(5)
 
-service = FastAPI(title="Opteryx OData Service", default_response_class=ORJSONResponse)
+service = FastAPI(title="Opteryx OData Service", default_response_class=MsgspecJSONResponse)
 
 # Register exception handlers for OData v4 error format
 service.add_exception_handler(ODataError, odata_error_handler)

@@ -7,7 +7,7 @@ By default, CORS is restrictive and requires explicit origin configuration.
 import os
 
 from fastapi.middleware.cors import CORSMiddleware
-from orso.logging import get_logger
+from app.logging import get_logger
 
 logger = get_logger()
 
