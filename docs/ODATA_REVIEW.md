@@ -44,6 +44,7 @@ No `pyarrow` references exist in `app/` (only transitively under opteryx-core).
 
 **OData engine restored into the repo** (per decision: self-contained service)
 - Recovered the real implementation from this repo's git history (`34b570f`) into `app/odata/` — `odata_to_logical_plan.py`, `expression_parser.py`, `apply_builder.py`, `plan_optimizer.py`, and a real package `__init__.py` (previously all thin proxies to the missing `opteryx.odata`).
+- Two more casualties of the same `opteryx.odata` extraction: `metadata.py` imported `build_edmx_document` and `service_document.py` imported `build_service_document` from it. These were only ever inline helpers before commit `452a89e` refactored them out to the (never-published) module — restored inline from `452a89e^` (the EDMX `ElementTree` builder and the JSON service-document envelope). Also replaced the deprecated `datetime.utcfromtimestamp` with the tz-aware form for 3.14.
 - Ported to current core APIs: `opteryx.managers.expression` → `opteryx.expression`; `orso.tools.random_string` → `opteryx.utils.random_string`.
 - Ported the vendored `odata_query/ast.py` literal types to `ColumnType` (`INTEGER`→`INT64`, `DOUBLE`→`FLOAT64`, `TIME`/`TIMESTAMP` now parameterized calls, `ARRAY(element)` with the element embedded in the type, NULL detection via `str(type)=="NULL"`).
 
