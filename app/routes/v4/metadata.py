@@ -2,7 +2,6 @@
 
 # Get catalog configuration from environment
 import os
-import xml.etree.ElementTree as ET
 from functools import lru_cache
 from typing import Any
 
@@ -14,10 +13,11 @@ from fastapi import Response
 from fastapi import status
 from google.cloud.firestore_v1.base_query import FieldFilter
 from opteryx_catalog import OpteryxCatalog
-from orso.logging import get_logger
+from app.logging import get_logger
 
 from app.auth.deps import require_authentication
 from app.core import _get_firestore_client
+from opteryx.odata import build_edmx_document
 
 logger = get_logger()
 router = APIRouter(prefix="/api/v4")
@@ -260,7 +260,11 @@ def _role_allows_read(role: str | None) -> bool:
 
 def _map_py_type_to_edm(py_type) -> str:
     """
-    Map Python type or Opteryx OrsoTypes to EDM type.
+    Map a column type to an EDM type.
+
+    Accepts either a canonical Opteryx type string (as returned by the catalog,
+    e.g. ``"INTEGER"``, ``"DECIMAL(38, 9)"``, ``"ARRAY<VARCHAR>"``), a type-like
+    object exposing ``.name``, or a Python ``type`` (legacy path).
 
     Uses a simplified, highly compatible set of EDM types to avoid
     serialization and client compatibility issues. We prefer broader
@@ -274,33 +278,38 @@ def _map_py_type_to_edm(py_type) -> str:
     except Exception:
         _uuid = None
 
-    # Handle OrsoTypes enum (from Opteryx catalog)
-    if hasattr(py_type, "name"):
+    # Handle canonical type strings (from the catalog) and type-like objects.
+    # NOTE: the catalog returns plain strings, which have no ``.name`` attribute,
+    # so this branch must accept ``str`` too — otherwise every catalog column
+    # falls through to the Python-type path below and mislabels as Edm.String.
+    if isinstance(py_type, str) or hasattr(py_type, "name"):
         type_str = str(py_type).upper()
+        # Base category without parameters/element: "DECIMAL(38, 9)" -> "DECIMAL".
+        base = type_str.split("(", 1)[0].split("<", 1)[0].strip()
 
         # Integer types -> Always Int64 for maximum range and compatibility
-        if type_str in ("INTEGER", "BIGINT", "TINYINT", "SMALLINT", "INT"):
+        if base in ("INTEGER", "BIGINT", "TINYINT", "SMALLINT", "INT"):
             return "Edm.Int64"
 
         # All numeric types -> Double (avoids Decimal IEEE754Compatible issues)
-        if type_str in ("DOUBLE", "FLOAT", "REAL", "DECIMAL", "NUMERIC"):
+        if base in ("DOUBLE", "FLOAT", "REAL", "DECIMAL", "NUMERIC"):
             return "Edm.Double"
 
         # Boolean
-        if type_str in ("BOOLEAN", "BOOL"):
+        if base in ("BOOLEAN", "BOOL"):
             return "Edm.Boolean"
 
         # String types
-        if type_str in ("VARCHAR", "TEXT", "CHAR", "STRING"):
+        if base in ("VARCHAR", "NVARCHAR", "VARIANT", "TEXT", "CHAR", "STRING"):
             return "Edm.String"
 
         # Date/Time -> Use only DateTimeOffset for all temporal types
         # This avoids Date/TimeOfDay serialization issues
-        if type_str in ("TIMESTAMP", "DATETIME", "DATE", "TIME"):
+        if base in ("TIMESTAMP", "DATETIME", "DATE", "TIME"):
             return "Edm.DateTimeOffset"
 
         # Arrays -> Collection of an inner EDM type when inner type is known
-        if type_str.startswith("ARRAY") or type_str in ("ARRAY", "LIST"):
+        if type_str.startswith("ARRAY") or base in ("ARRAY", "LIST"):
             # Try to extract inner type: ARRAY<INNER> or ARRAY(INNER)
             import re
 
@@ -317,12 +326,12 @@ def _map_py_type_to_edm(py_type) -> str:
             # Default inner -> string
             return "Collection(Edm.String)"
 
-        # Structs / JSON-like types -> expose as binary (base64) and annotate original type
-        if type_str in ("STRUCT", "JSON", "JSONB"):
+        # BINARY/BLOB/VARBINARY -> binary type
+        if base in ("BINARY", "BLOB", "VARBINARY"):
             return "Edm.Binary"
 
-        # BINARY/BLOB/VARBINARY -> binary type
-        if type_str in ("BINARY", "BLOB", "VARBINARY"):
+        # Structs / JSON-like types -> expose as binary (base64)
+        if base in ("STRUCT", "JSON", "JSONB"):
             return "Edm.Binary"
 
         # Default to string for unknown types
@@ -473,134 +482,22 @@ def get_edmx_metadata(
         if any(_role_allows_read(role) for role in roles):
             filtered_datasets.append(dataset)
 
-    # Build EDMX XML document
-    # Namespaces
-    NS_EDMX = "http://docs.oasis-open.org/odata/ns/edmx"
-    NS_EDM = "http://docs.oasis-open.org/odata/ns/edm"
+    def _schema_loader(dataset: DatasetInfo) -> list[tuple[str, str]]:
+        return _get_dataset_schema(dataset)
 
-    # Root element
-    edmx = ET.Element("{" + NS_EDMX + "}Edmx", attrib={"Version": "4.0", "xmlns:edmx": NS_EDMX})
+    datasets_payload = [
+        {
+            "resource": dataset.resource,
+            "workspace": dataset.workspace,
+            "collection": dataset.collection,
+            "name": dataset.name,
+            "source": dataset.source,
+            "last_modified_ms": getattr(dataset, "last_modified_ms", None),
+        }
+        for dataset in filtered_datasets
+    ]
 
-    # DataServices
-    data_services = ET.SubElement(edmx, "{" + NS_EDMX + "}DataServices")
-
-    # Schema
-    schema = ET.SubElement(
-        data_services,
-        "{" + NS_EDM + "}Schema",
-        attrib={"Namespace": "OData", "xmlns": NS_EDM},
-    )
-
-    # Create EntityTypes for each dataset
-    entity_types_created = set()
-    for dataset in filtered_datasets:
-        entity_type_name = dataset.resource.replace(".", "_")
-
-        # Skip if already created (duplicate names)
-        if entity_type_name in entity_types_created:
-            continue
-
-        # Get schema for this dataset
-        columns = _get_dataset_schema(dataset)
-
-        if not columns:
-            # Skip datasets with no accessible schema
-            logger.debug(f"Skipping dataset with no schema: {dataset.resource}")
-            continue
-
-        # Create EntityType
-        entity_type = ET.SubElement(
-            schema, "{" + NS_EDM + "}EntityType", attrib={"Name": entity_type_name}
-        )
-
-        # Add Key element (use first column as key - OData requires a key)
-        key = ET.SubElement(entity_type, "{" + NS_EDM + "}Key")
-        ET.SubElement(key, "{" + NS_EDM + "}PropertyRef", attrib={"Name": columns[0][0]})
-
-        # Add properties
-        for col_name, edm_type in columns:
-            ET.SubElement(
-                entity_type,
-                "{" + NS_EDM + "}Property",
-                attrib={"Name": col_name, "Type": edm_type, "Nullable": "true"},
-            )
-
-        entity_types_created.add(entity_type_name)
-
-    # Create EntityContainer
-    entity_container = ET.SubElement(
-        schema, "{" + NS_EDM + "}EntityContainer", attrib={"Name": "DefaultContainer"}
-    )
-
-    # Add EntitySets
-    for dataset in filtered_datasets:
-        entity_type_name = dataset.resource.replace(".", "_")
-
-        # Skip if EntityType wasn't created (no schema)
-        if entity_type_name not in entity_types_created:
-            continue
-
-        # EntitySet name uses dots (as in service document)
-        entity_set_name = dataset.resource
-
-        entity_set = ET.SubElement(
-            entity_container,
-            "{" + NS_EDM + "}EntitySet",
-            attrib={"Name": entity_set_name, "EntityType": f"OData.{entity_type_name}"},
-        )
-
-        # Add annotation indicating source type (Table or View)
-        ET.SubElement(
-            entity_set,
-            "{" + NS_EDM + "}Annotation",
-            attrib={"Term": "Custom.SourceType", "String": dataset.source},
-        )
-
-        # Add last-modified annotation if available (try catalog first, then Firestore doc timestamp)
-        try:
-            # Try to get last modified from catalog snapshot
-            catalog = OpteryxCatalog(
-                dataset.workspace,
-                firestore_project=GCP_PROJECT_ID,
-                firestore_database=FIRESTORE_DATABASE,
-                gcs_bucket=BUCKET_NAME,
-            )
-            ds_obj = catalog.load_dataset(f"{dataset.collection}.{dataset.name}")
-            snapshot = ds_obj.snapshot()
-            ts = getattr(snapshot, "timestamp_ms", None)
-        except Exception:
-            ts = None
-
-        # Fallback to dataset.last_modified_ms (from Firestore doc)
-        if ts is None:
-            ts = getattr(dataset, "last_modified_ms", None)
-
-        if ts:
-            try:
-                import datetime as _dt
-
-                # Convert milliseconds to ISO 8601 UTC string
-                iso = (
-                    _dt.datetime.utcfromtimestamp(ts / 1000.0)
-                    .replace(tzinfo=_dt.timezone.utc)
-                    .isoformat()
-                )
-                ET.SubElement(
-                    entity_set,
-                    "{" + NS_EDM + "}Annotation",
-                    attrib={"Term": "Custom.LastModified", "String": iso},
-                )
-            except Exception:
-                # If conversion fails, skip adding annotation
-                pass
-
-    # Convert to XML string
-    xml_str = ET.tostring(edmx, encoding="unicode", method="xml")
-
-    # Add XML declaration
-    xml_declaration = '<?xml version="1.0" encoding="UTF-8"?>\n'
-    xml_content = xml_declaration + xml_str
-
+    xml_content = build_edmx_document(datasets_payload, schema_loader=_schema_loader)
     return Response(content=xml_content, media_type="application/xml")
 
 

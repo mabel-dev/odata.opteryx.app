@@ -6,6 +6,13 @@ This module provides OData protocol endpoints for querying Opteryx data.
 from __future__ import annotations
 
 import os
+import sys
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../opteryx-core")))
+sys.path.insert(
+    0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../pyiceberg-firestore-gcs"))
+)
+
 import traceback
 from typing import Any
 from typing import List
@@ -18,10 +25,16 @@ from fastapi import HTTPException
 from fastapi import Query
 from fastapi import Request
 from fastapi import Response
-from opteryx.connectors import OpteryxConnector
+
+# Some opteryx releases may not export OpteryxConnector (e.g. in lightweight installs).
+# Provide a minimal stand-in so imports (and docs generation) still work.
+try:
+    from opteryx.connectors import OpteryxConnector
+except ImportError:  # pragma: no cover
+    OpteryxConnector = type("OpteryxConnector", (), {})
+
 from opteryx_catalog import OpteryxCatalog
-from orso.logging import get_logger
-from orso.types import OrsoTypes
+from app.logging import get_logger
 
 from app.auth.deps import require_authentication
 from app.odata.odata_to_logical_plan import ODataLogicalPlanBuilder
@@ -380,38 +393,48 @@ def execute_odata_query(
     }
 
 
-def _orso_type_to_edm(orso_type: OrsoTypes) -> str:
-    """Convert Orso/Opteryx type to OData EDM type.
+# Base column-type category (as reported by the catalog's canonical type
+# string, e.g. "INTEGER", "DECIMAL(15, 2)", "TIMESTAMP") -> OData EDM type.
+_EDM_TYPE_BY_CATEGORY = {
+    "INTEGER": "Edm.Int64",
+    "FLOAT": "Edm.Double",
+    "DOUBLE": "Edm.Double",
+    "BOOLEAN": "Edm.Boolean",
+    "VARCHAR": "Edm.String",
+    "NVARCHAR": "Edm.String",
+    "VARIANT": "Edm.String",
+    "TIMESTAMP": "Edm.DateTimeOffset",
+    "DATE": "Edm.Date",
+    "TIME": "Edm.TimeOfDay",
+    "DECIMAL": "Edm.Decimal",
+    "VARBINARY": "Edm.Binary",
+    "BLOB": "Edm.Binary",
+}
+
+
+def _column_type_to_edm(column_type: Any) -> str:
+    """Convert an Opteryx column type to its OData EDM type.
+
+    The catalog reports column types as canonical strings such as ``"INTEGER"``,
+    ``"DECIMAL(15, 2)"`` or ``"ARRAY<VARCHAR>"``. Only the leading category name
+    is significant for EDM mapping, so any parameter/element suffix is stripped
+    before lookup. Enum-like inputs exposing a ``.name`` are also supported.
 
     Args:
-        orso_type: Orso/Opteryx DataType
+        column_type: Canonical type string (or object with ``.name``).
 
     Returns:
-        OData EDM type string
+        OData EDM type string; ``"Edm.String"`` for anything unrecognised.
     """
-
-    # Handle Orso/Opteryx type strings
-    if orso_type == OrsoTypes.INTEGER:
-        return "Edm.Int64"
-    if orso_type == OrsoTypes.DOUBLE:
-        return "Edm.Double"
-    if orso_type == OrsoTypes.BOOLEAN:
-        return "Edm.Boolean"
-    if orso_type == OrsoTypes.VARCHAR:
+    if column_type is None:
         return "Edm.String"
-    if orso_type == OrsoTypes.TIMESTAMP:
-        return "Edm.DateTimeOffset"
-    if orso_type == OrsoTypes.DATE:
-        return "Edm.Date"
-    if orso_type == OrsoTypes.TIME:
-        return "Edm.TimeOfDay"
-    if orso_type == OrsoTypes.DECIMAL:
-        return "Edm.Decimal"
-    if orso_type == OrsoTypes.BLOB:
-        return "Edm.Binary"
 
-    # Fallback for unknown types
-    return "Edm.String"
+    name = getattr(column_type, "name", None) or str(column_type)
+    # Strip parameters/element suffixes: "DECIMAL(15, 2)" -> "DECIMAL",
+    # "ARRAY<VARCHAR>" -> "ARRAY".
+    category = name.strip().upper().split("(", 1)[0].split("<", 1)[0].strip()
+
+    return _EDM_TYPE_BY_CATEGORY.get(category, "Edm.String")
 
 
 def _role_allows_read(role: str | None) -> bool:
@@ -736,8 +759,8 @@ def dataset_metadata(
             for field in schema.columns:
                 col_name = field.name
                 col_names.append(col_name)
-                # Map Orso type to EDM type (fallback may be generic)
-                edm_type = _orso_type_to_edm(field.type)
+                # Map the catalog column type to its OData EDM type.
+                edm_type = _column_type_to_edm(field.type)
                 col_types.append(edm_type)
                 col_metadata[col_name] = {
                     "type": edm_type,

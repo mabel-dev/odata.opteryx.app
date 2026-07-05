@@ -7,25 +7,34 @@ ODataLogicalPlanBuilder can use.
 """
 
 import re
+import sys
+from pathlib import Path
 from typing import List
 from typing import Optional
 from typing import Tuple
 
+from opteryx.expression import NodeType
+from opteryx.models import Node
+
+# CRITICAL: Set up vendored path BEFORE importing odata_query
+# ruff: noqa: E402
+_vendored_path = str(Path(__file__).parent.parent / "vendored" / "odata-query")
+if _vendored_path not in sys.path:
+    sys.path.insert(0, _vendored_path)
+
 from odata_query.grammar import ODataLexer
 from odata_query.grammar import ODataParser
-from opteryx.managers.expression import NodeType
-from opteryx.models import Node
 
 
 class ODataExpressionParser:
     """Parse OData query expressions into AST and structured data.
-
+    
     Handles all parsing of OData query string components:
     - $filter: WHERE clause expressions
-    - $orderby: ORDER BY specifications
+    - $orderby: ORDER BY specifications  
     - $select: Column projection specifications
     - $apply: Aggregation pipeline syntax
-
+    
     Separates parsing concerns from plan building, allowing reuse
     and clearer separation of responsibilities.
     """
@@ -114,10 +123,10 @@ class ODataExpressionParser:
             return []
 
         select_cols = select_cols.strip()
-
+        
         if select_cols == "*":
             return ["*"]
-
+        
         # Split by comma and strip whitespace
         return [col.strip() for col in select_cols.split(",")]
 
@@ -143,10 +152,13 @@ class ODataExpressionParser:
         if not apply_expr:
             return None
 
-        from odata_query.apply import parse_apply
+        # NOTE: this regex-based parser implements a non-standard
+        # ``sum(price) as total`` grammar and is retained only for backward
+        # compatibility. The active $apply path uses ApplyLogicalPlanBuilder,
+        # which follows the OData-standard ``price with sum as total`` grammar.
 
-        parse_apply(apply_expr)
-
+        # Fall back to regex parsers for common patterns
+        
         # Try global aggregate pattern: aggregate(sum(price) as total, count(*) as cnt)
         aggregate_only_match = re.match(
             r"^\s*aggregate\s*\(\s*(.*)\s*\)\s*$", apply_expr, re.IGNORECASE
@@ -209,7 +221,9 @@ class ODataExpressionParser:
 
         # Parse each aggregate: "sum(price) as total" or "count(*)"
         for part in parts:
-            agg_match = re.match(r"(\w+)\s*\(\s*(.*?)\s*\)(?:\s+as\s+(\w+))?", part, re.IGNORECASE)
+            agg_match = re.match(
+                r"(\w+)\s*\(\s*(.*?)\s*\)(?:\s+as\s+(\w+))?", part, re.IGNORECASE
+            )
             if not agg_match:
                 raise ValueError(f"Invalid aggregate expression: '{part}'")
 
@@ -223,7 +237,9 @@ class ODataExpressionParser:
                 expr_node = None
             else:
                 # For simple identifiers, create a Node
-                expr_node = Node(node_type=NodeType.IDENTIFIER, source_column=expr_str)
+                expr_node = Node(
+                    node_type=NodeType.IDENTIFIER, source_column=expr_str
+                )
 
             aggregates.append(
                 {

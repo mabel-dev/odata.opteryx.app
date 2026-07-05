@@ -7,7 +7,7 @@ from fastapi.responses import PlainTextResponse
 router = APIRouter(tags=["service"])
 
 
-@router.get("/health")
+@router.get("/health", include_in_schema=False)
 def health():
     return {"status": "ok"}
 

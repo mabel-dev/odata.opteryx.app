@@ -9,7 +9,7 @@ from typing import Dict
 from typing import List
 from typing import Optional
 
-from orso.logging import get_logger
+from app.logging import get_logger
 
 logger = get_logger()
 
