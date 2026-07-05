@@ -72,7 +72,7 @@ No `pyarrow` references exist in `app/` (only transitively under opteryx-core).
 - **`$expand` silently no-ops.** `_add_expand_nodes` returns the plan unchanged, so navigation-property requests return base rows with the expansion silently dropped. Either implement JOIN translation or return `501 Not Implemented` for `$expand` so clients aren't misled.
 
 ### P1 — dependency hygiene
-- **Retire the `sys.path` hacks.** Runtime currently loads opteryx-core from `../opteryx-core` (0.9.0, unpublished) while the pin claims `0.8.*` — the pin is untruthful. Publish the core release that ships the APIs used, then depend on it via pip (editable for dev). Removes the two-different-relative-paths fragility and the `pyiceberg-firestore-gcs` path insert.
+- **Retire the `sys.path` hacks.** `opteryx-core` **0.9.1 is now published** (with a `cp314t` wheel) and the pin is `opteryx-core==0.9.*` — truthful and matching the APIs the engine was ported against. The `sys.path.insert` into `../opteryx-core` (and `../pyiceberg-firestore-gcs`) can now be removed so dev and container both resolve core from pip. Do this next; it removes the two-different-relative-paths fragility.
 - **Report upstream:** empty `opteryx/odata/` and corrupted `opteryx/logging.py` in the core checkout affect the whole fleet.
 
 ### P2 — implementation quality
@@ -84,30 +84,23 @@ No `pyarrow` references exist in `app/` (only transitively under opteryx-core).
 
 ---
 
-## 5. Free-threaded Python 3.14 (3.14t) migration status
+## 5. Python 3.14 migration status
 
-Target: the Docker image runs on free-threaded CPython 3.14. Moving to 3.14t
-requires **every compiled dependency** to ship a `cp314t` wheel (or build from
-source in-image).
+Target: the Docker image runs on **standard (GIL-ful) CPython 3.14**.
+
+Free-threaded (3.14t) was evaluated and **abandoned**: `grpcio` (pulled in by
+`google-cloud-firestore`/`-secret-manager`) has never shipped a `cp314t` wheel
+and is impractical to build from source, so the catalog backend can't run
+free-threaded today. GIL-ful 3.14 has **no such blocker** — `grpcio`, `orjson`,
+`google-crc32c`, `pydantic-core`, `cryptography`, `uvloop`, `httptools` and
+`opteryx-core` all ship `cp314` (GIL) wheels.
 
 **Done in this pass**
-- `orjson` → `msgspec`. orjson ships **no** `cp314t` wheels (verified across its
-  entire release history); msgspec does and is comparably fast. New response
-  class in [`app/responses.py`](../app/responses.py); wired up in `app/main.py`.
-- `requires-python` bumped to `>=3.14`; added [`.python-version`](../.python-version) = `3.14t`.
-- `Dockerfile`: base `python:3.13-slim` → `python:3.14-slim`; uv now provisions
-  the `3.14t` interpreter and builds `.venv` against it. (The official `python`
-  image has **no** free-threaded tag — uv is the practical way to get 3.14t.)
+- `Dockerfile`: base `python:3.13-slim` → `python:3.14-slim` (stock GIL image).
+- `requires-python` bumped to `>=3.14`.
+- `opteryx-core` pinned to `0.9.*` (0.9.1 published; ships a `cp314` wheel and all modules the restored engine imports).
+- **`orjson` retained.** The earlier `orjson`→`msgspec` swap was only needed for free-threaded; on GIL-ful 3.14 `orjson==3.11.7` has `cp314` wheels, so we reverted to it to stay consistent with the rest of the fleet (all services use `ORJSONResponse`). `app/responses.py` and `.python-version` were removed.
 
-**Wheel status of the other native deps** (checked on PyPI):
-
-| dependency | `cp314t` wheel | notes |
-|---|:---:|---|
-| pydantic-core, cryptography, uvloop, httptools, msgspec | ✅ | fastapi / uvicorn / responses |
-| **grpcio** | ❌ | **hard blocker** — pulled in by `google-cloud-firestore` and `google-cloud-secret-manager`; never shipped a free-threaded wheel and is hard to build from source |
-| **google-crc32c** | ❌ | pulled in by `google-cloud-storage`; has a pure-Python fallback, so it degrades rather than blocks |
-
-**Remaining blockers before the 3.14t image can actually run** (not yet actioned):
-1. **grpcio / Firestore.** The catalog backend can't get a free-threaded wheel. Options to evaluate: wait for a grpcio `cp314t` release; build grpcio from source in the image (heavy, brittle); or move the Google clients to a **REST transport** where supported to drop the grpcio dependency.
-2. **Audit/bump the exact pins** so their transitive compiled deps resolve `cp314t` wheels — notably `cryptography==46.0.5` (looks stale/possibly nonexistent) and `fastapi==0.135.1` / `uvicorn==0.38.0` (must resolve pydantic-core ≥2.47, uvloop/httptools versions that ship `cp314t`). I did **not** bump these unilaterally: they are behaviour-affecting, and grpcio blocks the build regardless, so they should be sequenced after the grpcio decision.
-3. **opteryx-core in-container.** The image installs `opteryx-core==0.8.*` from PyPI (the `sys.path` sibling doesn't exist in the container), but the engine was ported against local **0.9.0** APIs (`opteryx.expression`, etc.). Publishing 0.9.x and pinning to it is a prerequisite for a working image (see §4, P1).
+**Follow-up (not blocking, worth doing):**
+- Audit the exact pins for `cp314` wheels — notably `cryptography==46.0.5` (looks stale/possibly nonexistent; verify or bump) and `fastapi`/`uvicorn` (ensure they resolve `pydantic-core`/`uvloop`/`httptools` versions with `cp314` wheels). None of these are 3.14 *blockers*, but stale pins can force slow source builds in the image.
+- If free-threading is revisited later, the only true blocker is `grpcio` — track its `cp314t` support or evaluate a Google-client REST transport.
