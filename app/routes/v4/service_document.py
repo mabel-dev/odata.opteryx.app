@@ -11,7 +11,6 @@ from app.logging import get_logger
 
 from app.auth.deps import require_authentication
 from app.core import _get_firestore_client
-from opteryx.odata import build_service_document
 
 logger = get_logger()
 router = APIRouter(prefix="/api/v4")
@@ -325,7 +324,10 @@ def get_service_document(
             }
         )
 
-    return build_service_document(entity_sets)
+    return {
+        "@odata.context": "/api/v4/$metadata",
+        "value": entity_sets,
+    }
 
 
 __all__ = ["router"]

@@ -2,6 +2,7 @@
 
 # Get catalog configuration from environment
 import os
+import xml.etree.ElementTree as ET
 from functools import lru_cache
 from typing import Any
 
@@ -17,7 +18,6 @@ from app.logging import get_logger
 
 from app.auth.deps import require_authentication
 from app.core import _get_firestore_client
-from opteryx.odata import build_edmx_document
 
 logger = get_logger()
 router = APIRouter(prefix="/api/v4")
@@ -482,22 +482,132 @@ def get_edmx_metadata(
         if any(_role_allows_read(role) for role in roles):
             filtered_datasets.append(dataset)
 
-    def _schema_loader(dataset: DatasetInfo) -> list[tuple[str, str]]:
-        return _get_dataset_schema(dataset)
+    # Build EDMX XML document
+    # Namespaces
+    NS_EDMX = "http://docs.oasis-open.org/odata/ns/edmx"
+    NS_EDM = "http://docs.oasis-open.org/odata/ns/edm"
 
-    datasets_payload = [
-        {
-            "resource": dataset.resource,
-            "workspace": dataset.workspace,
-            "collection": dataset.collection,
-            "name": dataset.name,
-            "source": dataset.source,
-            "last_modified_ms": getattr(dataset, "last_modified_ms", None),
-        }
-        for dataset in filtered_datasets
-    ]
+    # Root element
+    edmx = ET.Element("{" + NS_EDMX + "}Edmx", attrib={"Version": "4.0", "xmlns:edmx": NS_EDMX})
 
-    xml_content = build_edmx_document(datasets_payload, schema_loader=_schema_loader)
+    # DataServices
+    data_services = ET.SubElement(edmx, "{" + NS_EDMX + "}DataServices")
+
+    # Schema
+    schema = ET.SubElement(
+        data_services,
+        "{" + NS_EDM + "}Schema",
+        attrib={"Namespace": "OData", "xmlns": NS_EDM},
+    )
+
+    # Create EntityTypes for each dataset
+    entity_types_created = set()
+    for dataset in filtered_datasets:
+        entity_type_name = dataset.resource.replace(".", "_")
+
+        # Skip if already created (duplicate names)
+        if entity_type_name in entity_types_created:
+            continue
+
+        # Get schema for this dataset
+        columns = _get_dataset_schema(dataset)
+
+        if not columns:
+            # Skip datasets with no accessible schema
+            logger.debug(f"Skipping dataset with no schema: {dataset.resource}")
+            continue
+
+        # Create EntityType
+        entity_type = ET.SubElement(
+            schema, "{" + NS_EDM + "}EntityType", attrib={"Name": entity_type_name}
+        )
+
+        # Add Key element (use first column as key - OData requires a key)
+        key = ET.SubElement(entity_type, "{" + NS_EDM + "}Key")
+        ET.SubElement(key, "{" + NS_EDM + "}PropertyRef", attrib={"Name": columns[0][0]})
+
+        # Add properties
+        for col_name, edm_type in columns:
+            ET.SubElement(
+                entity_type,
+                "{" + NS_EDM + "}Property",
+                attrib={"Name": col_name, "Type": edm_type, "Nullable": "true"},
+            )
+
+        entity_types_created.add(entity_type_name)
+
+    # Create EntityContainer
+    entity_container = ET.SubElement(
+        schema, "{" + NS_EDM + "}EntityContainer", attrib={"Name": "DefaultContainer"}
+    )
+
+    # Add EntitySets
+    for dataset in filtered_datasets:
+        entity_type_name = dataset.resource.replace(".", "_")
+
+        # Skip if EntityType wasn't created (no schema)
+        if entity_type_name not in entity_types_created:
+            continue
+
+        # EntitySet name uses dots (as in service document)
+        entity_set_name = dataset.resource
+
+        entity_set = ET.SubElement(
+            entity_container,
+            "{" + NS_EDM + "}EntitySet",
+            attrib={"Name": entity_set_name, "EntityType": f"OData.{entity_type_name}"},
+        )
+
+        # Add annotation indicating source type (Table or View)
+        ET.SubElement(
+            entity_set,
+            "{" + NS_EDM + "}Annotation",
+            attrib={"Term": "Custom.SourceType", "String": dataset.source},
+        )
+
+        # Add last-modified annotation if available (try catalog first, then Firestore doc timestamp)
+        try:
+            # Try to get last modified from catalog snapshot
+            catalog = OpteryxCatalog(
+                dataset.workspace,
+                firestore_project=GCP_PROJECT_ID,
+                firestore_database=FIRESTORE_DATABASE,
+                gcs_bucket=BUCKET_NAME,
+            )
+            ds_obj = catalog.load_dataset(f"{dataset.collection}.{dataset.name}")
+            snapshot = ds_obj.snapshot()
+            ts = getattr(snapshot, "timestamp_ms", None)
+        except Exception:
+            ts = None
+
+        # Fallback to dataset.last_modified_ms (from Firestore doc)
+        if ts is None:
+            ts = getattr(dataset, "last_modified_ms", None)
+
+        if ts:
+            try:
+                import datetime as _dt
+
+                # Convert milliseconds to ISO 8601 UTC string
+                iso = (
+                    _dt.datetime.fromtimestamp(ts / 1000.0, tz=_dt.timezone.utc).isoformat()
+                )
+                ET.SubElement(
+                    entity_set,
+                    "{" + NS_EDM + "}Annotation",
+                    attrib={"Term": "Custom.LastModified", "String": iso},
+                )
+            except Exception:
+                # If conversion fails, skip adding annotation
+                pass
+
+    # Convert to XML string
+    xml_str = ET.tostring(edmx, encoding="unicode", method="xml")
+
+    # Add XML declaration
+    xml_declaration = '<?xml version="1.0" encoding="UTF-8"?>\n'
+    xml_content = xml_declaration + xml_str
+
     return Response(content=xml_content, media_type="application/xml")
 
 
