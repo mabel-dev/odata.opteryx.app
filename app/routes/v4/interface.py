@@ -152,6 +152,8 @@ def execute_odata_query(
     skip: Optional[int] = None,
     apply_expr: Optional[str] = None,
     count_requested: bool = False,
+    identity: Optional[str] = None,
+    access_policies: Optional[List[dict]] = None,
 ) -> dict:
     """Execute an OData query and return results.
 
@@ -218,6 +220,11 @@ def execute_odata_query(
 
     logger.debug(f"Built logical plan with {len(logical_plan.nodes())} nodes for {table_name}")
 
+    # Build a session carrying the caller's identity/access policies so that
+    # Opteryx's permission checks are evaluated against the actual caller,
+    # rather than falling back to an empty (deny-all) execution context.
+    session = opteryx.session(user=identity, access_policies=access_policies or None)
+
     # Debug: log validation inputs
     logger.debug(
         f"Validation inputs: apply_expr={apply_expr!r}, count_requested={count_requested!r}"
@@ -255,8 +262,7 @@ def execute_odata_query(
                 skip=None,
                 apply_expr=apply_expr,
             )
-            session = opteryx.session()
-            schema_table = session.execute_logical_plan(schema_plan)
+            schema_table = session.execute_logical_plan(schema_plan, connection=session)
             col_names = schema_table.column_names or []
             logger.debug(f"Got schema from query: {col_names}")
         except Exception as exc:
@@ -275,8 +281,7 @@ def execute_odata_query(
                 apply_expr=apply_expr,
                 count_only=True,
             )
-            session = opteryx.session()
-            count_table = session.execute_logical_plan(count_plan)
+            count_table = session.execute_logical_plan(count_plan, connection=session)
             # Strict validation: count query MUST return a 1x1 numeric result. Fail fast with clear error otherwise.
             if not count_table:
                 raise ValueError(f"Count query returned no table object for {table_name}")
@@ -310,8 +315,7 @@ def execute_odata_query(
 
         try:
             # Execute the logical plan using Opteryx executor
-            session = opteryx.session()
-            arrow_table = session.execute_logical_plan(optimized_plan)
+            arrow_table = session.execute_logical_plan(optimized_plan, connection=session)
 
             # Get column names from the Arrow table
             col_names = arrow_table.column_names or []
@@ -359,8 +363,7 @@ def execute_odata_query(
                     apply_expr=apply_expr,
                     count_only=True,
                 )
-                session = opteryx.session()
-                arrow_table = session.execute_logical_plan(count_plan)
+                arrow_table = session.execute_logical_plan(count_plan, connection=session)
                 # Strict validation: count query MUST return a 1x1 numeric result. Fail fast with clear error otherwise.
                 if not arrow_table:
                     raise ValueError(f"Count query returned no table object for {table_name}")
@@ -556,6 +559,14 @@ def read_dataset(
         else:
             want_count = bool(count)
 
+    # Determine the caller's identity/access policies from their JWT claims so
+    # Opteryx's permission checks are evaluated against the actual caller.
+    from app.auth.permissions import get_access_policies_from_claims
+
+    claims = getattr(request.state, "claims", None) or {}
+    identity = claims.get("identity")
+    access_policies = get_access_policies_from_claims(claims)
+
     # Execute the OData query using the core function
     try:
         result = execute_odata_query(
@@ -567,9 +578,13 @@ def read_dataset(
             skip=skip,
             apply_expr=apply,
             count_requested=want_count,
+            identity=identity,
+            access_policies=access_policies,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=f"Invalid query: {str(e)}")
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
     except Exception as e:
         logger.error(f"Error executing OData query for {table_name}: {e}")
         raise
