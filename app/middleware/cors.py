@@ -13,6 +13,8 @@ logger = get_logger()
 
 CORS_ORIGINS = [
     "https://opteryx.app",
+    "https://demo.opteryx.app",
+    "https://demo-opteryx-app-git-cuvdwt7kra-ue.a.run.app",
     "http://127.0.0.1:8000",
     "http://localhost:8000",
 ]
