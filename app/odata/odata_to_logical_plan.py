@@ -9,6 +9,7 @@ The conversion flow is:
     OData parameters → ExpressionParser (AST) → LogicalPlanBuilder → LogicalPlan
 """
 
+from typing import List
 from typing import Optional
 
 from opteryx.expression import NodeType
@@ -43,6 +44,13 @@ class ODataLogicalPlanBuilder:
         self.plan = LogicalPlan()
         self.current_step_id: Optional[str] = None
         self.expression_parser = ODataExpressionParser()
+        # Output columns of the most recent aggregate step, pending consumption by
+        # Exit (or a subsequent Project). Opteryx's Exit binder unconditionally
+        # drops the "$derived" schema (where aggregate outputs live) before
+        # resolving its own wildcard, so a bare Aggregate -> Exit plan built with
+        # a wildcard would lose the aggregate's columns. Referencing the aggregate
+        # Node objects directly (set here) sidesteps that lookup entirely.
+        self._pending_aggregate_columns: Optional[List[Node]] = None
 
     def build(
         self,
@@ -94,14 +102,21 @@ class ODataLogicalPlanBuilder:
         if filter_expr:
             self.current_step_id = self._add_filter_node(filter_expr)
 
-        # If caller asked for a COUNT-only plan, add the count node and exit
+        # If caller asked for a COUNT-only plan, add the count node and exit.
+        # _add_count_node() populates self._pending_aggregate_columns, which
+        # _add_exit_node() consumes directly instead of using a wildcard.
         if count_only:
             self.current_step_id = self._add_count_node()
             self._add_exit_node()
             return self.plan
 
-        # Apply column projection (must come before ORDER BY)
-        if select_cols:
+        # Apply column projection (must come before ORDER BY). A bare wildcard
+        # $select ("*", or no $select at all) immediately after an aggregation
+        # step is left unresolved here — self._pending_aggregate_columns carries
+        # the aggregate's output columns through to _add_exit_node instead, for
+        # the same "$derived" reasons as the count_only branch above.
+        is_wildcard_select = select_cols is not None and select_cols.strip() in ("", "*")
+        if select_cols and not (self._pending_aggregate_columns is not None and is_wildcard_select):
             self.current_step_id = self._add_project_node(select_cols, orderby_expr)
 
         # Apply ORDER BY (after projection so ordered columns are available)
@@ -122,12 +137,15 @@ class ODataLogicalPlanBuilder:
 
         Returns the new step_id for the count aggregation node.
         """
-        agg_node = LogicalPlanNode(node_type=LogicalPlanStepType.AggregateAndGroup)
-        # No group by -> global aggregation
-        agg_node.group_by = []
-        agg_node.aggregations = [
-            {"function": "COUNT", "expression": None, "alias": "count"}
-        ]
+        # No group by -> global aggregation; use the ungrouped "Aggregate" step
+        # type (rather than AggregateAndGroup), which doesn't require a projection.
+        agg_node = LogicalPlanNode(node_type=LogicalPlanStepType.Aggregate)
+        agg_node.groups = []
+        wildcard = Node(node_type=NodeType.WILDCARD)
+        count_node = Node(node_type=NodeType.AGGREGATOR, value="COUNT", parameters=[wildcard])
+        count_node.alias = "count"
+        agg_node.aggregates = [count_node]
+        self._pending_aggregate_columns = [count_node]
         return self._add_node(agg_node)
 
     def _add_node(self, node: LogicalPlanNode) -> str:
@@ -300,6 +318,11 @@ class ODataLogicalPlanBuilder:
         if not select_cols:
             return self.current_step_id
 
+        # An explicit projection (this method actually running) properly resolves
+        # and republishes the aggregate's columns, so Exit no longer needs to
+        # reference them directly.
+        self._pending_aggregate_columns = None
+
         # Parse select expression using the dedicated expression parser
         selected_cols_list = self.expression_parser.parse_select(select_cols)
 
@@ -308,16 +331,19 @@ class ODataLogicalPlanBuilder:
         if self.current_step_id is not None:
             prev_node = self.plan._nodes.get(self.current_step_id)
 
-        if prev_node is not None and getattr(prev_node, "node_type", None) == LogicalPlanStepType.AggregateAndGroup:
-            # Build set of allowed columns: group_by source_column names + aggregation aliases
+        if prev_node is not None and getattr(prev_node, "node_type", None) in (
+            LogicalPlanStepType.AggregateAndGroup,
+            LogicalPlanStepType.Aggregate,
+        ):
+            # Build set of allowed columns: group source_column names + aggregate aliases
             allowed = set()
-            if getattr(prev_node, "group_by", None):
-                for g in prev_node.group_by:
+            if getattr(prev_node, "groups", None):
+                for g in prev_node.groups:
                     if getattr(g, "source_column", None):
                         allowed.add(g.source_column)
-            if getattr(prev_node, "aggregations", None):
-                for a in prev_node.aggregations:
-                    alias = a.get("alias")
+            if getattr(prev_node, "aggregates", None):
+                for a in prev_node.aggregates:
+                    alias = getattr(a, "alias", None)
                     if alias:
                         allowed.add(alias)
 
@@ -379,9 +405,14 @@ class ODataLogicalPlanBuilder:
     def _add_exit_node(self) -> str:
         """Add an Exit node to mark the end of the plan."""
         exit_node = LogicalPlanNode(node_type=LogicalPlanStepType.Exit)
-        # Use WILDCARD node to represent "*" - all columns
-        # This tells the optimizer we want all columns from the previous step
-        exit_node.columns = [Node(node_type=NodeType.WILDCARD)]
+        if self._pending_aggregate_columns is not None:
+            # Reference the aggregate's output nodes directly rather than a
+            # wildcard — see the note on self._pending_aggregate_columns.
+            exit_node.columns = list(self._pending_aggregate_columns)
+        else:
+            # Use WILDCARD node to represent "*" - all columns
+            # This tells the optimizer we want all columns from the previous step
+            exit_node.columns = [Node(node_type=NodeType.WILDCARD)]
         return self._add_node(exit_node)
 
     def get_plan(self) -> LogicalPlan:

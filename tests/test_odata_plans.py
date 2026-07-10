@@ -74,13 +74,13 @@ def test_apply_aggregate_only_plan():
 
     found = False
     for node in plan._nodes.values():
-        if getattr(node, "node_type", None) == LogicalPlanStepType.AggregateAndGroup:
+        if getattr(node, "node_type", None) == LogicalPlanStepType.Aggregate:
             # No group by for aggregate-only
-            assert node.group_by == []
-            assert len(node.aggregations) == 2
-            func_names = {agg["function"] for agg in node.aggregations}
+            assert node.groups == []
+            assert len(node.aggregates) == 2
+            func_names = {agg.value for agg in node.aggregates}
             assert "MIN" in func_names and "MAX" in func_names
-            aliases = {agg["alias"] for agg in node.aggregations}
+            aliases = {agg.alias for agg in node.aggregates}
             assert "min_published_at" in aliases and "max_published_at" in aliases
             found = True
 

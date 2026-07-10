@@ -32,16 +32,17 @@ def test_count_only_plan_with_apply():
         if not node:
             continue
 
-        if getattr(node, "node_type", None) == LogicalPlanStepType.AggregateAndGroup:
-            aggs = getattr(node, "aggregations", None)
-            group_by = getattr(node, "group_by", None)
+        node_type = getattr(node, "node_type", None)
+        if node_type in (LogicalPlanStepType.AggregateAndGroup, LogicalPlanStepType.Aggregate):
+            aggs = getattr(node, "aggregates", None)
+            groups = getattr(node, "groups", None)
 
-            # Check if this is the $apply aggregation (has group_by)
-            if group_by and aggs:
+            # Check if this is the $apply aggregation (has groups)
+            if groups and aggs:
                 found_aggregate = True
 
-            # Check if this is the count aggregation (no group_by, has COUNT)
-            if not group_by and aggs and any(a.get("function") == "COUNT" for a in aggs):
+            # Check if this is the count aggregation (no groups, has COUNT)
+            if not groups and aggs and any(a.value == "COUNT" for a in aggs):
                 found_count = True
 
     # When count_only=True, the plan should have a count aggregation

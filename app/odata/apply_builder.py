@@ -12,11 +12,29 @@ insertion.
 """
 
 from typing import Any
+from typing import Optional
 
 from odata_query.apply import parse_apply, AggregateTransform, GroupByTransform, FilterTransform
 from opteryx.models import Node
+from opteryx.models.logical_column import LogicalColumn
 from opteryx.expression import NodeType
 from opteryx.planner.logical_planner import LogicalPlanNode, LogicalPlanStepType
+
+
+def _build_aggregate_node(func: str, prop: Optional[str], alias: str) -> Node:
+    """Build a NodeType.AGGREGATOR node for one $apply aggregate expression.
+
+    `prop` is None for COUNT(*) (OData's "$count"); every other function takes
+    a single column-identifier parameter.
+    """
+    if prop is None:
+        parameter = Node(node_type=NodeType.WILDCARD)
+    else:
+        parameter = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column=prop, source=None, alias=None)
+        parameter.query_column = prop
+    agg_node = Node(node_type=NodeType.AGGREGATOR, value=func, parameters=[parameter])
+    agg_node.alias = alias
+    return agg_node
 
 
 class ApplyLogicalPlanBuilder:
@@ -47,14 +65,12 @@ class ApplyLogicalPlanBuilder:
                 last_step = odata_builder.current_step_id
 
             elif isinstance(transform, GroupByTransform):
-                # Build AggregateAndGroup node
-                agg_node = LogicalPlanNode(node_type=LogicalPlanStepType.AggregateAndGroup)
-
                 # Group columns
                 group_cols = []
                 for col in transform.properties:
-                    group_cols.append(Node(node_type=NodeType.IDENTIFIER, source_column=col))
-                agg_node.group_by = group_cols
+                    group_col = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column=col, source=None, alias=None)
+                    group_col.query_column = col
+                    group_cols.append(group_col)
 
                 # Aggregates (may be None)
                 aggs = []
@@ -62,35 +78,37 @@ class ApplyLogicalPlanBuilder:
                     for expr in transform.aggregate.expressions:
                         func = expr.method.upper()
                         prop = expr.property_path  # None for $count
-                        alias = expr.alias
+                        aggs.append(_build_aggregate_node(func, prop, expr.alias))
 
-                        if prop is None:
-                            expr_node = None
-                        else:
-                            expr_node = Node(node_type=NodeType.IDENTIFIER, source_column=prop)
-
-                        aggs.append({"function": func, "expression": expr_node, "alias": alias})
-
-                agg_node.aggregations = aggs
+                agg_node = LogicalPlanNode(node_type=LogicalPlanStepType.AggregateAndGroup)
+                agg_node.groups = group_cols
+                agg_node.aggregates = aggs
+                # Required by the physical planner for AggregateAndGroup nodes:
+                # the full output column list (groups + aggregates), in order.
+                agg_node.projection = group_cols + aggs
                 last_step = odata_builder._add_node(agg_node)
                 odata_builder.current_step_id = last_step
+                # See ODataLogicalPlanBuilder._pending_aggregate_columns: Exit
+                # can't resolve a wildcard against this node's output directly.
+                odata_builder._pending_aggregate_columns = group_cols + aggs
 
             elif isinstance(transform, AggregateTransform):
-                agg_node = LogicalPlanNode(node_type=LogicalPlanStepType.AggregateAndGroup)
-                agg_node.group_by = []
                 aggs = []
                 for expr in transform.expressions:
                     func = expr.method.upper()
                     prop = expr.property_path
-                    alias = expr.alias
-                    if prop is None or prop == "$count":
-                        expr_node = None
-                    else:
-                        expr_node = Node(node_type=NodeType.IDENTIFIER, source_column=prop)
-                    aggs.append({"function": func, "expression": expr_node, "alias": alias})
-                agg_node.aggregations = aggs
+                    prop = None if prop == "$count" else prop
+                    aggs.append(_build_aggregate_node(func, prop, expr.alias))
+
+                # No group by -> global aggregation; use the ungrouped "Aggregate"
+                # step type (rather than AggregateAndGroup), which doesn't
+                # require a projection.
+                agg_node = LogicalPlanNode(node_type=LogicalPlanStepType.Aggregate)
+                agg_node.groups = []
+                agg_node.aggregates = aggs
                 last_step = odata_builder._add_node(agg_node)
                 odata_builder.current_step_id = last_step
+                odata_builder._pending_aggregate_columns = aggs
 
             else:
                 transform_type = type(transform).__name__
