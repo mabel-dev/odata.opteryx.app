@@ -48,6 +48,7 @@ FIRESTORE_DATABASE = os.environ.get("FIRESTORE_DATABASE")
 BUCKET_NAME = os.environ.get("GCS_BUCKET")
 GCP_PROJECT_ID = os.environ.get("GCP_PROJECT_ID")
 DEFAULT_TOP = int(os.environ.get("ODATA_DEFAULT_TOP", "100"))
+MAX_TOP = int(os.environ.get("ODATA_MAX_TOP", "25000"))
 
 opteryx.set_default_connector(
     OpteryxConnector,
@@ -223,7 +224,7 @@ def execute_odata_query(
         filter_expr: OData $filter expression
         orderby_expr: OData $orderby expression
         select_cols: OData $select columns
-        top: $top limit (1-10000, default: DEFAULT_TOP)
+        top: $top limit (1-MAX_TOP, default: DEFAULT_TOP)
         skip: $skip offset
         count_requested: Whether to include total count
         apply_expr: OData $apply expression
@@ -477,7 +478,7 @@ router = APIRouter(
     description="Retrieve data from a dataset with OData v4 query parameters ($filter, $select, $orderby, $top, $skip, $apply, $count). Returns paginated results with total count and nextLink for server-driven paging.",
     responses={
         200: {"description": "Query succeeded; returns rows and pagination metadata"},
-        400: {"description": "Invalid query: malformed $filter, unsupported $top value (not 0-10000), invalid $count value, or invalid $apply expression"},
+        400: {"description": f"Invalid query: malformed $filter, unsupported $top value (not 0-{MAX_TOP}), invalid $count value, or invalid $apply expression"},
         401: {"description": "Missing or invalid authentication (no bearer token or basic auth)"},
         403: {"description": "Forbidden: authenticated but no permission for dataset"},
         501: {"description": "Unsupported query feature: $search or $expand not implemented"},
@@ -497,7 +498,7 @@ def read_dataset(
     top: Optional[int] = Query(
         None,
         alias="$top",
-        description="Limit result rows (0-10000, default 100). Value 0 with $count=true returns count only. Returns @odata.nextLink if result is truncated."
+        description=f"Limit result rows (0-{MAX_TOP}, default {DEFAULT_TOP}). Value 0 with $count=true returns count only. Returns @odata.nextLink if result is truncated."
     ),
     skip: Optional[int] = Query(
         None,
@@ -594,10 +595,10 @@ def read_dataset(
         top = int(top)  # Will raise ValueError if not a valid integer
 
     # Validate $top range (allow 0 unconditionally per OData spec)
-    if not (0 <= top <= 10000):
+    if not (0 <= top <= MAX_TOP):
         raise HTTPException(
             status_code=400,
-            detail="$top must be between 0 and 10000",
+            detail=f"$top must be between 0 and {MAX_TOP}",
         )
 
     # Parse count parameter (only accept "true" or "false" per OData spec)
