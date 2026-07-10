@@ -24,6 +24,9 @@ def try_parse_iso(value):
     try:
         from opteryx.compiled.functions.timestamp import parse_iso as c_parse_iso
 
+        # c_parse_iso requires bytes; OData literal text arrives as str.
+        if isinstance(value, str):
+            value = value.encode("utf-8")
         return c_parse_iso(value)
     except (ValueError, TypeError, ImportError):
         return None

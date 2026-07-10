@@ -647,6 +647,14 @@ def read_dataset(
         raise HTTPException(status_code=400, detail=f"Invalid query: {str(e)}")
     except PermissionError as e:
         raise HTTPException(status_code=403, detail=str(e))
+    except opteryx.exceptions.PermissionsError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except (opteryx.exceptions.SqlError, opteryx.exceptions.IncompatibleTypesError) as e:
+        # "The query as given is invalid" — client-fixable (bad/uncast filter
+        # literal, unknown column, unsupported syntax, etc.), not a server fault.
+        # IncompatibleTypesError is listed separately because it doesn't actually
+        # inherit from SqlError despite opteryx-core's own docs implying it does.
+        raise HTTPException(status_code=400, detail=f"Invalid query: {str(e)}")
     except Exception as e:
         logger.error(f"Error executing OData query for {table_name}: {e}")
         raise
