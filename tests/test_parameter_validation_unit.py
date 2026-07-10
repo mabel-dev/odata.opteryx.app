@@ -75,22 +75,22 @@ class TestTopValidation:
         """$top=0 should be valid."""
         top = 0
         # Validate $top range (allow 0 unconditionally per OData spec)
-        assert 0 <= top <= 10000, "$top=0 should pass range validation"
+        assert 0 <= top <= 25000, "$top=0 should pass range validation"
 
     def test_top_positive_valid(self):
-        """$top in range [1, 10000] should be valid."""
-        for top in [1, 100, 10000]:
-            assert 0 <= top <= 10000, f"$top={top} should pass range validation"
+        """$top in range [1, 25000] should be valid."""
+        for top in [1, 100, 10000, 25000]:
+            assert 0 <= top <= 25000, f"$top={top} should pass range validation"
 
     def test_top_negative_invalid(self):
         """$top=-1 should be invalid."""
         top = -1
-        assert not (0 <= top <= 10000), "$top=-1 should fail range validation"
+        assert not (0 <= top <= 25000), "$top=-1 should fail range validation"
 
     def test_top_exceeds_max_invalid(self):
-        """$top=10001 should be invalid."""
-        top = 10001
-        assert not (0 <= top <= 10000), "$top=10001 should fail range validation"
+        """$top=25001 should be invalid."""
+        top = 25001
+        assert not (0 <= top <= 25000), "$top=25001 should fail range validation"
 
     def test_top_zero_no_special_count_requirement(self):
         """$top=0 should be allowed regardless of $count presence."""
@@ -100,7 +100,7 @@ class TestTopValidation:
         count = None  # No count specified
 
         # Validate using new logic: allow 0 unconditionally
-        assert 0 <= top <= 10000, "$top=0 should pass validation without $count=true"
+        assert 0 <= top <= 25000, "$top=0 should pass validation without $count=true"
 
 
 class TestCountValidation:

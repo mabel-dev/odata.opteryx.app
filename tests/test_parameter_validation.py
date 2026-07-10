@@ -53,16 +53,16 @@ class TestTopZeroAllowed:
         assert "$top" in data["error"]["message"] or "between" in data["error"]["message"]
 
     def test_top_exceeds_max_rejected(self, client):
-        """$top=10001 should be rejected with 400."""
-        response = client.get("/api/v4/public/demo/users?$top=10001")
+        """$top=25001 should be rejected with 400."""
+        response = client.get("/api/v4/public/demo/users?$top=25001")
         assert response.status_code == 400
         data = response.json()
         assert "error" in data
         assert "$top" in data["error"]["message"] or "between" in data["error"]["message"]
 
     def test_top_in_valid_range_allowed(self, client):
-        """$top values 1-10000 should be allowed."""
-        for top_val in [1, 100, 10000]:
+        """$top values 1-25000 should be allowed."""
+        for top_val in [1, 100, 10000, 25000]:
             response = client.get(f"/api/v4/public/demo/users?$top={top_val}")
             # Should not be 400 from validation
             assert response.status_code != 400, f"$top={top_val} should be allowed"
