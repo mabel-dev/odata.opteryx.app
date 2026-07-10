@@ -592,11 +592,17 @@ def read_dataset(
 
     # Determine the caller's identity/access policies from their JWT claims so
     # Opteryx's permission checks are evaluated against the actual caller.
-    from app.auth.permissions import get_access_policies_from_claims
+    from app.auth.permissions import get_access_policies_from_claims, is_anonymous_exempt
 
     claims = getattr(request.state, "claims", None) or {}
     identity = claims.get("identity")
     access_policies = get_access_policies_from_claims(claims)
+
+    if identity is None and not is_anonymous_exempt(workstream, collection):
+        raise HTTPException(
+            status_code=401,
+            detail="Missing or invalid credentials",
+        )
 
     # Execute the OData query using the core function
     try:
@@ -747,6 +753,11 @@ def dataset_metadata(
     # Get claims provided by the authentication dependency
     claims = getattr(request.state, "claims", {}) or {}
     identity = claims.get("identity")
+
+    from app.auth.permissions import is_anonymous_exempt
+
+    if identity is None and not is_anonymous_exempt(workstream, collection):
+        raise HTTPException(status_code=401, detail="Missing or invalid credentials")
 
     from app.auth.permissions import get_access_policies_from_claims
 

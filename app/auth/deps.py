@@ -240,12 +240,19 @@ async def require_authentication(
 
     Returns the decoded claims on success.
     Stores claims in request.state for use by endpoints.
+
+    A request with no Authorization header at all is let through as anonymous
+    (identity=None, no policies) rather than rejected here — this lets
+    public.security stay reachable with zero credentials (see
+    app.auth.permissions.is_anonymous_exempt). A request that DOES send
+    credentials, even if malformed, is still rejected: only omitting auth
+    entirely counts as "anonymous". Every endpoint other than public.security
+    is responsible for rejecting anonymous callers itself.
     """
     if not authorization:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Missing or invalid credentials",
-        )
+        claims = {"identity": None, "policies": []}
+        request.state.claims = claims
+        return claims
 
     claims = None
 
