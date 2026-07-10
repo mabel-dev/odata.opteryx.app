@@ -13,6 +13,10 @@ sys.path.insert(
     0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../pyiceberg-firestore-gcs"))
 )
 
+import base64
+import datetime as dt
+import decimal
+import json
 import traceback
 import xml.etree.ElementTree as ET
 from typing import Any
@@ -115,6 +119,61 @@ def _materialize_logical_plan_result(session, logical_plan) -> _MaterializedResu
     return _MaterializedResult(column_names or [], columns, num_rows)
 
 
+def _execute_and_serialize_rows(session, logical_plan, top: int, fetch_top: int):
+    """Execute a logical plan and serialize its rows straight from Draken
+    Morsels to JSON bytes via rugo's native ``write_jsonl``, skipping Python
+    object materialization (``morsel.column(name).to_pylist()`` +
+    ``_sanitize_value_for_odata`` per cell) entirely for the row payload.
+
+    KNOWN GAP (tracked separately, in rugo): ``write_jsonl`` currently emits
+    bare ``NaN``/``Infinity``/``-Infinity`` tokens for non-finite floats,
+    which are not valid JSON and will break any strict JSON parser (incl.
+    every browser's JSON.parse). This function assumes that's fixed
+    rugo-side to null those out, matching what ``_sanitize_value_for_odata``
+    already does for the Python-materialization path. Do not call this for
+    columns that can contain non-finite floats until that lands.
+
+    Returns (value_bytes, num_rows, col_names, has_more_rows):
+      - value_bytes: raw bytes of a JSON array (``[{...},{...}]``), ready to
+        be spliced directly into a response body -- never re-parsed.
+      - num_rows: rows actually returned (post-truncation).
+      - col_names: column names, for logging/consistency with the other paths.
+      - has_more_rows: True if `fetch_top` rows came back and were trimmed to `top`.
+    """
+    from opteryx.constants import ResultType
+    from rugo.jsonl import write_jsonl
+
+    results_generator, result_type = session.execute_logical_plan(logical_plan, connection=session)
+
+    if result_type != ResultType.TABULAR:
+        return b"[]", 0, [], False
+
+    col_names = []
+    jsonl_parts = []
+    for morsel in results_generator:
+        morsel.materialize()
+        if not col_names:
+            col_names = [n.decode("utf-8") if isinstance(n, bytes) else n for n in morsel.column_names]
+        if morsel.num_rows:
+            jsonl_parts.append(write_jsonl(morsel))
+
+    if not jsonl_parts:
+        return b"[]", 0, col_names, False
+
+    # Every row write_jsonl emits is `\n`-terminated, including the last one,
+    # so morsels concatenate safely with no separator needed, and splitting
+    # on `\n` yields the rows plus one trailing empty string to drop.
+    jsonl = b"".join(jsonl_parts)
+    lines = jsonl.split(b"\n")[:-1]
+
+    has_more_rows = fetch_top > top and len(lines) > top
+    if has_more_rows:
+        lines = lines[:top]
+
+    value_bytes = b"[" + b",".join(lines) + b"]"
+    return value_bytes, len(lines), col_names, has_more_rows
+
+
 def _sanitize_value_for_odata(value: Any) -> Any:
     """
     Aggressively normalize values for OData/JSON compatibility.
@@ -124,14 +183,16 @@ def _sanitize_value_for_odata(value: Any) -> Any:
 
     Returns: int, float, str, bool, or None only
     """
-    import datetime as dt
-    import decimal
-
     if value is None:
         return None
 
     # Boolean - check first since bool is subclass of int in Python
     if isinstance(value, bool):
+        return value
+
+    # Strings: return as-is, no heuristic mutation. Checked early (ahead of
+    # numeric/datetime) since text columns dominate most result sets.
+    if isinstance(value, str):
         return value
 
     # Numeric types -> int or float
@@ -164,14 +225,7 @@ def _sanitize_value_for_odata(value: Any) -> Any:
         # Time alone -> convert to today's date with that time in UTC
         return f"1970-01-01T{value.isoformat()}Z"
 
-    # Strings: return as-is, no heuristic mutation
-    if isinstance(value, str):
-        return value
-
     # Binary data -> None (OData clients struggle with binary in JSON)
-    import base64
-    import json
-
     if isinstance(value, (bytes, bytearray)):
         # Return base64-encoded string so binary columns can be represented
         try:
@@ -194,10 +248,7 @@ def _sanitize_value_for_odata(value: Any) -> Any:
 
     # Everything else -> convert to string as fallback
     # This handles UUIDs, enums, custom objects, etc.
-    if not isinstance(value, str):
-        return str(value)
-
-    return value
+    return str(value)
 
 
 def execute_odata_query(
@@ -231,7 +282,9 @@ def execute_odata_query(
 
     Returns:
         dict with keys:
-            - rows: list of dicts containing the result rows
+            - value_bytes: raw bytes of a JSON array (`[{...},{...}]`) of the result
+              rows, pre-serialized -- splice directly into a response body, don't re-parse
+            - row_count: number of rows in value_bytes
             - col_names: list of column names
             - total_count: total count (if requested), None otherwise
             - has_more_rows: bool indicating if result was truncated (more rows exist)
@@ -303,7 +356,8 @@ def execute_odata_query(
     if strategy == "schema_count_split":
         # Special optimization: top=0 with count_requested
         # Fetch schema and count separately, no data rows
-        rows = []
+        value_bytes = b"[]"
+        row_count = 0
         col_names = []
         total_count = None
         has_more_rows = False  # No data rows returned, so never truncated
@@ -365,39 +419,20 @@ def execute_odata_query(
             logger.error(f"Error executing count(*) query for table {table_name}: {exc}\n{tb}")
             raise
     else:
-        # Standard path: execute the optimized logical plan
-        rows = []
+        # Standard path: execute the optimized logical plan, serializing rows
+        # directly from Morsels to JSON bytes (see _execute_and_serialize_rows)
+        # instead of materializing Python dicts.
+        value_bytes = b"[]"
         col_names = []
         has_more_rows = False
+        row_count = 0
 
         try:
-            # Execute the logical plan using Opteryx executor
-            arrow_table = _materialize_logical_plan_result(session, optimized_plan)
-
-            # Get column names from the Arrow table
-            col_names = arrow_table.column_names or []
-            logger.debug(f"Arrow table columns: {col_names}")
-            logger.debug(f"Arrow table num_rows: {arrow_table.num_rows}")
-
-            # Convert Arrow table to list of dicts
-            columns_dict = arrow_table.to_pydict()
-
-            rows = []
-            for i in range(arrow_table.num_rows):
-                row_dict = {}
-                for col in col_names:
-                    value = columns_dict[col][i]
-                    # Sanitize values to ensure OData compatibility
-                    row_dict[col] = _sanitize_value_for_odata(value)
-                rows.append(row_dict)
-
-            logger.debug(f"Created {len(rows)} rows with {len(rows[0].keys()) if rows else 0} keys")
-
-            # Detect truncation: if we fetched top+1 and got that many rows,
-            # we know there are more rows. Trim to top and set has_more_rows flag.
-            if fetch_top > top and len(rows) > top:
-                has_more_rows = True
-                rows = rows[:top]
+            value_bytes, row_count, col_names, has_more_rows = _execute_and_serialize_rows(
+                session, optimized_plan, top, fetch_top
+            )
+            logger.debug(f"Serialized {row_count} rows with columns={col_names}")
+            if has_more_rows:
                 logger.debug(f"Truncated result set to {top} rows; more rows exist")
 
         except Exception as exc:
@@ -448,7 +483,8 @@ def execute_odata_query(
     elapsed_ms = (time.time() - start_time) * 1000
 
     return {
-        "rows": rows,
+        "value_bytes": value_bytes,
+        "row_count": row_count,
         "col_names": col_names,
         "total_count": total_count,
         "has_more_rows": has_more_rows,
@@ -660,7 +696,8 @@ def read_dataset(
         logger.error(f"Error executing OData query for {table_name}: {e}")
         raise
 
-    rows = result["rows"] or []
+    value_bytes = result["value_bytes"] or b"[]"
+    row_count = result["row_count"]
     col_names = result["col_names"] or []
     total_count = result["total_count"]
     has_more_rows = result.get("has_more_rows", False)
@@ -668,43 +705,28 @@ def read_dataset(
     # All paging (LIMIT/OFFSET) should have been pushed down to SQL when
     # possible; no Python-side slicing is necessary.
 
-    # Build column metadata (name + EDM type). Prefer explicit column metadata
-    # when available; otherwise infer from the first non-null row value.
-    columns: List[dict] = []
-    if col_names:
-        for idx, name in enumerate(col_names):
-            edm_type = None
-            # Infer type from first non-null value in rows
-            if edm_type is None:
-                for r in rows:
-                    if isinstance(r, dict) and name in r:
-                        v = r[name]
-                    elif isinstance(r, (list, tuple)):
-                        v = r[idx] if idx < len(r) else None
-                    else:
-                        v = None
-                    if v is not None:
-                        edm_type = column_type_to_edm(type(v))
-                        break
-
-            if edm_type is None:
-                edm_type = "Edm.String"
-
-            columns.append({"name": name, "type": edm_type})
-
-    # Return OData-compliant response with required @odata.context annotation
-    # The fragment must match the EntitySet name declared in the metadata
-    # Per OData spec, top-level resource set can only have: @odata.context, value, @odata.count, @odata.nextLink
-    enriched_rows = rows
-
+    # Build the response body directly as bytes -- value_bytes is already a
+    # complete, valid JSON array (see _execute_and_serialize_rows), so it's
+    # spliced straight in rather than round-tripped through a dict and a
+    # JSON encoder. json.dumps() is only used below for the two small,
+    # dynamic strings (context/nextLink), to get correct escaping without
+    # re-serializing the row payload.
+    #
+    # Per OData spec, the top-level resource set can only have:
+    # @odata.context, value, @odata.count, @odata.nextLink
     # Use underscore form for context URI to match EntitySet name in metadata (CSDL SimpleIdentifier compliance)
     full_resource_fragment = f"{workstream}_{collection}_{dataset}"
-    response = {
-        "@odata.context": f"/api/v4/$metadata#{full_resource_fragment}",
-        "value": enriched_rows,
-    }
+    context_value = f"/api/v4/$metadata#{full_resource_fragment}"
+
+    body_parts = [
+        b'{"@odata.context":',
+        json.dumps(context_value).encode("utf-8"),
+        b',"value":',
+        value_bytes,
+    ]
+
     if total_count is not None:
-        response["@odata.count"] = total_count
+        body_parts.append(b',"@odata.count":' + str(int(total_count)).encode("ascii"))
 
     # Build @odata.nextLink if result was truncated
     if has_more_rows:
@@ -729,13 +751,20 @@ def read_dataset(
 
         # Build the nextLink URL (relative URL in the OData spec)
         next_query = urlencode(query_items)
-        response["@odata.nextLink"] = f"/api/v4/{workstream}/{collection}/{dataset}?{next_query}"
-        logger.debug(f"Added @odata.nextLink: {response['@odata.nextLink']}")
+        next_link = f"/api/v4/{workstream}/{collection}/{dataset}?{next_query}"
+        body_parts.append(b',"@odata.nextLink":' + json.dumps(next_link).encode("utf-8"))
+        logger.debug(f"Added @odata.nextLink: {next_link}")
+
+    body_parts.append(b"}")
 
     logger.debug(
-        f"OData response: {len(enriched_rows)} rows, total_count={total_count}, col_names={col_names}, has_more_rows={has_more_rows}"
+        f"OData response: {row_count} rows, total_count={total_count}, col_names={col_names}, has_more_rows={has_more_rows}"
     )
-    return response
+    return Response(
+        content=b"".join(body_parts),
+        media_type="application/json",
+        headers={"OData-Version": "4.0"},
+    )
 
 
 @router.get(
