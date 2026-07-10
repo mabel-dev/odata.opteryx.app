@@ -17,12 +17,13 @@ def test_groupby_count_plan_construction():
         apply_expr="groupby((region,category), aggregate($count as total))", count_only=True
     )
 
-    # Walk nodes to ensure there is an AggregateAndGroup followed by a COUNT aggregation
+    # Walk nodes to ensure there is a COUNT aggregation (over the grouped rows,
+    # via a plain Aggregate node stacked on top of the AggregateAndGroup)
     found = False
     for n in count_plan._nodes.values():
-        if getattr(n, "node_type", None) and n.node_type.name == "AggregateAndGroup":
-            aggs = getattr(n, "aggregations", None)
-            if aggs and any(a.get("function") == "COUNT" for a in aggs):
+        if getattr(n, "node_type", None) and n.node_type.name in ("AggregateAndGroup", "Aggregate"):
+            aggs = getattr(n, "aggregates", None)
+            if aggs and any(a.value == "COUNT" for a in aggs):
                 found = True
     assert found
 

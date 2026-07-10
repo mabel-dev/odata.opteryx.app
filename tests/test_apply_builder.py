@@ -26,10 +26,10 @@ def test_groupby_with_count_creates_aggregate_node():
             and node.node_type.name == "AggregateAndGroup"
         ):
             # Check grouping and aggregate
-            if node.group_by and node.group_by[0].source_column == "region":
-                assert len(node.aggregations) == 1
-                assert node.aggregations[0]["function"] == "COUNT"
-                assert node.aggregations[0]["alias"] == "total"
+            if node.groups and node.groups[0].source_column == "region":
+                assert len(node.aggregates) == 1
+                assert node.aggregates[0].value == "COUNT"
+                assert node.aggregates[0].alias == "total"
                 found = True
 
     assert found

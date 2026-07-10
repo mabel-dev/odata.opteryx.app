@@ -58,6 +58,37 @@ opteryx.set_default_connector(
 )
 
 
+def _materialize_logical_plan_result(session, logical_plan) -> "pyarrow.Table":
+    """Execute a logical plan on a session and materialize the result as a pyarrow Table.
+
+    ``Session.execute_logical_plan`` returns a ``(results_generator, ResultType)`` tuple
+    rather than a materialized table (opteryx-core commit 6094635a). TABULAR results
+    are streamed as Draken Morsels; concatenate them into a single Arrow table so the
+    rest of this module can keep working with the table-shaped API it expects.
+    """
+    import pyarrow as pa
+    from opteryx.constants import ResultType
+
+    results_generator, result_type = session.execute_logical_plan(logical_plan, connection=session)
+
+    if result_type != ResultType.TABULAR:
+        # NON_TABULAR results (e.g. SET/EXPLAIN) have no rows to return here.
+        return pa.table({})
+
+    # Morsels straight off the logical-plan executor are Cxx-backed; materialize()
+    # is the sanctioned point where they become PyObject-backed for callers outside
+    # the engine (mirrors what Session.execute_to_morsels does for its SQL-text path).
+    arrow_tables = []
+    for morsel in results_generator:
+        morsel.materialize()
+        arrow_tables.append(morsel.to_arrow())
+    if not arrow_tables:
+        return pa.table({})
+    if len(arrow_tables) == 1:
+        return arrow_tables[0]
+    return pa.concat_tables(arrow_tables)
+
+
 def _sanitize_value_for_odata(value: Any) -> Any:
     """
     Aggressively normalize values for OData/JSON compatibility.
@@ -262,7 +293,7 @@ def execute_odata_query(
                 skip=None,
                 apply_expr=apply_expr,
             )
-            schema_table = session.execute_logical_plan(schema_plan, connection=session)
+            schema_table = _materialize_logical_plan_result(session, schema_plan)
             col_names = schema_table.column_names or []
             logger.debug(f"Got schema from query: {col_names}")
         except Exception as exc:
@@ -281,7 +312,7 @@ def execute_odata_query(
                 apply_expr=apply_expr,
                 count_only=True,
             )
-            count_table = session.execute_logical_plan(count_plan, connection=session)
+            count_table = _materialize_logical_plan_result(session, count_plan)
             # Strict validation: count query MUST return a 1x1 numeric result. Fail fast with clear error otherwise.
             if not count_table:
                 raise ValueError(f"Count query returned no table object for {table_name}")
@@ -315,7 +346,7 @@ def execute_odata_query(
 
         try:
             # Execute the logical plan using Opteryx executor
-            arrow_table = session.execute_logical_plan(optimized_plan, connection=session)
+            arrow_table = _materialize_logical_plan_result(session, optimized_plan)
 
             # Get column names from the Arrow table
             col_names = arrow_table.column_names or []
@@ -363,7 +394,7 @@ def execute_odata_query(
                     apply_expr=apply_expr,
                     count_only=True,
                 )
-                arrow_table = session.execute_logical_plan(count_plan, connection=session)
+                arrow_table = _materialize_logical_plan_result(session, count_plan)
                 # Strict validation: count query MUST return a 1x1 numeric result. Fail fast with clear error otherwise.
                 if not arrow_table:
                     raise ValueError(f"Count query returned no table object for {table_name}")

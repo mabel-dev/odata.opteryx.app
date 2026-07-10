@@ -21,10 +21,10 @@ def test_count_only_plan_has_count_aggregate():
         if not node:
             continue
 
-        if getattr(node, "node_type", None) == LogicalPlanStepType.AggregateAndGroup:
-            aggs = getattr(node, "aggregations", None)
+        if getattr(node, "node_type", None) == LogicalPlanStepType.Aggregate:
+            aggs = getattr(node, "aggregates", None)
             assert aggs is not None
-            assert any(a.get("function") == "COUNT" for a in aggs)
+            assert any(a.value == "COUNT" for a in aggs)
             found = True
             break
 
