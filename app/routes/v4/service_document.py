@@ -265,26 +265,7 @@ def get_service_document(
     claims = request.state.claims
     identity = claims.get("identity")
 
-    if not identity:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing token identity"
-        )
-
-    # Determine access policies from JWT "policies" claim (do not rely on a "permissions" key).
-    from app.auth.permissions import get_access_policies_from_claims
-
-    access_policies_list = get_access_policies_from_claims(claims)
-
-    # Group access policies by workspace (extract workspace from patterns like "benchmarks.*")
-    access_policies: dict[str, list[str]] = {}  # workspace -> [roles]
-    for p in access_policies_list:
-        role = p.get("role")
-        pattern = p.get("pattern")
-        policy = p.get("policy")
-        if not role or not pattern:
-            continue
-        workspace = pattern.split(".")[0] if "." in pattern else pattern
-        access_policies.setdefault(workspace, []).append((role, policy))
+    from app.auth.permissions import ANONYMOUS_EXEMPT_COLLECTION, ANONYMOUS_EXEMPT_WORKSTREAM
 
     db = _get_firestore_client(database="catalogs")
     if db is None:
@@ -293,46 +274,77 @@ def get_service_document(
             detail="dependent service unavailable: firestore",
         )
 
-    # Determine which workspace ids to query (access workspaces + public)
-    workspace_ids = set(access_policies.keys()) | {"public"}
-
-    # Collect all datasets
-    all_datasets: list[DatasetInfo] = []
-    all_datasets.extend(_get_personal_datasets(db, identity))
-    all_datasets.extend(_get_workspace_datasets(db, workspace_ids))
-
-    # Filter datasets by read permission
-    filtered_datasets: list[DatasetInfo] = []
-
-    for dataset in all_datasets:
-        # Personal datasets - full access to own resources
-        if dataset.resource == f"personal.{identity}" or dataset.resource.startswith(
-            f"personal.{identity}."
-        ):
-            # Role and policy should already be set for personal datasets
-            filtered_datasets.append(dataset)
-            continue
-
-        # If dataset is a personal workspace for someone else, do not allow access
-        if dataset.resource.startswith("personal."):
-            continue
-
-        # Public datasets - read-only for all users
-        if dataset.resource.startswith("public."):
-            dataset.role = "reader"
-            dataset.policy = "always-allow-public-read"
-            filtered_datasets.append(dataset)
-            continue
-
-        # Workspace datasets - check if user has any read role for this workspace
-        workspace = dataset.resource.split(".")[0]
-        role_policy_pairs = access_policies.get(workspace, [])
-        for role, policy in role_policy_pairs:
-            if _role_allows_read(role):
-                dataset.role = role
-                dataset.policy = policy
+    if identity is None:
+        # Anonymous callers (no Authorization header at all — see
+        # app.auth.deps.require_authentication) only ever see the one
+        # workstream.collection reachable without credentials.
+        all_datasets = _get_workspace_datasets(db, {ANONYMOUS_EXEMPT_WORKSTREAM})
+        filtered_datasets = []
+        for dataset in all_datasets:
+            if (
+                dataset.workspace == ANONYMOUS_EXEMPT_WORKSTREAM
+                and dataset.collection == ANONYMOUS_EXEMPT_COLLECTION
+            ):
+                dataset.role = "reader"
+                dataset.policy = "always-allow-public-security-anonymous"
                 filtered_datasets.append(dataset)
-                break
+    else:
+        # Determine access policies from JWT "policies" claim (do not rely on a "permissions" key).
+        from app.auth.permissions import get_access_policies_from_claims
+
+        access_policies_list = get_access_policies_from_claims(claims)
+
+        # Group access policies by workspace (extract workspace from patterns like "benchmarks.*")
+        access_policies: dict[str, list[str]] = {}  # workspace -> [roles]
+        for p in access_policies_list:
+            role = p.get("role")
+            pattern = p.get("pattern")
+            policy = p.get("policy")
+            if not role or not pattern:
+                continue
+            workspace = pattern.split(".")[0] if "." in pattern else pattern
+            access_policies.setdefault(workspace, []).append((role, policy))
+
+        # Determine which workspace ids to query (access workspaces + public)
+        workspace_ids = set(access_policies.keys()) | {"public"}
+
+        # Collect all datasets
+        all_datasets: list[DatasetInfo] = []
+        all_datasets.extend(_get_personal_datasets(db, identity))
+        all_datasets.extend(_get_workspace_datasets(db, workspace_ids))
+
+        # Filter datasets by read permission
+        filtered_datasets: list[DatasetInfo] = []
+
+        for dataset in all_datasets:
+            # Personal datasets - full access to own resources
+            if dataset.resource == f"personal.{identity}" or dataset.resource.startswith(
+                f"personal.{identity}."
+            ):
+                # Role and policy should already be set for personal datasets
+                filtered_datasets.append(dataset)
+                continue
+
+            # If dataset is a personal workspace for someone else, do not allow access
+            if dataset.resource.startswith("personal."):
+                continue
+
+            # Public datasets - read-only for all users
+            if dataset.resource.startswith("public."):
+                dataset.role = "reader"
+                dataset.policy = "always-allow-public-read"
+                filtered_datasets.append(dataset)
+                continue
+
+            # Workspace datasets - check if user has any read role for this workspace
+            workspace = dataset.resource.split(".")[0]
+            role_policy_pairs = access_policies.get(workspace, [])
+            for role, policy in role_policy_pairs:
+                if _role_allows_read(role):
+                    dataset.role = role
+                    dataset.policy = policy
+                    filtered_datasets.append(dataset)
+                    break
 
     entity_sets = []
     for dataset in filtered_datasets:
