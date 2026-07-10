@@ -58,35 +58,60 @@ opteryx.set_default_connector(
 )
 
 
-def _materialize_logical_plan_result(session, logical_plan) -> "pyarrow.Table":
-    """Execute a logical plan on a session and materialize the result as a pyarrow Table.
+class _MaterializedResult:
+    """Minimal pyarrow.Table-alike (column_names/num_rows/to_pydict()) built from
+    Draken Morsels without a pyarrow dependency.
+
+    opteryx-core dropped pyarrow from its reader/planner (commit 6094635a) and
+    ``Morsel.to_arrow()``/``Vector.to_arrow()`` raise ImportError when pyarrow
+    isn't installed — which it deliberately no longer is here. ``Vector.to_pylist()``
+    has no such dependency, so results are assembled from that instead.
+    """
+
+    __slots__ = ("column_names", "num_rows", "_columns")
+
+    def __init__(self, column_names, columns, num_rows):
+        self.column_names = column_names
+        self.num_rows = num_rows
+        self._columns = columns  # name -> list of values, same order as column_names
+
+    def to_pydict(self):
+        return dict(self._columns)
+
+
+def _materialize_logical_plan_result(session, logical_plan) -> _MaterializedResult:
+    """Execute a logical plan on a session and materialize the result as a table-alike.
 
     ``Session.execute_logical_plan`` returns a ``(results_generator, ResultType)`` tuple
     rather than a materialized table (opteryx-core commit 6094635a). TABULAR results
-    are streamed as Draken Morsels; concatenate them into a single Arrow table so the
-    rest of this module can keep working with the table-shaped API it expects.
+    are streamed as Draken Morsels; concatenate them into a single in-memory result so
+    the rest of this module can keep working with the table-shaped API it expects.
     """
-    import pyarrow as pa
     from opteryx.constants import ResultType
 
     results_generator, result_type = session.execute_logical_plan(logical_plan, connection=session)
 
     if result_type != ResultType.TABULAR:
         # NON_TABULAR results (e.g. SET/EXPLAIN) have no rows to return here.
-        return pa.table({})
+        return _MaterializedResult([], {}, 0)
 
-    # Morsels straight off the logical-plan executor are Cxx-backed; materialize()
-    # is the sanctioned point where they become PyObject-backed for callers outside
-    # the engine (mirrors what Session.execute_to_morsels does for its SQL-text path).
-    arrow_tables = []
+    column_names = None
+    columns = {}
+    num_rows = 0
     for morsel in results_generator:
+        # Morsels straight off the logical-plan executor are Cxx-backed; materialize()
+        # is the sanctioned point where they become PyObject-backed for callers outside
+        # the engine (mirrors what Session.execute_to_morsels does for its SQL-text path).
         morsel.materialize()
-        arrow_tables.append(morsel.to_arrow())
-    if not arrow_tables:
-        return pa.table({})
-    if len(arrow_tables) == 1:
-        return arrow_tables[0]
-    return pa.concat_tables(arrow_tables)
+        names = [n.decode("utf-8") if isinstance(n, bytes) else n for n in morsel.column_names]
+        if column_names is None:
+            column_names = names
+            columns = {name: [] for name in names}
+        for name in names:
+            columns[name].extend(morsel.column(name).to_pylist())
+        num_rows += morsel.num_rows
+
+    return _MaterializedResult(column_names or [], columns, num_rows)
 
 
 def _sanitize_value_for_odata(value: Any) -> Any:
