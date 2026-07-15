@@ -16,13 +16,14 @@ dependencies = [
     "google-cloud-storage==3.12.1",
     "orjson==3.11.9",
     "opteryx-catalog==0.4.*",
-    "opteryx-core>=0.9.14,<0.10",
-    "python-dateutil==2.9.0.post0post0",
+    "opteryx-core>=0.9.18,<0.10",
+    "python-dateutil==2.9.0.post0",
     "python-jose[cryptography]==3.5.0",
     "python-multipart==0.0.32",
     "requests==2.34.2",
     "sly==0.5",
     "uvicorn[standard]==0.38.0",
+    "valkey==6.1.1",
 ]
 
 [tool.isort]
