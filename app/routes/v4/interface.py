@@ -150,28 +150,38 @@ def _execute_and_serialize_rows(session, logical_plan, top: int, fetch_top: int)
 
     col_names = []
     jsonl_parts = []
+    total_rows = 0
     for morsel in results_generator:
         morsel.materialize()
         if not col_names:
             col_names = [n.decode("utf-8") if isinstance(n, bytes) else n for n in morsel.column_names]
         if morsel.num_rows:
             jsonl_parts.append(write_jsonl(morsel))
+            total_rows += morsel.num_rows
 
     if not jsonl_parts:
         return b"[]", 0, col_names, False
 
     # Every row write_jsonl emits is `\n`-terminated, including the last one,
-    # so morsels concatenate safely with no separator needed, and splitting
-    # on `\n` yields the rows plus one trailing empty string to drop.
+    # so morsels concatenate safely with no separator needed. Avoid
+    # `split(b"\n")` here -- it would allocate a list of up to `top` (25k)
+    # byte-slice objects on every request just to drop a trailing row that,
+    # by construction (fetch_top == top + 1), is at most one row. Trim with
+    # `rfind` instead and turn the remaining newlines into commas in a single
+    # pass.
     jsonl = b"".join(jsonl_parts)
-    lines = jsonl.split(b"\n")[:-1]
-
-    has_more_rows = fetch_top > top and len(lines) > top
+    has_more_rows = fetch_top > top and total_rows > top
     if has_more_rows:
-        lines = lines[:top]
+        end = len(jsonl) - 1  # position of the trailing '\n' of the last row
+        for _ in range(total_rows - top):
+            end = jsonl.rfind(b"\n", 0, end)
+        jsonl = jsonl[: end + 1]
+        num_rows = top
+    else:
+        num_rows = total_rows
 
-    value_bytes = b"[" + b",".join(lines) + b"]"
-    return value_bytes, len(lines), col_names, has_more_rows
+    value_bytes = b"[" + jsonl[:-1].replace(b"\n", b",") + b"]"
+    return value_bytes, num_rows, col_names, has_more_rows
 
 
 def _sanitize_value_for_odata(value: Any) -> Any:
