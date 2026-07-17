@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "opteryx-odata"
-version = "0.0.19"
+version = "0.0.20"
 description = "Opteryx OData Service"
 requires-python = '>=3.14'
 dependencies = [
@@ -16,7 +16,7 @@ dependencies = [
     "google-cloud-storage==3.9.0",
     "orjson==3.11.7",
     "opteryx-catalog==0.4.*",
-    "opteryx-core>=0.9.18,<0.10",
+    "opteryx-core>=0.9.22,<0.10",
     "python-dateutil==2.9.0.post0",
     "python-jose[cryptography]==3.5.0",
     "python-multipart==0.0.22",
