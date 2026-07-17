@@ -7,6 +7,7 @@ ODataLogicalPlanBuilder can use.
 """
 
 import sys
+import threading
 from pathlib import Path
 from typing import List
 from typing import Optional
@@ -20,6 +21,23 @@ if _vendored_path not in sys.path:
 
 from odata_query.grammar import ODataLexer
 from odata_query.grammar import ODataParser
+
+# SLY's Parser.parse() stores parse state (state/symstack/statestack) as instance
+# attributes, so a single lexer/parser instance isn't safe to share across concurrent
+# requests. Building the SLY grammar/parse tables is also non-trivial work best done
+# once. Cache one instance per thread and reuse it instead of rebuilding per request.
+_thread_local = threading.local()
+
+
+def _get_lexer_and_parser():
+    try:
+        return _thread_local.lexer, _thread_local.parser
+    except AttributeError:
+        lexer = ODataLexer()
+        parser = ODataParser()
+        _thread_local.lexer = lexer
+        _thread_local.parser = parser
+        return lexer, parser
 
 
 class ODataExpressionParser:
@@ -39,8 +57,7 @@ class ODataExpressionParser:
 
     def __init__(self):
         """Initialize the parser."""
-        self.lexer = ODataLexer()
-        self.parser = ODataParser()
+        self.lexer, self.parser = _get_lexer_and_parser()
 
     def parse_filter(self, filter_expr: str) -> Optional[Node]:
         """Parse an OData $filter expression into an Opteryx expression node.
