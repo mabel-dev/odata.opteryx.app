@@ -539,7 +539,7 @@ def read_dataset(
     filter: Optional[str] = Query(
         None,
         alias="$filter",
-        description="OData $filter expression for row filtering. Operators: eq (equal), ne (not equal), lt/le/gt/ge (comparison), and/or/not (logical), contains/startswith/endswith (string). Case-sensitive. Example: vendor eq 'Oracle' and price gt 100"
+        description="OData $filter expression for row filtering. Operators: eq (equal), ne (not equal), lt/le/gt/ge (comparison), and/or/not (logical), contains/startswith/endswith (string). Case-sensitive. Example: vendor eq 'Oracle' and price gt 100. Date/datetime literals must be unquoted per the OData v4 spec, e.g. shipped_date gt 2024-01-01 — a quoted date is compared as a string and raises a type-mismatch error."
     ),
     top: Optional[int] = Query(
         None,

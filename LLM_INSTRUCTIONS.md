@@ -17,11 +17,12 @@ Base URL: `GET https://odata.opteryx.app/api/v4/{workspace}/{collection}/{datase
 1. **MANDATORY — `$top` MUST be provided**. Use integer 1–10000. If the user does not supply `$top`, choose a conservative default (e.g., `$top=50`).
 2. **String values are case-sensitive**: `vendor eq 'Oracle'` ≠ `vendor eq 'oracle'`
 3. **Quote strings, not numbers**: `status eq 'active'` and `age gt 21`
-4. **Use exact column names** from schema
-5. **Use `$orderby` with pagination** for consistent results
-6. **`$expand` MUST NOT be generated**.
-7. **Null filtering requires explicit `or x eq null`**: The `ne` operator excludes nulls (SQL 3VL semantics). Use `(age ne 21) or (age eq null)` to include nulls.
-8. **LIKE patterns are literal**: Functions like `contains()`, `startswith()`, `endswith()` do NOT treat `%` or `_` as wildcards. Example: `contains(sku, 'A_B')` matches the literal string `'A_B'`, not a pattern.
+4. **Dates/datetimes are unquoted, not strings**: `shipped_date gt 2024-01-01` or `created_at ge 2024-01-01T00:00:00Z`. Quoting a date (`shipped_date gt '2024-01-01'`) compares it as text and raises a type-mismatch error against a DATE/TIMESTAMP column.
+5. **Use exact column names** from schema
+6. **Use `$orderby` with pagination** for consistent results
+7. **`$expand` MUST NOT be generated**.
+8. **Null filtering requires explicit `or x eq null`**: The `ne` operator excludes nulls (SQL 3VL semantics). Use `(age ne 21) or (age eq null)` to include nulls.
+9. **LIKE patterns are literal**: Functions like `contains()`, `startswith()`, `endswith()` do NOT treat `%` or `_` as wildcards. Example: `contains(sku, 'A_B')` matches the literal string `'A_B'`, not a pattern.
 
 ## Common Patterns
 
