@@ -265,7 +265,7 @@ def get_service_document(
     claims = request.state.claims
     identity = claims.get("identity")
 
-    from app.auth.permissions import ANONYMOUS_EXEMPT_COLLECTION, ANONYMOUS_EXEMPT_WORKSTREAM
+    from app.auth.permissions import ANONYMOUS_EXEMPT_PAIRS, ANONYMOUS_EXEMPT_WORKSTREAM
 
     db = _get_firestore_client(database="catalogs")
     if db is None:
@@ -276,17 +276,14 @@ def get_service_document(
 
     if identity is None:
         # Anonymous callers (no Authorization header at all — see
-        # app.auth.deps.require_authentication) only ever see the one
-        # workstream.collection reachable without credentials.
+        # app.auth.deps.require_authentication) only ever see the
+        # workstream.collection pairs reachable without credentials.
         all_datasets = _get_workspace_datasets(db, {ANONYMOUS_EXEMPT_WORKSTREAM})
         filtered_datasets = []
         for dataset in all_datasets:
-            if (
-                dataset.workspace == ANONYMOUS_EXEMPT_WORKSTREAM
-                and dataset.collection == ANONYMOUS_EXEMPT_COLLECTION
-            ):
+            if (dataset.workspace, dataset.collection) in ANONYMOUS_EXEMPT_PAIRS:
                 dataset.role = "reader"
-                dataset.policy = "always-allow-public-security-anonymous"
+                dataset.policy = "always-allow-public-anonymous"
                 filtered_datasets.append(dataset)
     else:
         # Determine access policies from JWT "policies" claim (do not rely on a "permissions" key).

@@ -13,17 +13,22 @@ from app.logging import get_logger
 
 logger = get_logger()
 
-# The one workstream.collection that's reachable with zero credentials (see
+# The workstream.collection pairs reachable with zero credentials (see
 # app.auth.deps.require_authentication, which lets anonymous requests through
 # rather than rejecting them). Every endpoint that accepts anonymous callers
-# must still scope them down to exactly this pair itself.
+# must still scope them down to exactly these pairs itself. Only add a pair
+# here for datasets that are intentionally public (e.g. open data backing
+# public-facing dashboards) — this is the full anonymous-access surface.
 ANONYMOUS_EXEMPT_WORKSTREAM = "public"
-ANONYMOUS_EXEMPT_COLLECTION = "security"
+ANONYMOUS_EXEMPT_PAIRS = {
+    ("public", "security"),
+    ("public", "geopolitics"),
+}
 
 
 def is_anonymous_exempt(workstream: Optional[str], collection: Optional[str]) -> bool:
     """Whether (workstream, collection) is reachable without authentication."""
-    return workstream == ANONYMOUS_EXEMPT_WORKSTREAM and collection == ANONYMOUS_EXEMPT_COLLECTION
+    return (workstream, collection) in ANONYMOUS_EXEMPT_PAIRS
 
 
 def convert_policies_for_opteryx(policies: Optional[list]) -> List[Dict[str, str]]:
