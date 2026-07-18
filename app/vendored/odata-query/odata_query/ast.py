@@ -174,11 +174,14 @@ class Date(_Literal):
         from opteryx.expression import NodeType
         from opteryx.models import Node
         from opteryx.types.logical_type import ARRAY, BOOLEAN, DATE, FLOAT64, INT64, INTERVAL, NULL, TIME, TIMESTAMP, VARCHAR
+        from opteryx.types.timestamps._datetime_conversion import date_to_int64_days
 
         # Try to parse ISO string to datetime for proper filtering
         parsed = try_parse_iso(self.val)
         if parsed is not None:
-            return Node(NodeType.LITERAL, type=DATE, value=parsed)
+            # DATE literals must be encoded as int32 days-since-epoch, matching
+            # how Opteryx's own CAST(... AS DATE) folding stores them.
+            return Node(NodeType.LITERAL, type=DATE, value=date_to_int64_days(parsed))
         # Fallback to string if parsing fails
         return Node(NodeType.LITERAL, type=VARCHAR, value=self.val)
 
@@ -216,11 +219,14 @@ class DateTime(_Literal):
         from opteryx.expression import NodeType
         from opteryx.models import Node
         from opteryx.types.logical_type import ARRAY, BOOLEAN, DATE, FLOAT64, INT64, INTERVAL, NULL, TIME, TIMESTAMP, VARCHAR
+        from opteryx.types.timestamps._datetime_conversion import timestamp_to_int64_us
 
         # Try to parse ISO string to datetime for proper filtering
         parsed = try_parse_iso(self.val)
         if parsed is not None:
-            return Node(NodeType.LITERAL, type=TIMESTAMP(), value=parsed)
+            # TIMESTAMP literals must be encoded as int64 microseconds-since-epoch,
+            # matching how Opteryx's own CAST(... AS TIMESTAMP) folding stores them.
+            return Node(NodeType.LITERAL, type=TIMESTAMP(), value=timestamp_to_int64_us(parsed))
         # Fallback to string if parsing fails
         return Node(NodeType.LITERAL, type=VARCHAR, value=self.val)
 

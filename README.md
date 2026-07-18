@@ -310,12 +310,20 @@ When LLMs or automated tools generate OData queries, be aware of these type-coer
 
 5. **DECIMAL precision:** Large DECIMAL values are converted to float, losing precision beyond ~15 significant digits. If precision is critical, use the SQL interface directly.
 
+6. **Date/datetime literals must be unquoted**, per the OData v4 ABNF:
+   ```
+   $filter=shipped_date gt 2024-01-01               # Correct
+   $filter=shipped_date gt '2024-01-01'             # Incorrect — compared as VARCHAR, raises a type-mismatch error
+   ```
+   This applies to `Edm.Date` (`2024-01-01`) and `Edm.DateTimeOffset` (`2024-01-01T00:00:00Z`) values alike.
+
 ### Important Notes
 
 - **Case-Sensitive Filtering:** String comparisons in `$filter` are case-sensitive. `eq 'Oracle'` will not match `'oracle'`.
 - **Column Names:** Reference columns by their exact names in the dataset schema.
 - **Type Coercion:** Numeric values in comparisons should not be quoted (e.g., `age gt 21` not `age gt '21'`).
 - **String Values:** Always quote string literals (e.g., `vendor eq 'ABC'`).
+- **Date/Datetime Values:** Never quote date or datetime literals (e.g., `shipped_date gt 2024-01-01`, not `shipped_date gt '2024-01-01'`). A quoted date literal is compared as a string and raises a type-mismatch error against a DATE/TIMESTAMP column.
 - **Maximum Results & Defaults:** Default `$top` is `100` if not specified. Maximum allowed is 10,000 records per request. While `$top` is optional, we recommend specifying it in client-generated queries to avoid unintended large responses.
 - **`$expand` and `Nav/$count` ordering:** `$expand` (navigation property expansion) and ordering by `Nav/$count` are currently **not implemented**. Queries using `$expand` or ordering by `Nav/$count` will produce an error. Use precomputed columns (for example `number_of_moons`) as a workaround for ordering by counts until `$expand` is implemented.
 - **Modulo and numeric coercion:** Currently, mixing floating/double and integer operands with the `mod` operator can raise an `IncorrectTypeError` (e.g., `round(n_nationkey) mod 5` where `ROUND()` yields DOUBLE). Prefer integer operands or explicit casts. This is a tracked issue and will be fixed by implementing numeric promotion for `%`.
