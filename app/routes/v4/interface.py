@@ -84,7 +84,9 @@ class _MaterializedResult:
         return dict(self._columns)
 
 
-def _materialize_logical_plan_result(session, logical_plan) -> _MaterializedResult:
+def _materialize_logical_plan_result(
+    session, logical_plan, visibility_filters=None
+) -> _MaterializedResult:
     """Execute a logical plan on a session and materialize the result as a table-alike.
 
     ``Session.execute_logical_plan`` returns a ``(results_generator, ResultType)`` tuple
@@ -94,7 +96,9 @@ def _materialize_logical_plan_result(session, logical_plan) -> _MaterializedResu
     """
     from opteryx.constants import ResultType
 
-    results_generator, result_type = session.execute_logical_plan(logical_plan, connection=session)
+    results_generator, result_type = session.execute_logical_plan(
+        logical_plan, connection=session, visibility_filters=visibility_filters
+    )
 
     if result_type != ResultType.TABULAR:
         # NON_TABULAR results (e.g. SET/EXPLAIN) have no rows to return here.
@@ -119,7 +123,9 @@ def _materialize_logical_plan_result(session, logical_plan) -> _MaterializedResu
     return _MaterializedResult(column_names or [], columns, num_rows)
 
 
-def _execute_and_serialize_rows(session, logical_plan, top: int, fetch_top: int):
+def _execute_and_serialize_rows(
+    session, logical_plan, top: int, fetch_top: int, visibility_filters=None
+):
     """Execute a logical plan and serialize its rows straight from Draken
     Morsels to JSON bytes via rugo's native ``write_jsonl``, skipping Python
     object materialization (``morsel.column(name).to_pylist()`` +
@@ -143,7 +149,9 @@ def _execute_and_serialize_rows(session, logical_plan, top: int, fetch_top: int)
     from opteryx.constants import ResultType
     from rugo.jsonl import write_jsonl
 
-    results_generator, result_type = session.execute_logical_plan(logical_plan, connection=session)
+    results_generator, result_type = session.execute_logical_plan(
+        logical_plan, connection=session, visibility_filters=visibility_filters
+    )
 
     if result_type != ResultType.TABULAR:
         return b"[]", 0, [], False
@@ -273,6 +281,7 @@ def execute_odata_query(
     identity: Optional[str] = None,
     access_policies: Optional[List[dict]] = None,
     billing_account: Optional[str] = None,
+    visibility_filters: Optional[dict] = None,
 ) -> dict:
     """Execute an OData query and return results.
 
@@ -390,7 +399,9 @@ def execute_odata_query(
                 skip=None,
                 apply_expr=apply_expr,
             )
-            schema_table = _materialize_logical_plan_result(session, schema_plan)
+            schema_table = _materialize_logical_plan_result(
+                session, schema_plan, visibility_filters=visibility_filters
+            )
             col_names = schema_table.column_names or []
             logger.debug(f"Got schema from query: {col_names}")
         except Exception as exc:
@@ -409,7 +420,9 @@ def execute_odata_query(
                 apply_expr=apply_expr,
                 count_only=True,
             )
-            count_table = _materialize_logical_plan_result(session, count_plan)
+            count_table = _materialize_logical_plan_result(
+                session, count_plan, visibility_filters=visibility_filters
+            )
             # Strict validation: count query MUST return a 1x1 numeric result. Fail fast with clear error otherwise.
             if not count_table:
                 raise ValueError(f"Count query returned no table object for {table_name}")
@@ -446,7 +459,7 @@ def execute_odata_query(
 
         try:
             value_bytes, row_count, col_names, has_more_rows = _execute_and_serialize_rows(
-                session, optimized_plan, top, fetch_top
+                session, optimized_plan, top, fetch_top, visibility_filters=visibility_filters
             )
             logger.debug(f"Serialized {row_count} rows with columns={col_names}")
             if has_more_rows:
@@ -472,7 +485,9 @@ def execute_odata_query(
                     apply_expr=apply_expr,
                     count_only=True,
                 )
-                arrow_table = _materialize_logical_plan_result(session, count_plan)
+                arrow_table = _materialize_logical_plan_result(
+                    session, count_plan, visibility_filters=visibility_filters
+                )
                 # Strict validation: count query MUST return a 1x1 numeric result. Fail fast with clear error otherwise.
                 if not arrow_table:
                     raise ValueError(f"Count query returned no table object for {table_name}")
@@ -671,12 +686,19 @@ def read_dataset(
 
     # Determine the caller's identity/access policies from their JWT claims so
     # Opteryx's permission checks are evaluated against the actual caller.
-    from app.auth.permissions import get_access_policies_from_claims, is_anonymous_exempt
+    from app.auth.permissions import (
+        access_policies_for_query,
+        is_anonymous_exempt,
+        visibility_filters_from_claims,
+    )
 
     claims = getattr(request.state, "claims", None) or {}
     identity = claims.get("identity")
-    access_policies = get_access_policies_from_claims(claims)
+    access_policies = access_policies_for_query(claims)
     billing_account = claims.get("billing_account")
+    # Row-level scoping. Always supplied: it denies rather than allows when the caller's
+    # billing account is unknown, and Opteryx leaves unlisted relations unfiltered.
+    visibility_filters = visibility_filters_from_claims(claims)
 
     if identity is None and not is_anonymous_exempt(workstream, collection):
         raise HTTPException(
@@ -698,6 +720,7 @@ def read_dataset(
             identity=identity,
             access_policies=access_policies,
             billing_account=billing_account,
+            visibility_filters=visibility_filters,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=f"Invalid query: {str(e)}")

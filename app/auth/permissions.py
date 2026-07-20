@@ -31,6 +31,43 @@ def is_anonymous_exempt(workstream: Optional[str], collection: Optional[str]) ->
     return (workstream, collection) in ANONYMOUS_EXEMPT_PAIRS
 
 
+# Entitlement that lifts row-level filtering entirely. Holders see every account's rows.
+DATA_ADMIN_ENTITLEMENT = "data_admin"
+
+# Some consumers namespace entitlements (authorize.opteryx uses
+# "urn:opteryx:entitlement:user_admin"); the issuer currently emits them bare. Accept
+# either so this does not silently stop matching if the issuer starts namespacing.
+_ENTITLEMENT_URN_PREFIX = "urn:opteryx:entitlement:"
+
+
+def entitlements_from_claims(claims: Dict[str, Any]) -> set:
+    """Extract the caller's entitlements as a set of bare names.
+
+    The identity store holds these as a list (`entitlements: ["user_admin",
+    "data_admin"]`) but the issuer flattens them into a single comma-delimited
+    `entitlement` claim. Both shapes are accepted, as is the plural key.
+
+    Splitting on the delimiter is safe here, unlike for `scope` — entitlements are
+    multi-valued by definition, so a delimiter is unambiguous. `scope` carries exactly
+    one value (the billing account), which is why billing_account_from_claims refuses
+    to split rather than guessing which half to bill.
+    """
+    raw = claims.get("entitlement") or claims.get("entitlements") or ()
+
+    if isinstance(raw, str):
+        values = [v for v in raw.replace(",", " ").split() if v]
+    elif isinstance(raw, (list, tuple, set)):
+        values = [str(v).strip() for v in raw if str(v).strip()]
+    else:
+        logger.warning(f"Ignoring entitlement claim of unexpected type {type(raw).__name__}")
+        return set()
+
+    return {
+        v[len(_ENTITLEMENT_URN_PREFIX) :] if v.startswith(_ENTITLEMENT_URN_PREFIX) else v
+        for v in values
+    }
+
+
 def billing_account_from_claims(claims: Dict[str, Any]) -> Optional[str]:
     """Extract the caller's billing account from the JWT "scope" claim.
 
@@ -71,6 +108,96 @@ def billing_account_from_claims(claims: Dict[str, Any]) -> Optional[str]:
         return None
 
     return values[0]
+
+
+# The base table holding billing events. Row-level filters MUST be keyed on this and
+# not on the views built over it (opteryx.ops.query_count_billing, storage_billing,
+# processed_billing). Opteryx expands a view into scans of its underlying tables before
+# the binder applies visibility filters, and the expansion randomises the view's alias
+# but not the relation name — so a filter keyed on a view name matches no scan at all.
+# Because unmatched relations are NOT filtered (see below), that failure is silent.
+# Filtering the base table is also the correct semantics: rows are restricted before
+# the views aggregate, so the totals are per-account rather than per-account slices of
+# a global total.
+BILLING_RELATION = "opteryx.ops.billing"
+
+# Relations any AUTHENTICATED caller may read, regardless of the policies in their token.
+# This is deliberately not the same as anonymous access (see ANONYMOUS_EXEMPT_PAIRS):
+# row-level filtering scopes these to the caller's own billing account, which is only
+# possible once we know who the caller is. An anonymous caller has no account to scope
+# to and so must get nothing — see visibility_filters_from_claims, which denies rather
+# than allows when the account is unknown.
+#
+# The views are listed alongside the base table because table-level permission is checked
+# against the relation named in the plan, which is the view when a view is queried.
+AUTHENTICATED_READ_RELATIONS = (
+    BILLING_RELATION,
+    "opteryx.ops.query_count_billing",
+    "opteryx.ops.storage_billing",
+    "opteryx.ops.processed_billing",
+)
+
+
+def access_policies_for_query(claims: Dict[str, Any]) -> List[Dict[str, str]]:
+    """Access policies for executing a query, including authenticated-read grants.
+
+    This is the caller's own policies plus a reader grant on AUTHENTICATED_READ_RELATIONS
+    when the caller is authenticated.
+
+    Kept separate from `get_access_policies_from_claims` on purpose: the $metadata
+    authorization path collapses a policy pattern to its workstream
+    (`pattern.split(".")[0]`), so feeding these grants through there would widen access
+    to every dataset in the workstream rather than the named relations. Opteryx's own
+    check fnmatches the full relation name, so at the query path the grant stays exact.
+    """
+    policies = list(get_access_policies_from_claims(claims))
+
+    if claims.get("identity"):
+        policies.extend({"pattern": r, "role": "reader"} for r in AUTHENTICATED_READ_RELATIONS)
+
+    return policies
+
+
+# Deny-all predicate. Opteryx documents an empty list as "no rows visible", but that
+# path builds an `Eq(True, False)` literal comparison which the c-native execution engine
+# cannot compile — it raises NotSupportedError ("filter predicate outside the c-native
+# kernel set") instead of returning nothing, so callers get a 500 rather than an empty
+# result. Matching the account against a value it can never hold achieves the same thing
+# through a kernel that does exist. A NUL byte cannot appear in a JWT claim or a Firestore
+# collection name, so nothing can collide with this.
+_DENY_ALL_ACCOUNT = "\x00__deny_all__"
+
+
+def visibility_filters_from_claims(claims: Dict[str, Any]) -> Dict[str, Any]:
+    """Build Opteryx row-level visibility filters for the caller.
+
+    Opteryx keys these by relation name and applies them only to relations present in
+    the dict — an absent relation is returned UNFILTERED. That makes this fail-open, so
+    the billing relation is always given an entry: either a real predicate, or one that
+    matches nothing. Never return `{}` for a caller we cannot identify; that would serve
+    every account's billing data rather than none of it.
+
+    Filters for relations the query never touches cost nothing, so this is applied to
+    every request rather than being special-cased per endpoint.
+
+    Callers holding the data_admin entitlement are exempt: they get an empty dict, which
+    Opteryx treats as "no filtering", so they see every account's rows.
+
+    Returns:
+        dict: {relation_name: DNF predicate list}, suitable for
+              `visibility_filters=` on the Opteryx planner entry points.
+    """
+    if DATA_ADMIN_ENTITLEMENT in entitlements_from_claims(claims):
+        logger.debug("Caller holds data_admin; row-level filtering not applied")
+        return {}
+
+    billing_account = claims.get("billing_account") or _DENY_ALL_ACCOUNT
+
+    if billing_account is _DENY_ALL_ACCOUNT:
+        # Unidentified caller: deny all billing rows rather than leaking them.
+        logger.debug("No billing account on claims; denying all billing rows")
+
+    return {BILLING_RELATION: [("billing_account", "Eq", billing_account)]}
 
 
 def convert_policies_for_opteryx(policies: Optional[list]) -> List[Dict[str, str]]:
