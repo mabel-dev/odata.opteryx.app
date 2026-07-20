@@ -272,6 +272,7 @@ def execute_odata_query(
     count_requested: bool = False,
     identity: Optional[str] = None,
     access_policies: Optional[List[dict]] = None,
+    billing_account: Optional[str] = None,
 ) -> dict:
     """Execute an OData query and return results.
 
@@ -343,7 +344,13 @@ def execute_odata_query(
     # Build a session carrying the caller's identity/access policies so that
     # Opteryx's permission checks are evaluated against the actual caller,
     # rather than falling back to an empty (deny-all) execution context.
-    session = opteryx.session(user=identity, access_policies=access_policies or None)
+    # billing_account attributes the usage this query generates to the caller's
+    # account; when None, Opteryx falls back to its default (house) account.
+    session = opteryx.session(
+        user=identity,
+        access_policies=access_policies or None,
+        billing_account=billing_account,
+    )
 
     # Debug: log validation inputs
     logger.debug(
@@ -669,6 +676,7 @@ def read_dataset(
     claims = getattr(request.state, "claims", None) or {}
     identity = claims.get("identity")
     access_policies = get_access_policies_from_claims(claims)
+    billing_account = claims.get("billing_account")
 
     if identity is None and not is_anonymous_exempt(workstream, collection):
         raise HTTPException(
@@ -689,6 +697,7 @@ def read_dataset(
             count_requested=want_count,
             identity=identity,
             access_policies=access_policies,
+            billing_account=billing_account,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=f"Invalid query: {str(e)}")

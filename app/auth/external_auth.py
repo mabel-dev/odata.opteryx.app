@@ -130,6 +130,12 @@ def authenticate_with_external_service(username: str, password: str) -> Dict[str
         # Add identity to claims for easy access
         claims["identity"] = identity
 
+        # This path does not go through _normalize_claims, so derive the billing
+        # account here too — otherwise basic-auth callers bill to the house account.
+        from app.auth.permissions import billing_account_from_claims
+
+        claims["billing_account"] = billing_account_from_claims(claims)
+
         logger.info(
             f"Successfully authenticated user '{username}' (identity: {identity}) with {len(policies)} policies"
         )
