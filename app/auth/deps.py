@@ -53,6 +53,7 @@ def _normalize_claims(claims: Dict[str, Any]) -> Dict[str, Any]:
 
     Ensures all claims have:
     - identity: extracted from sub/email/preferred_username
+    - billing_account: extracted from the scope claim
     - permissions: list of tuples [(role, workspace), ...]
 
     Args:
@@ -61,11 +62,16 @@ def _normalize_claims(claims: Dict[str, Any]) -> Dict[str, Any]:
     Returns:
         dict: Normalized claims with consistent structure
     """
+    from app.auth.permissions import billing_account_from_claims
+
     # Extract identity from standard JWT claims
     identity = claims.get("sub") or claims.get("email") or claims.get("preferred_username")
 
     if identity:
         claims["identity"] = identity
+
+    # Who pays for this caller's usage. Not the same as identity.
+    claims["billing_account"] = billing_account_from_claims(claims)
 
     # "policies" claim may be present in tokens and encodes what a user can access.
     # We will NOT write or rely on a separate "permissions" claim (that was incorrect).
@@ -250,7 +256,7 @@ async def require_authentication(
     is responsible for rejecting anonymous callers itself.
     """
     if not authorization:
-        claims = {"identity": None, "policies": []}
+        claims = {"identity": None, "policies": [], "billing_account": None}
         request.state.claims = claims
         return claims
 
