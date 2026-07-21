@@ -86,14 +86,10 @@ def _normalize_claims(claims: Dict[str, Any]) -> Dict[str, Any]:
         # If policies is a single dict/tuple, wrap it for convenience
         claims["policies"] = [policies]
 
-    logger.debug(
-        f"Normalized claims: identity={claims.get('identity')}, policies_count={len(claims.get('policies', []))}"
-    )
-
     return claims
 
 
-async def require_bearer_token(authorization: Optional[str] = Header(None)) -> Dict[str, Any]:
+def require_bearer_token(authorization: Optional[str] = Header(None)) -> Dict[str, Any]:
     """Require and verify a bearer JWT.
 
     This function verifies the JWT's signature, ensures the token is within its
@@ -101,6 +97,12 @@ async def require_bearer_token(authorization: Optional[str] = Header(None)) -> D
     The verification uses `app.secret_store.load_key(kid)` first (dev-friendly),
     and falls back to fetching JWKS from `AUTH_URL` when needed.
     Returns the decoded claims on success.
+
+    Deliberately sync, not async: this does blocking network I/O (secret-store
+    lookups, JWKS fetch/discovery, Google OIDC verification) via `requests`.
+    FastAPI runs sync dependencies in the thread pool, whereas an `async def`
+    here would run directly on the event loop and a slow auth call would stall
+    every other in-flight request on this worker for its duration.
     """
     if not (authorization and authorization.lower().startswith("bearer ")):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing bearer token")
@@ -150,8 +152,7 @@ async def require_bearer_token(authorization: Optional[str] = Header(None)) -> D
     except (
         RuntimeError,
         gcp_exceptions.GoogleAPIError,
-    ) as exc:  # pragma: no cover - best-effort fallback
-        logger.debug(f"load_public_key raised, attempting find_key_by_kid: {exc}")
+    ):  # pragma: no cover - best-effort fallback
         pub_key = None
 
     options = {"require_exp": True, "require_iss": True, "verify_nbf": True, "verify_iat": True}
@@ -234,7 +235,7 @@ def _verify_basic_auth(username: str, password: str) -> Dict[str, Any]:
     return authenticate_with_external_service(username, password)
 
 
-async def require_authentication(
+def require_authentication(
     request: Request,
     authorization: Optional[str] = Header(None),
 ) -> Dict[str, Any]:
@@ -254,6 +255,10 @@ async def require_authentication(
     credentials, even if malformed, is still rejected: only omitting auth
     entirely counts as "anonymous". Every endpoint other than public.security
     is responsible for rejecting anonymous callers itself.
+
+    Deliberately sync (see require_bearer_token) so FastAPI dispatches this
+    dependency, and the blocking auth I/O it does, to the thread pool instead
+    of the event loop.
     """
     if not authorization:
         claims = {"identity": None, "policies": [], "billing_account": None}
@@ -265,10 +270,10 @@ async def require_authentication(
     # Try bearer token first
     if authorization.lower().startswith("bearer "):
         try:
-            claims = await require_bearer_token(authorization)
-        except HTTPException as exc:
+            claims = require_bearer_token(authorization)
+        except HTTPException:
             # If bearer fails, we'll try basic auth next
-            logger.debug(f"Bearer token authentication failed: {exc.detail}")
+            pass
 
     # Try basic authentication
     if not claims and authorization.lower().startswith("basic "):
@@ -278,7 +283,6 @@ async def require_authentication(
             username, password = decoded_credentials.split(":", 1)
             claims = _verify_basic_auth(username, password)
         except (ValueError, IndexError, TypeError) as exc:
-            logger.debug(f"Basic authentication parsing failed: {exc}")
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid basic credentials"
             ) from exc

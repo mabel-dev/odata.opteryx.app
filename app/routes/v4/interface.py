@@ -19,6 +19,7 @@ import decimal
 import json
 import traceback
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 from typing import List
 from typing import Optional
@@ -348,8 +349,6 @@ def execute_odata_query(
         logger.error(f"Unexpected error building logical plan for table {table_name}: error={e}")
         raise
 
-    logger.debug(f"Built logical plan with {len(logical_plan.nodes())} nodes for {table_name}")
-
     # Build a session carrying the caller's identity/access policies so that
     # Opteryx's permission checks are evaluated against the actual caller,
     # rather than falling back to an empty (deny-all) execution context.
@@ -361,19 +360,11 @@ def execute_odata_query(
         billing_account=billing_account,
     )
 
-    # Debug: log validation inputs
-    logger.debug(
-        f"Validation inputs: apply_expr={apply_expr!r}, count_requested={count_requested!r}"
-    )
-
     # Step 3: Optimize the plan based on query constraints
     # This makes strategic decisions about query execution (e.g., schema+count split)
     plan_optimizer = ODataLogicalPlanOptimizer()
     optimized_plan, strategy_info = plan_optimizer.optimize_with_constraints(
         logical_plan, top, count_requested
-    )
-    logger.debug(
-        f"Applied optimization strategy: {strategy_info['strategy']} - {strategy_info['description']}"
     )
 
     # Step 4: Execute based on optimization strategy
@@ -403,7 +394,6 @@ def execute_odata_query(
                 session, schema_plan, visibility_filters=visibility_filters
             )
             col_names = schema_table.column_names or []
-            logger.debug(f"Got schema from query: {col_names}")
         except Exception as exc:
             logger.error(f"Error getting schema for table {table_name}: {exc}")
             raise
@@ -442,8 +432,6 @@ def execute_odata_query(
                 raise ValueError(
                     f"Count query returned non-integer value: {vals[0]} (col={first_col}) for {table_name}"
                 ) from e
-
-            logger.debug(f"Count query result: {total_count}")
         except Exception as exc:
             tb = traceback.format_exc()
             logger.error(f"Error executing count(*) query for table {table_name}: {exc}\n{tb}")
@@ -461,10 +449,6 @@ def execute_odata_query(
             value_bytes, row_count, col_names, has_more_rows = _execute_and_serialize_rows(
                 session, optimized_plan, top, fetch_top, visibility_filters=visibility_filters
             )
-            logger.debug(f"Serialized {row_count} rows with columns={col_names}")
-            if has_more_rows:
-                logger.debug(f"Truncated result set to {top} rows; more rows exist")
-
         except Exception as exc:
             logger.error(
                 f"Error executing logical plan for table {table_name} with orderby={orderby_expr}, filter={filter_expr}: {exc}"
@@ -506,8 +490,6 @@ def execute_odata_query(
                     raise ValueError(
                         f"Count query returned non-integer value: {vals[0]} (col={first_col}) for {table_name}"
                     ) from e
-                logger.debug(f"Count(*) query result: {total_count}")
-
             except Exception as exc:
                 logger.error(f"Error executing count(*) query for table {table_name}: {exc}")
                 raise
@@ -795,13 +777,9 @@ def read_dataset(
         next_query = urlencode(query_items)
         next_link = f"/api/v4/{workstream}/{collection}/{dataset}?{next_query}"
         body_parts.append(b',"@odata.nextLink":' + json.dumps(next_link).encode("utf-8"))
-        logger.debug(f"Added @odata.nextLink: {next_link}")
 
     body_parts.append(b"}")
 
-    logger.debug(
-        f"OData response: {row_count} rows, total_count={total_count}, col_names={col_names}, has_more_rows={has_more_rows}"
-    )
     return Response(
         content=b"".join(body_parts),
         media_type="application/json",
@@ -949,15 +927,41 @@ def dataset_metadata(
         # Set source header for clients
         response.headers["X-Dataset-Source"] = source_type
 
-        # Get schema for column types and precision info
-        schema = None
-        try:
-            if hasattr(ds, "schema"):
-                schema = ds.schema()
-        except Exception:
-            schema = None
+        # schema/describe/snapshot are independent catalog calls (each a likely
+        # Firestore/GCS round trip) with no data dependency on one another, so
+        # fetch them concurrently instead of serially -- this endpoint's latency
+        # is otherwise the sum of all three round trips instead of the slowest one.
+        def _fetch_schema():
+            try:
+                return ds.schema() if hasattr(ds, "schema") else None
+            except Exception:
+                return None
 
-        logger.debug(f"Schema from catalog: {schema}")
+        def _fetch_description():
+            try:
+                return ds.describe() if hasattr(ds, "describe") else None
+            except Exception:
+                return None
+
+        def _fetch_snapshot():
+            try:
+                if (
+                    source_type == "Table"
+                    and hasattr(ds, "snapshot")
+                    and callable(getattr(ds, "snapshot"))
+                ):
+                    return ds.snapshot()
+            except Exception:
+                pass
+            return None
+
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            schema_future = pool.submit(_fetch_schema)
+            description_future = pool.submit(_fetch_description)
+            snapshot_future = pool.submit(_fetch_snapshot)
+            schema = schema_future.result()
+            description = description_future.result()
+            snapshot = snapshot_future.result()
 
         if schema and hasattr(schema, "columns"):
             for field in schema.columns:
@@ -1003,7 +1007,7 @@ def dataset_metadata(
                         meta["original_type"] = st
             except Exception:
                 # Be conservative: do not fail if introspection fails
-                logger.debug("Failed to post-process column types", exc_info=True)
+                pass
         else:
             # If this is a view and the catalog object does not provide a schema,
             # emit a minimal placeholder so the metadata document remains valid.
@@ -1016,16 +1020,6 @@ def dataset_metadata(
                 raise HTTPException(status_code=404, detail="dataset schema unavailable in catalog")
 
         # Get statistics from description (min/max, cardinality, distribution)
-        description = None
-        try:
-            if hasattr(ds, "describe"):
-                description = ds.describe()
-        except Exception:
-            description = None
-
-        logger.debug(
-            f"Description keys: {list(description.keys()) if isinstance(description, dict) else 'not a dict'}"
-        )
         if description and isinstance(description, dict):
             for col_name, stats in description.items():
                 if col_name in col_metadata and isinstance(stats, dict):
@@ -1037,14 +1031,6 @@ def dataset_metadata(
         last_ts_ms = None
         snapshot_info = {}
         try:
-            snapshot = None
-            if (
-                source_type == "Table"
-                and hasattr(ds, "snapshot")
-                and callable(getattr(ds, "snapshot"))
-            ):
-                snapshot = ds.snapshot()
-            logger.debug(f"Snapshot: {snapshot}")
             if snapshot:
                 # Snapshot is an object with attributes
                 timestamp_ms = getattr(snapshot, "timestamp_ms", None)
@@ -1067,13 +1053,7 @@ def dataset_metadata(
                         snapshot_info["total_data_size"] = int(total_data_size)
         except Exception:
             # Be defensive: missing or failing snapshot should not break metadata
-            logger.debug(
-                "Snapshot unavailable or raised when retrieving last-modified", exc_info=True
-            )
-
-        logger.debug(
-            f"Loaded enriched metadata for {table_name} from catalog with {len(col_names)} columns; source={source_type}"
-        )
+            pass
     except HTTPException:
         # re-raise HTTP exceptions as-is
         raise
@@ -1267,7 +1247,7 @@ def dataset_metadata(
                         response.headers["X-Dataset-LastModified"] = str(meta_ts)
                     last_ts_ms = meta_ts
         except Exception:
-            logger.debug("Failed to extract view metadata for annotations", exc_info=True)
+            pass
 
     # If this is a table, add snapshot and table-level metadata annotations
     if source_type == "Table":
@@ -1320,7 +1300,7 @@ def dataset_metadata(
                     attrib={"Term": "Custom.LLMDescribed", "Bool": str(llm_flag).lower()},
                 )
         except Exception:
-            logger.debug("Failed to extract table metadata for annotations", exc_info=True)
+            pass
 
     # Add LastModified annotation if we have a timestamp
     if last_ts_ms:

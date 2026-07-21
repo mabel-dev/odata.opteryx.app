@@ -1,7 +1,6 @@
 import os
 import sys
 
-from brotli_asgi import BrotliMiddleware
 from fastapi import FastAPI
 from fastapi import HTTPException
 from fastapi.responses import ORJSONResponse
@@ -9,6 +8,7 @@ from app.logging import get_logger
 from app.logging import set_log_name
 
 from app.middleware.audit import AuditMiddleware
+from app.middleware.compression import CompressionMiddleware
 from app.middleware.cors import configure_cors
 from app.routes import router as routes_router
 from app.routes.v4.errors import ODataError
@@ -35,7 +35,7 @@ service.add_exception_handler(Exception, generic_exception_handler)
 
 configure_cors(service)
 
-service.add_middleware(BrotliMiddleware, mode="generic", quality=4, minimum_size=1024)
+service.add_middleware(CompressionMiddleware, quality=4, minimum_size=1024)
 service.add_middleware(AuditMiddleware)
 
 # include routes
