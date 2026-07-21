@@ -55,4 +55,11 @@ ENV LD_PRELOAD="/usr/local/lib/libmimalloc.so.3"
 ENV MIMALLOC_PURGE_DELAY=100
 EXPOSE 8080
 
-CMD uvicorn app.main:service --host 0.0.0.0 --port $PORT
+# One event loop for the whole process otherwise -- everything the ASGI layer
+# does (request handling, the auth dependency, response compression) funnels
+# through a single core no matter how many vCPUs the container gets. WEB_CONCURRENCY
+# is a knob, not a fixed value: size it to the container's vCPU allocation. Keep it
+# modest relative to vCPUs, though -- opteryx-core spawns its own native worker
+# threads per query, and those multiply per uvicorn process too.
+ENV WEB_CONCURRENCY=2
+CMD uvicorn app.main:service --host 0.0.0.0 --port $PORT --workers $WEB_CONCURRENCY

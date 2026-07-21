@@ -134,12 +134,9 @@ def _query_collection_group(
                     )
                 )
             except Exception:
-                logger.debug(f"Skipping malformed dataset document: {doc.id}")
                 continue
-    except Exception as exc:
-        logger.debug(
-            f"Failed to fetch {collection} for workspace {workspace_filter}: {type(exc)} {exc}"
-        )
+    except Exception:
+        pass
 
     return results
 
@@ -147,7 +144,6 @@ def _query_collection_group(
 def _get_personal_datasets(db, identity: str) -> list[DatasetInfo]:
     """Retrieve datasets from user's personal collection."""
     results = []
-    logger.debug(f"Getting personal datasets for {identity}")
 
     try:
         # Query personal datasets and views from the top-level 'personal' collection
@@ -177,7 +173,6 @@ def _get_personal_datasets(db, identity: str) -> list[DatasetInfo]:
                         )
                     )
                 except Exception:
-                    logger.debug(f"Skipping malformed personal dataset: {doc.id}")
                     continue
     except Exception as exc:
         logger.error(f"Failed to retrieve personal datasets for {identity}: {type(exc)} {exc}")

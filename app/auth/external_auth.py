@@ -43,8 +43,6 @@ def authenticate_with_external_service(username: str, password: str) -> Dict[str
     token_endpoint = f"{auth_url.rstrip('/')}/token"
     timeout = float(os.environ.get("AUTH_SERVICE_TIMEOUT", "10"))
 
-    logger.debug(f"Authenticating user '{username}' with external service")
-
     # Prepare request data for OAuth2 client_credentials grant
     data = {
         "grant_type": "client_credentials",

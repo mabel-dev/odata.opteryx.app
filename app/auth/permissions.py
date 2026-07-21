@@ -188,14 +188,9 @@ def visibility_filters_from_claims(claims: Dict[str, Any]) -> Dict[str, Any]:
               `visibility_filters=` on the Opteryx planner entry points.
     """
     if DATA_ADMIN_ENTITLEMENT in entitlements_from_claims(claims):
-        logger.debug("Caller holds data_admin; row-level filtering not applied")
         return {}
 
     billing_account = claims.get("billing_account") or _DENY_ALL_ACCOUNT
-
-    if billing_account is _DENY_ALL_ACCOUNT:
-        # Unidentified caller: deny all billing rows rather than leaking them.
-        logger.debug("No billing account on claims; denying all billing rows")
 
     return {BILLING_RELATION: [("billing_account", "Eq", billing_account)]}
 
@@ -212,7 +207,6 @@ def convert_policies_for_opteryx(policies: Optional[list]) -> List[Dict[str, str
               Returns empty list if policies is None or empty.
     """
     if not policies:
-        logger.debug("No policies to convert (empty or None)")
         return []
 
     access_policies = []
@@ -241,7 +235,6 @@ def convert_policies_for_opteryx(policies: Optional[list]) -> List[Dict[str, str
         logger.warning(f"Failed to convert policies to Opteryx format: {exc}. Policies: {policies}")
         return []
 
-    logger.debug(f"Converted {len(access_policies)} policies to Opteryx format: {access_policies}")
     return access_policies
 
 
