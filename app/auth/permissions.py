@@ -203,8 +203,9 @@ def convert_policies_for_opteryx(policies: Optional[list]) -> List[Dict[str, str
       - list of lists/tuples: [[policy_id, role, pattern], ...]
 
     Returns:
-        list: List of dicts in Opteryx format with "pattern" and "role" keys.
-              Returns empty list if policies is None or empty.
+        list: List of dicts in Opteryx format with "pattern", "role", and
+              "policy" (the policy id, or None if the input format doesn't
+              carry one) keys. Returns empty list if policies is None or empty.
     """
     if not policies:
         return []
@@ -217,20 +218,22 @@ def convert_policies_for_opteryx(policies: Optional[list]) -> List[Dict[str, str
             if isinstance(p, dict):
                 role = p.get("role")
                 pattern = p.get("pattern") or p.get("workspace") or p.get("resource")
+                policy_id = p.get("id")
                 if role and pattern:
-                    access_policies.append({"pattern": pattern, "role": role})
+                    access_policies.append({"pattern": pattern, "role": role, "policy": policy_id})
             # list/tuple format: [id, role, pattern, ...]
             elif isinstance(p, (list, tuple)) and len(p) >= 3:
+                policy_id = p[0]
                 role = p[1]
                 pattern = p[2]
                 if role and pattern:
-                    access_policies.append({"pattern": pattern, "role": role})
+                    access_policies.append({"pattern": pattern, "role": role, "policy": policy_id})
             # legacy/two-element tuples (role, pattern)
             elif isinstance(p, (list, tuple)) and len(p) == 2:
                 role = p[0]
                 pattern = p[1]
                 if role and pattern:
-                    access_policies.append({"pattern": pattern, "role": role})
+                    access_policies.append({"pattern": pattern, "role": role, "policy": None})
     except Exception as exc:
         logger.warning(f"Failed to convert policies to Opteryx format: {exc}. Policies: {policies}")
         return []
