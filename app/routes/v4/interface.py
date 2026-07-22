@@ -816,6 +816,8 @@ def dataset_metadata(
       * Custom.Statistics.Distribution: histogram of value distribution
       * Custom.OriginalType: source database type (for mapped types like DECIMAL→Edm.Double)
       * Custom.Snapshot.TotalRecords: row count at last snapshot (table only)
+      * Custom.SortOrder.Column/Custom.SortOrder.Direction: the column the
+        underlying storage is physically sorted by, if any (table only)
 
     Also includes access-control annotations:
     - Custom.Role: user's assigned role (reader, writer, admin, owner)
@@ -901,6 +903,7 @@ def dataset_metadata(
     col_names = []
     col_types = []
     col_metadata = {}  # Maps col_name -> {type, min, max, cardinality, description}
+    col_id_to_name = {}  # Maps catalog column id -> name, for resolving sort_orders
 
     try:
         workspace = OpteryxCatalog(
@@ -967,6 +970,9 @@ def dataset_metadata(
             for field in schema.columns:
                 col_name = field.name
                 col_names.append(col_name)
+                field_id = getattr(field, "id", None)
+                if field_id is not None:
+                    col_id_to_name[field_id] = col_name
                 # Map the catalog column type to its OData EDM type (unified mapper).
                 edm_type = column_type_to_edm(field.type)
                 col_types.append(edm_type)
@@ -1018,6 +1024,38 @@ def dataset_metadata(
             else:
                 # For tables, lack of schema indicates invalid catalog state
                 raise HTTPException(status_code=404, detail="dataset schema unavailable in catalog")
+
+        # Resolve the dataset's physical sort order (if any) to a column name, for the
+        # Custom.SortOrder annotation below. This reuses the same sort_orders field and
+        # id -> name -> index resolution precedence that DatasetCompactor already applies
+        # when deciding whether sort-preserving compaction is available, so it costs no
+        # extra catalog round trip -- everything it needs (ds.metadata, schema columns)
+        # is already fetched above.
+        sort_order_column = None
+        sort_order_ascending = True
+        if source_type == "Table":
+            try:
+                from opteryx_catalog.catalog.compaction import normalize_sort_order
+
+                raw_sort_orders = getattr(getattr(ds, "metadata", None), "sort_orders", None)
+                normalized = normalize_sort_order(raw_sort_orders)
+                if normalized:
+                    sort_order_ascending = normalized.get("ascending", True)
+                    target_fid = normalized.get("field_id")
+                    target_name = normalized.get("name")
+                    target_index = normalized.get("index")
+                    if target_fid is not None:
+                        sort_order_column = col_id_to_name.get(target_fid)
+                    if sort_order_column is None and target_name is not None:
+                        sort_order_column = target_name if target_name in col_names else None
+                    if (
+                        sort_order_column is None
+                        and target_index is not None
+                        and 0 <= target_index < len(col_names)
+                    ):
+                        sort_order_column = col_names[target_index]
+            except Exception:
+                sort_order_column = None
 
         # Get statistics from description (min/max, cardinality, distribution)
         if description and isinstance(description, dict):
@@ -1298,6 +1336,23 @@ def dataset_metadata(
                     entity_set,
                     f"{{{NS_EDM}}}Annotation",
                     attrib={"Term": "Custom.LLMDescribed", "Bool": str(llm_flag).lower()},
+                )
+
+            # Sort order: the column the underlying storage is physically sorted by,
+            # if any. Absent when the dataset has no configured sort order.
+            if sort_order_column:
+                ET.SubElement(
+                    entity_set,
+                    f"{{{NS_EDM}}}Annotation",
+                    attrib={"Term": "Custom.SortOrder.Column", "String": sort_order_column},
+                )
+                ET.SubElement(
+                    entity_set,
+                    f"{{{NS_EDM}}}Annotation",
+                    attrib={
+                        "Term": "Custom.SortOrder.Direction",
+                        "String": "asc" if sort_order_ascending else "desc",
+                    },
                 )
         except Exception:
             pass

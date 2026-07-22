@@ -11,8 +11,8 @@ def test_policies_list_tuple_converted():
 
     policies = get_access_policies_from_claims(claims)
     assert policies == [
-        {"pattern": "benchmarks.*", "role": "reader"},
-        {"pattern": "opteryx.intel.*", "role": "writer"},
+        {"pattern": "benchmarks.*", "role": "reader", "policy": "72fabd56"},
+        {"pattern": "opteryx.intel.*", "role": "writer", "policy": "a1b2c3"},
     ]
 
 
@@ -26,8 +26,8 @@ def test_policies_dict_converted():
 
     policies = get_access_policies_from_claims(claims)
     assert policies == [
-        {"pattern": "benchmarks.*", "role": "reader"},
-        {"pattern": "opteryx.intel.*", "role": "writer"},
+        {"pattern": "benchmarks.*", "role": "reader", "policy": "72fabd56"},
+        {"pattern": "opteryx.intel.*", "role": "writer", "policy": "a1b2c3"},
     ]
 
 
