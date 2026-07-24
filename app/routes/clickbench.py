@@ -14,10 +14,10 @@ if the upstream battery changes.
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import time
-from typing import Any
 
 # Self-contained (mirrors app/routes/v4/interface.py): ensures `import opteryx`
 # below resolves to the full opteryx-core package rather than whatever a
@@ -33,6 +33,8 @@ from fastapi import Depends
 from fastapi import HTTPException
 from fastapi import Query
 from fastapi import Request
+from fastapi.responses import StreamingResponse
+from starlette.concurrency import run_in_threadpool
 
 from app.auth.deps import require_authentication
 from app.auth.permissions import DATA_ADMIN_ENTITLEMENT
@@ -108,17 +110,58 @@ def _require_data_admin(request: Request) -> dict:
     return claims
 
 
+def _run_one_query(query_id: str, statement: str, session_kwargs: dict, iterations: int) -> dict:
+    """Run a single query for `iterations` warm runs. Blocking -- call via a threadpool.
+
+    Never raises: engine/data errors are captured into the returned dict's
+    "error" key so one bad query doesn't take down the whole streamed run.
+    """
+    times_ms = []
+    error = None
+    for _ in range(iterations):
+        session = opteryx.session(**session_kwargs)
+        try:
+            start = time.perf_counter()
+            for _ in session.execute_to_morsels(statement):
+                pass
+            times_ms.append((time.perf_counter() - start) * 1000)
+        except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}"
+            break
+        finally:
+            session.close()
+
+    entry = {"id": query_id, "sql": statement}
+    if error is not None:
+        entry["error"] = error
+    else:
+        entry["iterations_ms"] = times_ms
+        entry["min_ms"] = min(times_ms)
+        entry["avg_ms"] = sum(times_ms) / len(times_ms)
+        entry["max_ms"] = max(times_ms)
+    return entry
+
+
 @router.get("/run", include_in_schema=False)
 def run_clickbench(
     request: Request,
     iterations: int = Query(2, ge=1, le=MAX_ITERATIONS),
     dataset: str = Query(DEFAULT_CLICKBENCH_DATASET),
-) -> Any:
-    """Run the ClickBench query battery against `dataset` and report per-query timings.
+) -> StreamingResponse:
+    """Run the ClickBench query battery against `dataset`, streaming one NDJSON
+    line per query as it completes.
 
     Internal diagnostic endpoint: not in the OpenAPI schema, requires the
     `data_admin` entitlement (not just authentication) since it drives a heavy
     43-query scan.
+
+    Streamed rather than buffered: the full battery takes minutes against a
+    100M-row dataset, and a single blocking response of that length was
+    observed getting the serving instance killed mid-run in production
+    (Cloud Run appears to treat a long-silent connection as unhealthy and
+    recycle the instance, independent of the configured request timeout).
+    Each query also runs via run_in_threadpool so the event loop stays free
+    between queries instead of being pinned for the whole run.
     """
     claims = _require_data_admin(request)
 
@@ -134,63 +177,51 @@ def run_clickbench(
         billing_account=claims.get("billing_account"),
     )
 
-    queries = []
-    passed = 0
-    failed = 0
-    sum_min_ms = 0.0
-    start_suite = time.perf_counter()
+    async def generate():
+        yield (json.dumps({"type": "meta", "dataset": dataset, "iterations": iterations}) + "\n").encode(
+            "utf-8"
+        )
 
-    for index, statement_template in enumerate(STATEMENTS, start=1):
-        query_id = f"q{index:02d}"
-        statement = statement_template.replace("{DATASET}", dataset)
+        passed = 0
+        failed = 0
+        sum_min_ms = 0.0
+        start_suite = time.perf_counter()
 
-        times_ms = []
-        error = None
-        for _ in range(iterations):
-            session = opteryx.session(**session_kwargs)
-            try:
-                start = time.perf_counter()
-                for _ in session.execute_to_morsels(statement):
-                    pass
-                times_ms.append((time.perf_counter() - start) * 1000)
-            except Exception as exc:
-                error = f"{type(exc).__name__}: {exc}"
-                break
-            finally:
-                session.close()
+        for index, statement_template in enumerate(STATEMENTS, start=1):
+            query_id = f"q{index:02d}"
+            statement = statement_template.replace("{DATASET}", dataset)
 
-        entry = {"id": query_id, "sql": statement}
-        if error is not None:
-            entry["error"] = error
-            failed += 1
-        else:
-            entry["iterations_ms"] = times_ms
-            entry["min_ms"] = min(times_ms)
-            entry["avg_ms"] = sum(times_ms) / len(times_ms)
-            entry["max_ms"] = max(times_ms)
-            sum_min_ms += entry["min_ms"]
-            passed += 1
-        queries.append(entry)
+            entry = await run_in_threadpool(_run_one_query, query_id, statement, session_kwargs, iterations)
+            if "error" in entry:
+                failed += 1
+            else:
+                sum_min_ms += entry["min_ms"]
+                passed += 1
 
-    took_ms = (time.perf_counter() - start_suite) * 1000
+            yield (json.dumps({"type": "query", **entry}) + "\n").encode("utf-8")
 
-    logger.info(
-        f"clickbench run by {claims.get('identity')}: dataset={dataset} "
-        f"iterations={iterations} passed={passed} failed={failed} "
-        f"sum_of_minimums_ms={sum_min_ms:.2f} took_ms={took_ms:.2f}"
-    )
+        took_ms = (time.perf_counter() - start_suite) * 1000
 
-    return {
-        "dataset": dataset,
-        "iterations": iterations,
-        "queries": queries,
-        "summary": {
-            "passed": passed,
-            "failed": failed,
-            "sum_of_minimums_ms": sum_min_ms,
-            "took_ms": took_ms,
-        },
-    }
+        logger.info(
+            f"clickbench run by {claims.get('identity')}: dataset={dataset} "
+            f"iterations={iterations} passed={passed} failed={failed} "
+            f"sum_of_minimums_ms={sum_min_ms:.2f} took_ms={took_ms:.2f}"
+        )
+
+        yield (
+            json.dumps(
+                {
+                    "type": "summary",
+                    "passed": passed,
+                    "failed": failed,
+                    "sum_of_minimums_ms": sum_min_ms,
+                    "took_ms": took_ms,
+                }
+            )
+            + "\n"
+        ).encode("utf-8")
+
+    return StreamingResponse(generate(), media_type="application/x-ndjson")
 
 
 __all__ = ["router"]
