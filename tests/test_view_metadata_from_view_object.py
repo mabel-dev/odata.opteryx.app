@@ -48,7 +48,7 @@ loader.exec_module(interface)
 
 
 class DummyState:
-    pass
+    claims = {"identity": "test-user"}
 
 
 class DummyRequest:

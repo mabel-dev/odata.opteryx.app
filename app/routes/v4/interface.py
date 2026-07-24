@@ -1089,6 +1089,9 @@ def dataset_metadata(
                         snapshot_info["total_records"] = int(total_records)
                     if total_data_size is not None:
                         snapshot_info["total_data_size"] = int(total_data_size)
+                commit_message = getattr(snapshot, "commit_message", None)
+                if commit_message:
+                    snapshot_info["commit_message"] = str(commit_message)
         except Exception:
             # Be defensive: missing or failing snapshot should not break metadata
             pass
@@ -1315,6 +1318,15 @@ def dataset_metadata(
                         attrib={
                             "Term": "Custom.Snapshot.TotalDataSize",
                             "Int": str(snapshot_info["total_data_size"]),
+                        },
+                    )
+                if "commit_message" in snapshot_info:
+                    ET.SubElement(
+                        entity_set,
+                        f"{{{NS_EDM}}}Annotation",
+                        attrib={
+                            "Term": "Custom.Snapshot.CommitMessage",
+                            "String": snapshot_info["commit_message"],
                         },
                     )
 

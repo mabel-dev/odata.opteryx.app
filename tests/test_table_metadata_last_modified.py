@@ -46,7 +46,7 @@ loader.exec_module(interface)
 
 
 class DummyState:
-    pass
+    claims = {"identity": "test-user"}
 
 
 class DummyRequest:
@@ -75,6 +75,7 @@ class FakeDatasetWithSnapshot:
                 "timestamp_ms": 1600000000000,
                 "snapshot_id": "snap-12345",
                 "summary": {"total-records": 42, "total-data-size": 1024},
+                "commit_message": "backfill Q3 records",
             },
         )()
 
@@ -114,6 +115,8 @@ def test_table_metadata_last_modified(monkeypatch):
     assert "Custom.Snapshot.Id" in content
     assert "Custom.Snapshot.TotalRecords" in content
     assert "Custom.Snapshot.TotalDataSize" in content
+    assert "Custom.Snapshot.CommitMessage" in content
+    assert "backfill Q3 records" in content
     # Description/LLM annotations
     assert "Custom.Description" in content
     assert "Custom.LLMDescribed" in content
