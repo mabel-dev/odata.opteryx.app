@@ -347,7 +347,7 @@ def get_service_document(
         * name: fully-qualified dataset name (workspace.collection.dataset)
         * kind: always "EntitySet"
         * url: relative URL for querying (workspace/collection/dataset)
-        * source: "Table" or "View" indicating dataset type
+        * source: "Table", "View", or "Virtual" (synthetic, e.g. information_schema.tables) indicating dataset type
         * role: user's permission level (reader, writer, admin, owner)
         * policy: access-control policy that grants permission
         * ordered: whether the underlying storage has a configured physical sort order
@@ -468,7 +468,7 @@ def get_service_document(
                     workspace=workspace,
                     collection="information_schema",
                     name="tables",
-                    source="View",
+                    source="Virtual",
                     role="reader",
                     policy="virtual-information-schema",
                 )
