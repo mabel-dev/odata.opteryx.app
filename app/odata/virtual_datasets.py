@@ -14,6 +14,13 @@ VIRTUAL_INFORMATION_SCHEMA_TABLES: dict[str, list[tuple[str, str]]] = {
         ("table_schema", column_type_to_edm("VARCHAR")),
         ("table_name", column_type_to_edm("VARCHAR")),
         ("table_type", column_type_to_edm("VARCHAR")),
+        ("table_sort_order", column_type_to_edm("VARCHAR")),
+        ("snapshot_id", column_type_to_edm("BIGINT")),
+        ("snapshot_sequence_id", column_type_to_edm("BIGINT")),
+        ("table_updated_at", column_type_to_edm("TIMESTAMP")),
+        ("table_file_count", column_type_to_edm("BIGINT")),
+        ("table_bytes", column_type_to_edm("BIGINT")),
+        ("table_record_count", column_type_to_edm("BIGINT")),
     ],
     "columns": [
         ("table_catalog", column_type_to_edm("VARCHAR")),
