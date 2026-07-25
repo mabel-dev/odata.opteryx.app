@@ -918,9 +918,9 @@ def dataset_metadata(
     if not allowed:
         raise HTTPException(status_code=403, detail="forbidden: not allowed to view metadata")
 
-    # The virtual information_schema.tables dataset is only exposed to callers with
-    # full ("{workstream}.*") read access, even if they'd otherwise pass the check
-    # above via a narrower grant. Access to it is always reader.
+    # The virtual information_schema datasets are only exposed to callers with full
+    # ("{workstream}.*") read access, even if they'd otherwise pass the check above
+    # via a narrower grant. Access to them is always reader.
     if is_virtual_info_schema:
         if workstream not in wildcard_workspaces:
             raise HTTPException(status_code=403, detail="forbidden: not allowed to view metadata")
