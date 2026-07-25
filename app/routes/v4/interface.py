@@ -828,8 +828,9 @@ def dataset_metadata(
 
     `<workspace>/information_schema/{tables,columns}` are virtual, non-catalog datasets
     (source "Virtual") with a fixed schema (see app.odata.virtual_datasets). They're
-    only visible to callers with full ("{workspace}.*") read access to the workspace,
-    and access to them is always reader regardless of the caller's actual role.
+    visible in every workspace the caller can otherwise access, and access to them is
+    always reader regardless of the caller's actual role; finer-grained filtering
+    happens downstream at query time.
 
     Content-Type: application/xml (EDMX)
 
@@ -866,11 +867,6 @@ def dataset_metadata(
     # Build map: workspace -> [(role, policy), ...]
     access_policies_list = get_access_policies_from_claims(claims)
     workspace_policies: dict[str, list[tuple[str, str]]] = {}
-    # Workspaces where the caller holds a literal "{workspace}.*" pattern, i.e. full
-    # read access to everything in the workspace rather than a narrower
-    # collection/dataset-scoped grant. Only these workspaces expose the virtual
-    # information_schema datasets.
-    wildcard_workspaces: set[str] = set()
     for p in access_policies_list:
         role = p.get("role")
         pattern = p.get("pattern")
@@ -879,8 +875,6 @@ def dataset_metadata(
             continue
         workspace = pattern.split(".")[0] if "." in pattern else pattern
         workspace_policies.setdefault(workspace, []).append((role, policy))
-        if pattern == f"{workspace}.*" and role.lower() in {"reader", "writer", "admin", "owner"}:
-            wildcard_workspaces.add(workspace)
 
     # Personal workspace handling
     if workstream == "personal":
@@ -918,12 +912,10 @@ def dataset_metadata(
     if not allowed:
         raise HTTPException(status_code=403, detail="forbidden: not allowed to view metadata")
 
-    # The virtual information_schema datasets are only exposed to callers with full
-    # ("{workstream}.*") read access, even if they'd otherwise pass the check above
-    # via a narrower grant. Access to them is always reader.
+    # The virtual information_schema datasets are visible in every workspace the caller
+    # can otherwise reach (the check above); finer-grained filtering happens downstream
+    # at query time. Access to them is always reader.
     if is_virtual_info_schema:
-        if workstream not in wildcard_workspaces:
-            raise HTTPException(status_code=403, detail="forbidden: not allowed to view metadata")
         assigned_role = "reader"
         assigned_policy = "virtual-information-schema"
 

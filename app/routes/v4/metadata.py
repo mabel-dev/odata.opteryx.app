@@ -387,10 +387,6 @@ def get_edmx_metadata(
 
         # Group policies by workspace (extract workspace from patterns like "benchmarks.*")
         workspace_roles: dict[str, list[str]] = {}  # workspace -> [roles]
-        # Workspaces where the caller holds a literal "{workspace}.*" pattern, i.e.
-        # full read access to everything in the workspace rather than a narrower
-        # collection/dataset-scoped grant.
-        wildcard_workspaces: set[str] = set()
         for p in access_policies_list:
             role = p.get("role")
             pattern = p.get("pattern")
@@ -398,8 +394,6 @@ def get_edmx_metadata(
                 continue
             workspace = pattern.split(".")[0] if "." in pattern else pattern
             workspace_roles.setdefault(workspace, []).append(role)
-            if pattern == f"{workspace}.*" and _role_allows_read(role):
-                wildcard_workspaces.add(workspace)
 
         # Determine which workspace ids to query (access workspaces + public)
         workspace_ids = set(workspace_roles.keys()) | {"public"}
@@ -435,10 +429,11 @@ def get_edmx_metadata(
             if any(_role_allows_read(role) for role in roles):
                 filtered_datasets.append(dataset)
 
-        # Every workspace the caller has full ("{workspace}.*") read access to gets the
-        # virtual information_schema datasets. They aren't backed by catalog entries, so
-        # they're appended directly here rather than discovered via Firestore.
-        for workspace in wildcard_workspaces:
+        # Every workspace the caller has any access to gets the virtual
+        # information_schema datasets. They aren't backed by catalog entries, so they're
+        # appended directly here rather than discovered via Firestore. Finer-grained
+        # filtering happens downstream at query time.
+        for workspace in workspace_ids:
             for name in VIRTUAL_INFORMATION_SCHEMA_TABLES:
                 filtered_datasets.append(
                     DatasetInfo(
