@@ -19,6 +19,8 @@ from app.logging import get_logger
 from app.auth.deps import require_authentication
 from app.core import _get_firestore_client
 from app.odata.edm_types import column_type_to_edm
+from app.odata.virtual_datasets import VIRTUAL_INFORMATION_SCHEMA_TABLES
+from app.odata.virtual_datasets import is_virtual_information_schema
 
 logger = get_logger()
 router = APIRouter(prefix="/api/v4")
@@ -256,16 +258,6 @@ def _role_allows_read(role: str | None) -> bool:
 
 
 
-# Fixed schema for the virtual <workspace>.information_schema.tables dataset. It has
-# no catalog entry to look up, so it's hardcoded rather than resolved via OpteryxCatalog.
-INFORMATION_SCHEMA_TABLES_COLUMNS: list[tuple[str, str]] = [
-    ("table_catalog", column_type_to_edm("VARCHAR")),
-    ("table_schema", column_type_to_edm("VARCHAR")),
-    ("table_name", column_type_to_edm("VARCHAR")),
-    ("table_type", column_type_to_edm("VARCHAR")),
-]
-
-
 @lru_cache(maxsize=512)
 def _get_dataset_schema(dataset_info: DatasetInfo) -> list[tuple[str, str]]:
     """Get dataset schema from catalog instead of querying Opteryx.
@@ -276,8 +268,8 @@ def _get_dataset_schema(dataset_info: DatasetInfo) -> list[tuple[str, str]]:
     Returns:
         List of (column_name, edm_type) tuples
     """
-    if dataset_info.collection == "information_schema" and dataset_info.name == "tables":
-        return INFORMATION_SCHEMA_TABLES_COLUMNS
+    if is_virtual_information_schema(dataset_info.collection, dataset_info.name):
+        return VIRTUAL_INFORMATION_SCHEMA_TABLES[dataset_info.name]
 
     try:
         # Initialize catalog for this workspace
@@ -443,19 +435,20 @@ def get_edmx_metadata(
             if any(_role_allows_read(role) for role in roles):
                 filtered_datasets.append(dataset)
 
-        # Every workspace the caller has full ("{workspace}.*") read access to gets a
-        # virtual information_schema.tables dataset. It isn't backed by a catalog entry,
-        # so it's appended directly here rather than discovered via Firestore.
+        # Every workspace the caller has full ("{workspace}.*") read access to gets the
+        # virtual information_schema datasets. They aren't backed by catalog entries, so
+        # they're appended directly here rather than discovered via Firestore.
         for workspace in wildcard_workspaces:
-            filtered_datasets.append(
-                DatasetInfo(
-                    resource=f"{workspace}.information_schema.tables",
-                    workspace=workspace,
-                    collection="information_schema",
-                    name="tables",
-                    source="Virtual",
+            for name in VIRTUAL_INFORMATION_SCHEMA_TABLES:
+                filtered_datasets.append(
+                    DatasetInfo(
+                        resource=f"{workspace}.information_schema.{name}",
+                        workspace=workspace,
+                        collection="information_schema",
+                        name=name,
+                        source="Virtual",
+                    )
                 )
-            )
 
     # Build EDMX XML document
     # Namespaces

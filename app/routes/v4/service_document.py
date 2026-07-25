@@ -11,6 +11,7 @@ from app.logging import get_logger
 
 from app.auth.deps import require_authentication
 from app.core import _get_firestore_client
+from app.odata.virtual_datasets import VIRTUAL_INFORMATION_SCHEMA_TABLES
 from opteryx_catalog.catalog.compaction import normalize_sort_order
 
 logger = get_logger()
@@ -457,22 +458,23 @@ def get_service_document(
                     filtered_datasets.append(dataset)
                     break
 
-        # Every workspace the caller has full ("{workspace}.*") read access to gets a
-        # virtual information_schema.tables dataset. It isn't backed by a catalog entry,
-        # so it's appended directly here rather than discovered via Firestore. Access to
-        # it is always reader, regardless of the caller's actual role in the workspace.
+        # Every workspace the caller has full ("{workspace}.*") read access to gets the
+        # virtual information_schema datasets. They aren't backed by catalog entries, so
+        # they're appended directly here rather than discovered via Firestore. Access to
+        # them is always reader, regardless of the caller's actual role in the workspace.
         for workspace in wildcard_workspaces:
-            filtered_datasets.append(
-                DatasetInfo(
-                    resource=f"{workspace}.information_schema.tables",
-                    workspace=workspace,
-                    collection="information_schema",
-                    name="tables",
-                    source="Virtual",
-                    role="reader",
-                    policy="virtual-information-schema",
+            for name in VIRTUAL_INFORMATION_SCHEMA_TABLES:
+                filtered_datasets.append(
+                    DatasetInfo(
+                        resource=f"{workspace}.information_schema.{name}",
+                        workspace=workspace,
+                        collection="information_schema",
+                        name=name,
+                        source="Virtual",
+                        role="reader",
+                        policy="virtual-information-schema",
+                    )
                 )
-            )
 
     # One extra Firestore round trip (batched) to resolve column names for any
     # visible dataset whose sort order is index/field-id based. Only runs against

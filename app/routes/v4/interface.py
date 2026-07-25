@@ -46,6 +46,9 @@ from app.auth.deps import require_authentication
 from app.odata.odata_to_logical_plan import ODataLogicalPlanBuilder
 from app.odata.plan_optimizer import ODataLogicalPlanOptimizer
 from app.odata.edm_types import column_type_to_edm
+from app.odata.virtual_datasets import VIRTUAL_INFORMATION_SCHEMA_DESCRIPTIONS
+from app.odata.virtual_datasets import VIRTUAL_INFORMATION_SCHEMA_TABLES
+from app.odata.virtual_datasets import is_virtual_information_schema
 
 logger = get_logger()
 
@@ -823,6 +826,11 @@ def dataset_metadata(
     - Custom.Role: user's assigned role (reader, writer, admin, owner)
     - Custom.Policy: policy that granted access
 
+    `<workspace>/information_schema/{tables,columns}` are virtual, non-catalog datasets
+    (source "Virtual") with a fixed schema (see app.odata.virtual_datasets). They're
+    only visible to callers with full ("{workspace}.*") read access to the workspace,
+    and access to them is always reader regardless of the caller's actual role.
+
     Content-Type: application/xml (EDMX)
 
     Example: GET /api/v4/workspace/collection/dataset/$metadata
@@ -851,9 +859,18 @@ def dataset_metadata(
     assigned_role = None
     assigned_policy = None
 
+    # Whether this request is for one of the virtual, non-catalog information_schema
+    # datasets rather than a real one.
+    is_virtual_info_schema = is_virtual_information_schema(collection, dataset)
+
     # Build map: workspace -> [(role, policy), ...]
     access_policies_list = get_access_policies_from_claims(claims)
     workspace_policies: dict[str, list[tuple[str, str]]] = {}
+    # Workspaces where the caller holds a literal "{workspace}.*" pattern, i.e. full
+    # read access to everything in the workspace rather than a narrower
+    # collection/dataset-scoped grant. Only these workspaces expose the virtual
+    # information_schema datasets.
+    wildcard_workspaces: set[str] = set()
     for p in access_policies_list:
         role = p.get("role")
         pattern = p.get("pattern")
@@ -862,6 +879,8 @@ def dataset_metadata(
             continue
         workspace = pattern.split(".")[0] if "." in pattern else pattern
         workspace_policies.setdefault(workspace, []).append((role, policy))
+        if pattern == f"{workspace}.*" and role.lower() in {"reader", "writer", "admin", "owner"}:
+            wildcard_workspaces.add(workspace)
 
     # Personal workspace handling
     if workstream == "personal":
@@ -899,209 +918,230 @@ def dataset_metadata(
     if not allowed:
         raise HTTPException(status_code=403, detail="forbidden: not allowed to view metadata")
 
+    # The virtual information_schema.tables dataset is only exposed to callers with
+    # full ("{workstream}.*") read access, even if they'd otherwise pass the check
+    # above via a narrower grant. Access to it is always reader.
+    if is_virtual_info_schema:
+        if workstream not in wildcard_workspaces:
+            raise HTTPException(status_code=403, detail="forbidden: not allowed to view metadata")
+        assigned_role = "reader"
+        assigned_policy = "virtual-information-schema"
+
     # Try to get enriched metadata from catalog
     col_names = []
     col_types = []
     col_metadata = {}  # Maps col_name -> {type, min, max, cardinality, description}
     col_id_to_name = {}  # Maps catalog column id -> name, for resolving sort_orders
 
-    try:
-        workspace = OpteryxCatalog(
-            workstream,
-            firestore_project=GCP_PROJECT_ID,
-            firestore_database=FIRESTORE_DATABASE,
-            gcs_bucket=BUCKET_NAME,
-        )
-
-        # Try to load as a dataset first, then as a view
-        ds = None
-        source_type = "Table"
-        try:
-            ds = workspace.load_dataset(f"{collection}.{dataset}")
-            source_type = "Table"
-        except Exception:
-            try:
-                ds = workspace.load_view(f"{collection}.{dataset}")
-                source_type = "View"
-            except Exception as exc:
-                logger.error(f"Failed to load dataset/view from catalog for {table_name}: {exc}")
-                raise HTTPException(status_code=404, detail="dataset not found in catalog") from exc
-
-        # Set source header for clients
+    if is_virtual_info_schema:
+        # No catalog entry backs this dataset -- its schema is fixed.
+        source_type = "Virtual"
         response.headers["X-Dataset-Source"] = source_type
-
-        # schema/describe/snapshot are independent catalog calls (each a likely
-        # Firestore/GCS round trip) with no data dependency on one another, so
-        # fetch them concurrently instead of serially -- this endpoint's latency
-        # is otherwise the sum of all three round trips instead of the slowest one.
-        def _fetch_schema():
-            try:
-                return ds.schema() if hasattr(ds, "schema") else None
-            except Exception:
-                return None
-
-        def _fetch_description():
-            try:
-                return ds.describe() if hasattr(ds, "describe") else None
-            except Exception:
-                return None
-
-        def _fetch_snapshot():
-            try:
-                if (
-                    source_type == "Table"
-                    and hasattr(ds, "snapshot")
-                    and callable(getattr(ds, "snapshot"))
-                ):
-                    return ds.snapshot()
-            except Exception:
-                pass
-            return None
-
-        with ThreadPoolExecutor(max_workers=3) as pool:
-            schema_future = pool.submit(_fetch_schema)
-            description_future = pool.submit(_fetch_description)
-            snapshot_future = pool.submit(_fetch_snapshot)
-            schema = schema_future.result()
-            description = description_future.result()
-            snapshot = snapshot_future.result()
-
-        if schema and hasattr(schema, "columns"):
-            for field in schema.columns:
-                col_name = field.name
-                col_names.append(col_name)
-                field_id = getattr(field, "id", None)
-                if field_id is not None:
-                    col_id_to_name[field_id] = col_name
-                # Map the catalog column type to its OData EDM type (unified mapper).
-                edm_type = column_type_to_edm(field.type)
-                col_types.append(edm_type)
-                col_metadata[col_name] = {
-                    "type": edm_type,
-                    "source_type": str(field.type),
-                    "nullable": field.nullable,
-                }
-
-            # Post-process column `source_type` to refine types for arrays/structs/binary
-            try:
-                import re
-
-                for col_name, meta in col_metadata.items():
-                    st = str(meta.get("source_type", "")).upper()
-                    # ARRAY -> Collection(Edm.<inner>) when inner exists
-                    if "ARRAY" in st:
-                        inner = None
-                        m = re.search(r"ARRAY\s*[<\(]\s*([^>\)]+)\s*[>\)]", st)
-                        if m:
-                            inner = m.group(1).strip().upper()
-                        if inner in ("INTEGER", "INT", "BIGINT", "TINYINT", "SMALLINT"):
-                            meta["type"] = "Collection(Edm.Int64)"
-                        elif inner in ("DOUBLE", "FLOAT", "REAL", "DECIMAL", "NUMERIC"):
-                            meta["type"] = "Collection(Edm.Double)"
-                        else:
-                            meta["type"] = "Collection(Edm.String)"
-                        meta["original_type"] = st
-
-                    # STRUCT/JSON -> expose as binary and annotate original type
-                    if any(x in st for x in ("STRUCT", "JSON", "JSONB")):
-                        meta["type"] = "Edm.Binary"
-                        meta["original_type"] = st
-
-                    # Blob/varbinary/binary -> binary EDM type
-                    if any(x in st for x in ("BLOB", "VARBINARY", "BINARY")):
-                        meta["type"] = "Edm.Binary"
-                        meta["original_type"] = st
-            except Exception:
-                # Be conservative: do not fail if introspection fails
-                pass
-        else:
-            # If this is a view and the catalog object does not provide a schema,
-            # emit a minimal placeholder so the metadata document remains valid.
-            if source_type == "View":
-                # Single string key placeholder
-                col_names = ["id"]
-                col_metadata = {"id": {"type": "Edm.String", "nullable": True}}
-            else:
-                # For tables, lack of schema indicates invalid catalog state
-                raise HTTPException(status_code=404, detail="dataset schema unavailable in catalog")
-
-        # Resolve the dataset's physical sort order (if any) to a column name, for the
-        # Custom.SortOrder annotation below. This reuses the same sort_orders field and
-        # id -> name -> index resolution precedence that DatasetCompactor already applies
-        # when deciding whether sort-preserving compaction is available, so it costs no
-        # extra catalog round trip -- everything it needs (ds.metadata, schema columns)
-        # is already fetched above.
+        virtual_columns = VIRTUAL_INFORMATION_SCHEMA_TABLES[dataset]
+        col_names = [name for name, _ in virtual_columns]
+        col_metadata = {name: {"type": edm_type} for name, edm_type in virtual_columns}
         sort_order_column = None
         sort_order_ascending = True
-        if source_type == "Table":
-            try:
-                from opteryx_catalog.catalog.compaction import normalize_sort_order
-
-                raw_sort_orders = getattr(getattr(ds, "metadata", None), "sort_orders", None)
-                normalized = normalize_sort_order(raw_sort_orders)
-                if normalized:
-                    sort_order_ascending = normalized.get("ascending", True)
-                    target_fid = normalized.get("field_id")
-                    target_name = normalized.get("name")
-                    target_index = normalized.get("index")
-                    if target_fid is not None:
-                        sort_order_column = col_id_to_name.get(target_fid)
-                    if sort_order_column is None and target_name is not None:
-                        sort_order_column = target_name if target_name in col_names else None
-                    if (
-                        sort_order_column is None
-                        and target_index is not None
-                        and 0 <= target_index < len(col_names)
-                    ):
-                        sort_order_column = col_names[target_index]
-            except Exception:
-                sort_order_column = None
-
-        # Get statistics from description (min/max, cardinality, distribution)
-        if description and isinstance(description, dict):
-            for col_name, stats in description.items():
-                if col_name in col_metadata and isinstance(stats, dict):
-                    # Add stats to metadata and normalize naming
-                    meta = col_metadata[col_name]
-                    meta.update(stats)
-
-        # Get snapshot for last modified info only for tables (views typically don't expose snapshot)
         last_ts_ms = None
         snapshot_info = {}
+    else:
         try:
-            if snapshot:
-                # Snapshot is an object with attributes
-                timestamp_ms = getattr(snapshot, "timestamp_ms", None)
-                if timestamp_ms:
-                    response.headers["X-Dataset-LastModified"] = str(timestamp_ms)
-                    last_ts_ms = timestamp_ms
-                # Collect snapshot id and summary where available
-                snapshot_id = getattr(snapshot, "snapshot_id", None)
-                if snapshot_id:
-                    snapshot_info["snapshot_id"] = str(snapshot_id)
-                    # Expose snapshot id in a header for quick visibility
-                    response.headers["X-Dataset-Snapshot-Id"] = str(snapshot_id)
-                summary = getattr(snapshot, "summary", None)
-                if isinstance(summary, dict):
-                    total_records = summary.get("total-records")
-                    total_data_size = summary.get("total-data-size")
-                    if total_records is not None:
-                        snapshot_info["total_records"] = int(total_records)
-                    if total_data_size is not None:
-                        snapshot_info["total_data_size"] = int(total_data_size)
-                commit_message = getattr(snapshot, "commit_message", None)
-                if commit_message:
-                    snapshot_info["commit_message"] = str(commit_message)
-        except Exception:
-            # Be defensive: missing or failing snapshot should not break metadata
-            pass
-    except HTTPException:
-        # re-raise HTTP exceptions as-is
-        raise
-    except Exception as e:
-        tb_str = traceback.format_exc()
-        logger.error(f"Failed to load metadata from catalog: {e}\n{tb_str}")
-        raise
+            workspace = OpteryxCatalog(
+                workstream,
+                firestore_project=GCP_PROJECT_ID,
+                firestore_database=FIRESTORE_DATABASE,
+                gcs_bucket=BUCKET_NAME,
+            )
+
+            # Try to load as a dataset first, then as a view
+            ds = None
+            source_type = "Table"
+            try:
+                ds = workspace.load_dataset(f"{collection}.{dataset}")
+                source_type = "Table"
+            except Exception:
+                try:
+                    ds = workspace.load_view(f"{collection}.{dataset}")
+                    source_type = "View"
+                except Exception as exc:
+                    logger.error(f"Failed to load dataset/view from catalog for {table_name}: {exc}")
+                    raise HTTPException(status_code=404, detail="dataset not found in catalog") from exc
+
+            # Set source header for clients
+            response.headers["X-Dataset-Source"] = source_type
+
+            # schema/describe/snapshot are independent catalog calls (each a likely
+            # Firestore/GCS round trip) with no data dependency on one another, so
+            # fetch them concurrently instead of serially -- this endpoint's latency
+            # is otherwise the sum of all three round trips instead of the slowest one.
+            def _fetch_schema():
+                try:
+                    return ds.schema() if hasattr(ds, "schema") else None
+                except Exception:
+                    return None
+
+            def _fetch_description():
+                try:
+                    return ds.describe() if hasattr(ds, "describe") else None
+                except Exception:
+                    return None
+
+            def _fetch_snapshot():
+                try:
+                    if (
+                        source_type == "Table"
+                        and hasattr(ds, "snapshot")
+                        and callable(getattr(ds, "snapshot"))
+                    ):
+                        return ds.snapshot()
+                except Exception:
+                    pass
+                return None
+
+            with ThreadPoolExecutor(max_workers=3) as pool:
+                schema_future = pool.submit(_fetch_schema)
+                description_future = pool.submit(_fetch_description)
+                snapshot_future = pool.submit(_fetch_snapshot)
+                schema = schema_future.result()
+                description = description_future.result()
+                snapshot = snapshot_future.result()
+
+            if schema and hasattr(schema, "columns"):
+                for field in schema.columns:
+                    col_name = field.name
+                    col_names.append(col_name)
+                    field_id = getattr(field, "id", None)
+                    if field_id is not None:
+                        col_id_to_name[field_id] = col_name
+                    # Map the catalog column type to its OData EDM type (unified mapper).
+                    edm_type = column_type_to_edm(field.type)
+                    col_types.append(edm_type)
+                    col_metadata[col_name] = {
+                        "type": edm_type,
+                        "source_type": str(field.type),
+                        "nullable": field.nullable,
+                    }
+
+                # Post-process column `source_type` to refine types for arrays/structs/binary
+                try:
+                    import re
+
+                    for col_name, meta in col_metadata.items():
+                        st = str(meta.get("source_type", "")).upper()
+                        # ARRAY -> Collection(Edm.<inner>) when inner exists
+                        if "ARRAY" in st:
+                            inner = None
+                            m = re.search(r"ARRAY\s*[<\(]\s*([^>\)]+)\s*[>\)]", st)
+                            if m:
+                                inner = m.group(1).strip().upper()
+                            if inner in ("INTEGER", "INT", "BIGINT", "TINYINT", "SMALLINT"):
+                                meta["type"] = "Collection(Edm.Int64)"
+                            elif inner in ("DOUBLE", "FLOAT", "REAL", "DECIMAL", "NUMERIC"):
+                                meta["type"] = "Collection(Edm.Double)"
+                            else:
+                                meta["type"] = "Collection(Edm.String)"
+                            meta["original_type"] = st
+
+                        # STRUCT/JSON -> expose as binary and annotate original type
+                        if any(x in st for x in ("STRUCT", "JSON", "JSONB")):
+                            meta["type"] = "Edm.Binary"
+                            meta["original_type"] = st
+
+                        # Blob/varbinary/binary -> binary EDM type
+                        if any(x in st for x in ("BLOB", "VARBINARY", "BINARY")):
+                            meta["type"] = "Edm.Binary"
+                            meta["original_type"] = st
+                except Exception:
+                    # Be conservative: do not fail if introspection fails
+                    pass
+            else:
+                # If this is a view and the catalog object does not provide a schema,
+                # emit a minimal placeholder so the metadata document remains valid.
+                if source_type == "View":
+                    # Single string key placeholder
+                    col_names = ["id"]
+                    col_metadata = {"id": {"type": "Edm.String", "nullable": True}}
+                else:
+                    # For tables, lack of schema indicates invalid catalog state
+                    raise HTTPException(status_code=404, detail="dataset schema unavailable in catalog")
+
+            # Resolve the dataset's physical sort order (if any) to a column name, for the
+            # Custom.SortOrder annotation below. This reuses the same sort_orders field and
+            # id -> name -> index resolution precedence that DatasetCompactor already applies
+            # when deciding whether sort-preserving compaction is available, so it costs no
+            # extra catalog round trip -- everything it needs (ds.metadata, schema columns)
+            # is already fetched above.
+            sort_order_column = None
+            sort_order_ascending = True
+            if source_type == "Table":
+                try:
+                    from opteryx_catalog.catalog.compaction import normalize_sort_order
+
+                    raw_sort_orders = getattr(getattr(ds, "metadata", None), "sort_orders", None)
+                    normalized = normalize_sort_order(raw_sort_orders)
+                    if normalized:
+                        sort_order_ascending = normalized.get("ascending", True)
+                        target_fid = normalized.get("field_id")
+                        target_name = normalized.get("name")
+                        target_index = normalized.get("index")
+                        if target_fid is not None:
+                            sort_order_column = col_id_to_name.get(target_fid)
+                        if sort_order_column is None and target_name is not None:
+                            sort_order_column = target_name if target_name in col_names else None
+                        if (
+                            sort_order_column is None
+                            and target_index is not None
+                            and 0 <= target_index < len(col_names)
+                        ):
+                            sort_order_column = col_names[target_index]
+                except Exception:
+                    sort_order_column = None
+
+            # Get statistics from description (min/max, cardinality, distribution)
+            if description and isinstance(description, dict):
+                for col_name, stats in description.items():
+                    if col_name in col_metadata and isinstance(stats, dict):
+                        # Add stats to metadata and normalize naming
+                        meta = col_metadata[col_name]
+                        meta.update(stats)
+
+            # Get snapshot for last modified info only for tables (views typically don't expose snapshot)
+            last_ts_ms = None
+            snapshot_info = {}
+            try:
+                if snapshot:
+                    # Snapshot is an object with attributes
+                    timestamp_ms = getattr(snapshot, "timestamp_ms", None)
+                    if timestamp_ms:
+                        response.headers["X-Dataset-LastModified"] = str(timestamp_ms)
+                        last_ts_ms = timestamp_ms
+                    # Collect snapshot id and summary where available
+                    snapshot_id = getattr(snapshot, "snapshot_id", None)
+                    if snapshot_id:
+                        snapshot_info["snapshot_id"] = str(snapshot_id)
+                        # Expose snapshot id in a header for quick visibility
+                        response.headers["X-Dataset-Snapshot-Id"] = str(snapshot_id)
+                    summary = getattr(snapshot, "summary", None)
+                    if isinstance(summary, dict):
+                        total_records = summary.get("total-records")
+                        total_data_size = summary.get("total-data-size")
+                        if total_records is not None:
+                            snapshot_info["total_records"] = int(total_records)
+                        if total_data_size is not None:
+                            snapshot_info["total_data_size"] = int(total_data_size)
+                    commit_message = getattr(snapshot, "commit_message", None)
+                    if commit_message:
+                        snapshot_info["commit_message"] = str(commit_message)
+            except Exception:
+                # Be defensive: missing or failing snapshot should not break metadata
+                pass
+        except HTTPException:
+            # re-raise HTTP exceptions as-is
+            raise
+        except Exception as e:
+            tb_str = traceback.format_exc()
+            logger.error(f"Failed to load metadata from catalog: {e}\n{tb_str}")
+            raise
 
     # Build EDMX XML with annotations using ElementTree
     NS_EDMX = "http://docs.oasis-open.org/odata/ns/edmx"
@@ -1240,6 +1280,18 @@ def dataset_metadata(
             entity_set,
             f"{{{NS_EDM}}}Annotation",
             attrib={"Term": "Custom.Policy", "String": assigned_policy},
+        )
+
+    # Virtual datasets have no catalog-backed metadata, so give them a fixed description
+    # rather than leaving Custom.Description absent.
+    if source_type == "Virtual":
+        ET.SubElement(
+            entity_set,
+            f"{{{NS_EDM}}}Annotation",
+            attrib={
+                "Term": "Custom.Description",
+                "String": VIRTUAL_INFORMATION_SCHEMA_DESCRIPTIONS.get(dataset, ""),
+            },
         )
 
     # If this is a view, try to enrich EntitySet with view metadata
