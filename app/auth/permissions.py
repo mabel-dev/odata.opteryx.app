@@ -4,10 +4,12 @@ This module provides utilities for converting and handling permissions
 between JWT format and Opteryx format.
 """
 
+import fnmatch
 from typing import Any
 from typing import Dict
 from typing import List
 from typing import Optional
+from typing import Tuple
 
 from app.logging import get_logger
 
@@ -144,11 +146,12 @@ def access_policies_for_query(claims: Dict[str, Any]) -> List[Dict[str, str]]:
     This is the caller's own policies plus a reader grant on AUTHENTICATED_READ_RELATIONS
     when the caller is authenticated.
 
-    Kept separate from `get_access_policies_from_claims` on purpose: the $metadata
-    authorization path collapses a policy pattern to its workstream
-    (`pattern.split(".")[0]`), so feeding these grants through there would widen access
-    to every dataset in the workstream rather than the named relations. Opteryx's own
-    check fnmatches the full relation name, so at the query path the grant stays exact.
+    Kept separate from `get_access_policies_from_claims` on purpose: these are grants
+    for *executing* a query, not statements about what the caller owns, so they should
+    not surface the named relations in the service document or $metadata listings.
+    Both paths now fnmatch the full relation name (see `read_grant_for_relation`), so
+    routing them through the listing paths would no longer widen access — it would just
+    advertise relations the caller never asked for.
     """
     policies = list(get_access_policies_from_claims(claims))
 
@@ -261,3 +264,69 @@ def get_access_policies_from_claims(claims: Dict[str, Any]) -> List[Dict[str, st
     """
     policies = claims.get("policies", [])
     return convert_policies_for_opteryx(policies)
+
+
+# Roles that permit reading a relation, and therefore permit seeing it exist at all.
+_READ_CAPABLE_ROLES = frozenset({"reader", "writer", "admin", "owner"})
+
+
+def role_allows_read(role: Optional[str]) -> bool:
+    """Whether a role string permits reading."""
+    if not role:
+        return False
+    return role.lower() in _READ_CAPABLE_ROLES
+
+
+def _pattern_for_matching(pattern: str) -> str:
+    """Normalise a policy pattern to something matchable against a full relation name.
+
+    A pattern with no dot names a whole workstream rather than a relation —
+    `convert_policies_for_opteryx` derives patterns from a policy's `workspace` field
+    when it has no `pattern` field, which yields exactly that shape. Expanding it to
+    `<workstream>.*` keeps those grants working; without it they would match no
+    three-part relation name at all.
+    """
+    return pattern if "." in pattern else f"{pattern}.*"
+
+
+def workstream_from_pattern(pattern: str) -> str:
+    """The workstream a policy pattern can reach — everything before the first dot.
+
+    This is deliberately a SUPERSET of what the policy grants: `opteryx.ops.findings`
+    reaches into the `opteryx` workstream but grants only one relation within it. Use
+    it to decide which workspaces to *fetch* from the catalog, never to decide whether
+    the caller may see a given dataset — `read_grant_for_relation` does that.
+    """
+    return pattern.split(".", 1)[0]
+
+
+def accessible_workstreams(policies: List[Dict[str, str]]) -> set:
+    """The set of workstreams any of `policies` reaches into (a superset — see above)."""
+    return {
+        workstream_from_pattern(p["pattern"])
+        for p in policies
+        if p.get("pattern") and p.get("role")
+    }
+
+
+def read_grant_for_relation(
+    policies: List[Dict[str, str]], relation: str
+) -> Optional[Tuple[str, Optional[str]]]:
+    """The first read-capable policy granting `relation`, as `(role, policy_id)`.
+
+    `relation` is a fully-qualified `workstream.collection.dataset` name, and the
+    policy's pattern is matched against the whole of it — the same fnmatch the query
+    path applies. Matching on anything less (e.g. collapsing the pattern to its
+    workstream) would let a grant on one relation disclose every relation beside it.
+
+    Case-sensitive on purpose: `fnmatch.fnmatch` normalises case per-platform, which
+    would make an authorization decision depend on the host OS.
+    """
+    for policy in policies:
+        role = policy.get("role")
+        pattern = policy.get("pattern")
+        if not role or not pattern or not role_allows_read(role):
+            continue
+        if fnmatch.fnmatchcase(relation, _pattern_for_matching(pattern)):
+            return role, policy.get("policy")
+    return None

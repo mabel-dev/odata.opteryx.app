@@ -511,13 +511,6 @@ def execute_odata_query(
 
 
 
-def _role_allows_read(role: str | None) -> bool:
-    """Check if a given role string allows read access."""
-    if not role:
-        return False
-    return role.lower() in {"reader", "writer", "admin", "owner"}
-
-
 router = APIRouter(
     prefix="/api/v4",
     tags=["OData v4"],
@@ -853,7 +846,9 @@ def dataset_metadata(
     if identity is None and not is_anonymous_exempt(workstream, collection):
         raise HTTPException(status_code=401, detail="Missing or invalid credentials")
 
+    from app.auth.permissions import accessible_workstreams
     from app.auth.permissions import get_access_policies_from_claims
+    from app.auth.permissions import read_grant_for_relation
 
     # Default: no access
     allowed = False
@@ -864,17 +859,7 @@ def dataset_metadata(
     # datasets rather than a real one.
     is_virtual_info_schema = is_virtual_information_schema(collection, dataset)
 
-    # Build map: workspace -> [(role, policy), ...]
     access_policies_list = get_access_policies_from_claims(claims)
-    workspace_policies: dict[str, list[tuple[str, str]]] = {}
-    for p in access_policies_list:
-        role = p.get("role")
-        pattern = p.get("pattern")
-        policy = p.get("policy", "none")
-        if not role or not pattern:
-            continue
-        workspace = pattern.split(".")[0] if "." in pattern else pattern
-        workspace_policies.setdefault(workspace, []).append((role, policy))
 
     # Personal workspace handling
     if workstream == "personal":
@@ -898,21 +883,21 @@ def dataset_metadata(
         assigned_role = "reader"
         assigned_policy = "always-allow-public-read"
 
-    # Workspace-level policies
+    # Policy-granted access
     if not allowed:
-        policies = workspace_policies.get(workstream, [])
-        for role, policy in policies:
-            # Local helper checks for read-capable roles
-            def _role_allows_read(r: str | None) -> bool:
-                if not r:
-                    return False
-                return r.lower() in {"reader", "writer", "admin", "owner"}
-
-            if _role_allows_read(role):
+        if is_virtual_info_schema:
+            # These have no catalog entry for a policy to name, so they can't be granted
+            # per-relation. They're visible in any workstream the caller can otherwise
+            # reach, and filtered downstream at query time.
+            allowed = workstream in accessible_workstreams(access_policies_list)
+        else:
+            # The caller needs a read grant on THIS relation. Matching on the pattern's
+            # workstream alone would let a grant on one dataset disclose every dataset
+            # beside it in the same workspace.
+            grant = read_grant_for_relation(access_policies_list, table_name)
+            if grant is not None:
                 allowed = True
-                assigned_role = role
-                assigned_policy = policy
-                break
+                assigned_role, assigned_policy = grant
 
     if not allowed:
         raise HTTPException(status_code=403, detail="forbidden: not allowed to view metadata")
