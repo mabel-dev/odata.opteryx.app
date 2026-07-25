@@ -256,6 +256,16 @@ def _role_allows_read(role: str | None) -> bool:
 
 
 
+# Fixed schema for the virtual <workspace>.information_schema.tables dataset. It has
+# no catalog entry to look up, so it's hardcoded rather than resolved via OpteryxCatalog.
+INFORMATION_SCHEMA_TABLES_COLUMNS: list[tuple[str, str]] = [
+    ("table_catalog", column_type_to_edm("VARCHAR")),
+    ("table_schema", column_type_to_edm("VARCHAR")),
+    ("table_name", column_type_to_edm("VARCHAR")),
+    ("table_type", column_type_to_edm("VARCHAR")),
+]
+
+
 @lru_cache(maxsize=512)
 def _get_dataset_schema(dataset_info: DatasetInfo) -> list[tuple[str, str]]:
     """Get dataset schema from catalog instead of querying Opteryx.
@@ -266,6 +276,9 @@ def _get_dataset_schema(dataset_info: DatasetInfo) -> list[tuple[str, str]]:
     Returns:
         List of (column_name, edm_type) tuples
     """
+    if dataset_info.collection == "information_schema" and dataset_info.name == "tables":
+        return INFORMATION_SCHEMA_TABLES_COLUMNS
+
     try:
         # Initialize catalog for this workspace
         catalog = OpteryxCatalog(
@@ -382,6 +395,10 @@ def get_edmx_metadata(
 
         # Group policies by workspace (extract workspace from patterns like "benchmarks.*")
         workspace_roles: dict[str, list[str]] = {}  # workspace -> [roles]
+        # Workspaces where the caller holds a literal "{workspace}.*" pattern, i.e.
+        # full read access to everything in the workspace rather than a narrower
+        # collection/dataset-scoped grant.
+        wildcard_workspaces: set[str] = set()
         for p in access_policies_list:
             role = p.get("role")
             pattern = p.get("pattern")
@@ -389,6 +406,8 @@ def get_edmx_metadata(
                 continue
             workspace = pattern.split(".")[0] if "." in pattern else pattern
             workspace_roles.setdefault(workspace, []).append(role)
+            if pattern == f"{workspace}.*" and _role_allows_read(role):
+                wildcard_workspaces.add(workspace)
 
         # Determine which workspace ids to query (access workspaces + public)
         workspace_ids = set(workspace_roles.keys()) | {"public"}
@@ -423,6 +442,20 @@ def get_edmx_metadata(
             roles = workspace_roles.get(workspace, [])
             if any(_role_allows_read(role) for role in roles):
                 filtered_datasets.append(dataset)
+
+        # Every workspace the caller has full ("{workspace}.*") read access to gets a
+        # virtual information_schema.tables dataset. It isn't backed by a catalog entry,
+        # so it's appended directly here rather than discovered via Firestore.
+        for workspace in wildcard_workspaces:
+            filtered_datasets.append(
+                DatasetInfo(
+                    resource=f"{workspace}.information_schema.tables",
+                    workspace=workspace,
+                    collection="information_schema",
+                    name="tables",
+                    source="Virtual",
+                )
+            )
 
     # Build EDMX XML document
     # Namespaces
