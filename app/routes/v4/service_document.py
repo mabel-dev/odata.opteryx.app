@@ -401,6 +401,10 @@ def get_service_document(
 
         # Group access policies by workspace (extract workspace from patterns like "benchmarks.*")
         access_policies: dict[str, list[str]] = {}  # workspace -> [roles]
+        # Workspaces where the caller holds a literal "{workspace}.*" pattern, i.e.
+        # full read access to everything in the workspace rather than a narrower
+        # collection/dataset-scoped grant.
+        wildcard_workspaces: set[str] = set()
         for p in access_policies_list:
             role = p.get("role")
             pattern = p.get("pattern")
@@ -409,6 +413,8 @@ def get_service_document(
                 continue
             workspace = pattern.split(".")[0] if "." in pattern else pattern
             access_policies.setdefault(workspace, []).append((role, policy))
+            if pattern == f"{workspace}.*" and _role_allows_read(role):
+                wildcard_workspaces.add(workspace)
 
         # Determine which workspace ids to query (access workspaces + public)
         workspace_ids = set(access_policies.keys()) | {"public"}
@@ -450,6 +456,23 @@ def get_service_document(
                     dataset.policy = policy
                     filtered_datasets.append(dataset)
                     break
+
+        # Every workspace the caller has full ("{workspace}.*") read access to gets a
+        # virtual information_schema.tables dataset. It isn't backed by a catalog entry,
+        # so it's appended directly here rather than discovered via Firestore. Access to
+        # it is always reader, regardless of the caller's actual role in the workspace.
+        for workspace in wildcard_workspaces:
+            filtered_datasets.append(
+                DatasetInfo(
+                    resource=f"{workspace}.information_schema.tables",
+                    workspace=workspace,
+                    collection="information_schema",
+                    name="tables",
+                    source="View",
+                    role="reader",
+                    policy="virtual-information-schema",
+                )
+            )
 
     # One extra Firestore round trip (batched) to resolve column names for any
     # visible dataset whose sort order is index/field-id based. Only runs against
