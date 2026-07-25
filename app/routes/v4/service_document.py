@@ -313,14 +313,6 @@ def _get_workspace_datasets(db, workspace_ids: set[str]) -> list[DatasetInfo]:
     return results
 
 
-def _role_allows_read(role: str | None) -> bool:
-    """Check if a role allows read action."""
-    if not role:
-        return False
-    role_lower = role.lower()
-    return role_lower in {"reader", "writer", "admin", "owner"}
-
-
 @router.get(
     "/",
     status_code=status.HTTP_200_OK,
@@ -396,23 +388,16 @@ def get_service_document(
                 filtered_datasets.append(dataset)
     else:
         # Determine access policies from JWT "policies" claim (do not rely on a "permissions" key).
+        from app.auth.permissions import accessible_workstreams
         from app.auth.permissions import get_access_policies_from_claims
+        from app.auth.permissions import read_grant_for_relation
 
         access_policies_list = get_access_policies_from_claims(claims)
 
-        # Group access policies by workspace (extract workspace from patterns like "benchmarks.*")
-        access_policies: dict[str, list[str]] = {}  # workspace -> [roles]
-        for p in access_policies_list:
-            role = p.get("role")
-            pattern = p.get("pattern")
-            policy = p.get("policy")
-            if not role or not pattern:
-                continue
-            workspace = pattern.split(".")[0] if "." in pattern else pattern
-            access_policies.setdefault(workspace, []).append((role, policy))
-
-        # Determine which workspace ids to query (access workspaces + public)
-        workspace_ids = set(access_policies.keys()) | {"public"}
+        # Which workspaces to *fetch* from the catalog. This is a superset of what the
+        # caller may see -- a policy on "opteryx.ops.findings" reaches the "opteryx"
+        # workspace -- so every dataset it returns is authorized individually below.
+        workspace_ids = accessible_workstreams(access_policies_list) | {"public"}
 
         # Collect all datasets
         all_datasets: list[DatasetInfo] = []
@@ -442,15 +427,12 @@ def get_service_document(
                 filtered_datasets.append(dataset)
                 continue
 
-            # Workspace datasets - check if user has any read role for this workspace
-            workspace = dataset.resource.split(".")[0]
-            role_policy_pairs = access_policies.get(workspace, [])
-            for role, policy in role_policy_pairs:
-                if _role_allows_read(role):
-                    dataset.role = role
-                    dataset.policy = policy
-                    filtered_datasets.append(dataset)
-                    break
+            # Workspace datasets - the caller needs a read grant on THIS relation, not
+            # merely on something else in the same workspace.
+            grant = read_grant_for_relation(access_policies_list, dataset.resource)
+            if grant is not None:
+                dataset.role, dataset.policy = grant
+                filtered_datasets.append(dataset)
 
         # Every workspace the caller has any access to gets the virtual
         # information_schema datasets, including their own personal workspace. They

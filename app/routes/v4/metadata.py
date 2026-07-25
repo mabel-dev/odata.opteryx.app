@@ -248,12 +248,6 @@ def _get_workspace_datasets(db, workspace_ids: set[str]) -> list[DatasetInfo]:
     return results
 
 
-def _role_allows_read(role: str | None) -> bool:
-    """Check if a role allows read action."""
-    if not role:
-        return False
-    role_lower = role.lower()
-    return role_lower in {"reader", "writer", "admin", "owner"}
 
 
 
@@ -381,22 +375,16 @@ def get_edmx_metadata(
         ]
     else:
         # Determine access policies from JWT "policies" claim (do not rely on a "permissions" key).
+        from app.auth.permissions import accessible_workstreams
         from app.auth.permissions import get_access_policies_from_claims
+        from app.auth.permissions import read_grant_for_relation
 
         access_policies_list = get_access_policies_from_claims(claims)
 
-        # Group policies by workspace (extract workspace from patterns like "benchmarks.*")
-        workspace_roles: dict[str, list[str]] = {}  # workspace -> [roles]
-        for p in access_policies_list:
-            role = p.get("role")
-            pattern = p.get("pattern")
-            if not role or not pattern:
-                continue
-            workspace = pattern.split(".")[0] if "." in pattern else pattern
-            workspace_roles.setdefault(workspace, []).append(role)
-
-        # Determine which workspace ids to query (access workspaces + public)
-        workspace_ids = set(workspace_roles.keys()) | {"public"}
+        # Which workspaces to *fetch* from the catalog. This is a superset of what the
+        # caller may see -- a policy on "opteryx.ops.findings" reaches the "opteryx"
+        # workspace -- so every dataset it returns is authorized individually below.
+        workspace_ids = accessible_workstreams(access_policies_list) | {"public"}
 
         # Collect all datasets
         all_datasets: list[DatasetInfo] = []
@@ -423,10 +411,9 @@ def get_edmx_metadata(
                 filtered_datasets.append(dataset)
                 continue
 
-            # Workspace datasets - check if user has any read role for this workspace
-            workspace = dataset.resource.split(".")[0]
-            roles = workspace_roles.get(workspace, [])
-            if any(_role_allows_read(role) for role in roles):
+            # Workspace datasets - the caller needs a read grant on THIS relation, not
+            # merely on something else in the same workspace.
+            if read_grant_for_relation(access_policies_list, dataset.resource) is not None:
                 filtered_datasets.append(dataset)
 
         # Every workspace the caller has any access to gets the virtual
