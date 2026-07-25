@@ -453,10 +453,11 @@ def get_service_document(
                     break
 
         # Every workspace the caller has any access to gets the virtual
-        # information_schema datasets. They aren't backed by catalog entries, so they're
-        # appended directly here rather than discovered via Firestore. Access to them is
-        # always reader; finer-grained filtering happens downstream at query time.
-        for workspace in workspace_ids:
+        # information_schema datasets, including their own personal workspace. They
+        # aren't backed by catalog entries, so they're appended directly here rather
+        # than discovered via Firestore. Access to them is always reader; finer-grained
+        # filtering happens downstream at query time.
+        for workspace in workspace_ids | {"personal"}:
             for name in VIRTUAL_INFORMATION_SCHEMA_TABLES:
                 filtered_datasets.append(
                     DatasetInfo(

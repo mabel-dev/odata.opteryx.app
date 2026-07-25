@@ -883,6 +883,11 @@ def dataset_metadata(
             allowed = True
             assigned_role = "owner"
             assigned_policy = "always-allow-personal"
+        elif is_virtual_info_schema:
+            # The virtual information_schema datasets are visible in every workspace
+            # the caller can reach, including their own personal one -- role gets
+            # forced to reader below regardless of this branch.
+            allowed = True
         else:
             # deny access to other users' personal workspaces
             raise HTTPException(status_code=403, detail="forbidden: not allowed to view metadata")
