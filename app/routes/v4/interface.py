@@ -819,8 +819,9 @@ def dataset_metadata(
     - Custom.Role: user's assigned role (reader, writer, admin, owner)
     - Custom.Policy: policy that granted access
 
-    `<workspace>/information_schema/{tables,columns}` are virtual, non-catalog datasets
-    (source "Virtual") with a fixed schema (see app.odata.virtual_datasets). They're
+    `<workspace>/information_schema/{tables,columns,views,schemata}` are virtual,
+    non-catalog datasets (source "Virtual") with a fixed schema (see
+    app.odata.virtual_datasets). They're
     visible in every workspace the caller can otherwise access, and access to them is
     always reader regardless of the caller's actual role; finer-grained filtering
     happens downstream at query time.

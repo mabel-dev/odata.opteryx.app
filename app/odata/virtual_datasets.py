@@ -31,6 +31,21 @@ VIRTUAL_INFORMATION_SCHEMA_TABLES: dict[str, list[tuple[str, str]]] = {
         ("data_type", column_type_to_edm("VARCHAR")),
         ("is_nullable", column_type_to_edm("VARCHAR")),
     ],
+    "views": [
+        ("table_catalog", column_type_to_edm("VARCHAR")),
+        ("table_schema", column_type_to_edm("VARCHAR")),
+        ("table_name", column_type_to_edm("VARCHAR")),
+        ("view_definition", column_type_to_edm("VARCHAR")),
+        ("view_owner", column_type_to_edm("VARCHAR")),
+        ("view_updated_at", column_type_to_edm("TIMESTAMP")),
+        ("last_execution_at", column_type_to_edm("TIMESTAMP")),
+        ("last_execution_bytes", column_type_to_edm("BIGINT")),
+        ("last_execution_record_count", column_type_to_edm("BIGINT")),
+    ],
+    "schemata": [
+        ("catalog_name", column_type_to_edm("VARCHAR")),
+        ("schema_name", column_type_to_edm("VARCHAR")),
+    ],
 }
 
 # Default Custom.Description annotation per virtual dataset, used where the real
@@ -38,6 +53,8 @@ VIRTUAL_INFORMATION_SCHEMA_TABLES: dict[str, list[tuple[str, str]]] = {
 VIRTUAL_INFORMATION_SCHEMA_DESCRIPTIONS: dict[str, str] = {
     "tables": "System view listing the tables and views visible in this workspace.",
     "columns": "System view listing the columns of the tables and views visible in this workspace.",
+    "views": "System view listing the views visible in this workspace, including their SQL definition.",
+    "schemata": "System view listing the schemas (collections) visible in this workspace.",
 }
 
 
