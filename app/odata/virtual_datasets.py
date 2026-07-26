@@ -38,9 +38,6 @@ VIRTUAL_INFORMATION_SCHEMA_TABLES: dict[str, list[tuple[str, str]]] = {
         ("view_definition", column_type_to_edm("VARCHAR")),
         ("view_owner", column_type_to_edm("VARCHAR")),
         ("view_updated_at", column_type_to_edm("TIMESTAMP")),
-        ("last_execution_at", column_type_to_edm("TIMESTAMP")),
-        ("last_execution_bytes", column_type_to_edm("BIGINT")),
-        ("last_execution_record_count", column_type_to_edm("BIGINT")),
     ],
     "schemata": [
         ("catalog_name", column_type_to_edm("VARCHAR")),
