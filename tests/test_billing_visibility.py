@@ -83,20 +83,47 @@ def test_entitlements_accept_both_claim_shapes_and_namespacing():
     assert entitlements_from_claims({}) == set()
 
 
-def test_billing_account_comes_from_scope_not_identity():
-    """Many users bill to one account, so identity is not the billing account."""
-    claims = {"sub": "bastian", "identity": "bastian", "scope": "opteryx"}
-    assert billing_account_from_claims(claims) == "opteryx"
+def test_billing_account_comes_from_its_own_claim():
+    """Many users bill to one account, so the account is carried explicitly rather
+    than inferred from identity."""
+    claims = {"sub": "bastian", "identity": "bastian", "billing_account": "acme"}
+    assert billing_account_from_claims(claims) == "acme"
 
 
-def test_multi_valued_scope_is_refused_rather_than_guessed():
-    """Guessing a delimiter would attribute usage to the wrong tenant."""
-    assert billing_account_from_claims({"scope": "acme other"}) is None
-    assert billing_account_from_claims({"scope": "acme,other"}) is None
-    assert billing_account_from_claims({"scope": ["acme"]}) == "acme"
-    assert billing_account_from_claims({"scope": "  acme  "}) == "acme"
-    assert billing_account_from_claims({"scope": ""}) is None
+def test_scope_is_never_read_as_a_billing_account():
+    """Regression: `scope` is an OAuth permission list, not a tenant identity.
+
+    register.opteryx writes `scopes: ["opteryx"]` for every self-service signup and
+    admin-supplied permission words ("read,write") for the rest. Reading that as the
+    billing account charged every such user to "opteryx" -- which is both the house
+    account and the system workspace name, so the usage read back as though the
+    workspace were the payer.
+    """
+    # The exact shape production was emitting for a self-service user.
+    assert billing_account_from_claims({"sub": "bastian", "scope": "opteryx"}) == "bastian"
+    # A permission word must never become a tenant to charge.
+    assert billing_account_from_claims({"sub": "bastian", "scope": "public"}) == "bastian"
+    assert billing_account_from_claims({"sub": "bastian", "scope": "read,write"}) == "bastian"
+    # An explicit account is not overridden by whatever scope happens to carry.
+    claims = {"sub": "bastian", "scope": "opteryx", "billing_account": "acme"}
+    assert billing_account_from_claims(claims) == "acme"
+
+
+def test_absent_account_bills_to_the_caller_themselves():
+    """An unscoped individual bills to themselves, not to the house account."""
+    assert billing_account_from_claims({"sub": "bastian"}) == "bastian"
+    assert billing_account_from_claims({"sub": "bastian", "billing_account": None}) == "bastian"
+
+
+def test_unidentifiable_caller_yields_no_account():
+    """No account and no subject must not resolve to some usable string -- callers
+    rely on None to deny billing rows rather than leak them."""
     assert billing_account_from_claims({}) is None
+    assert billing_account_from_claims({"sub": None}) is None
+    assert billing_account_from_claims({"sub": "   "}) is None
+    assert billing_account_from_claims({"billing_account": ""}) is None
+    # A non-string account is ignored rather than coerced into a bogus tenant name.
+    assert billing_account_from_claims({"billing_account": ["acme"]}) is None
 
 
 def test_only_data_admin_ever_produces_an_empty_filter_set():

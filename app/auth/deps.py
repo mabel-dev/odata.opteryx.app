@@ -53,7 +53,7 @@ def _normalize_claims(claims: Dict[str, Any]) -> Dict[str, Any]:
 
     Ensures all claims have:
     - identity: extracted from sub/email/preferred_username
-    - billing_account: extracted from the scope claim
+    - billing_account: from the billing_account claim, falling back to sub
     - permissions: list of tuples [(role, workspace), ...]
 
     Args:
@@ -70,7 +70,8 @@ def _normalize_claims(claims: Dict[str, Any]) -> Dict[str, Any]:
     if identity:
         claims["identity"] = identity
 
-    # Who pays for this caller's usage. Not the same as identity.
+    # Who pays for this caller's usage. Not the same as identity. Resolving in place is
+    # idempotent: the resolver reads this same key off the raw token first.
     claims["billing_account"] = billing_account_from_claims(claims)
 
     # "policies" claim may be present in tokens and encodes what a user can access.
