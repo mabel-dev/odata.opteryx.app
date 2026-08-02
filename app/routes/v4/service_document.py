@@ -191,6 +191,16 @@ def _query_collection_group(
 
         for doc in query.stream():
             try:
+                # doc.reference.parent is the "datasets"/"views" subcollection;
+                # .parent.parent is the collection-document itself, whose id is
+                # "$dropped" for drop tombstones or "$properties" for workspace
+                # metadata -- both live in a subcollection literally named
+                # "datasets"/"views" too, so a bare collection_group query picks
+                # them up. Same $-prefix guard as list_collections() uses.
+                parent_doc_id = doc.reference.parent.parent.id
+                if parent_doc_id.startswith("$"):
+                    continue
+
                 data = doc.to_dict()
                 workspace = data.get("workspace")
                 collection_name = data.get("collection")

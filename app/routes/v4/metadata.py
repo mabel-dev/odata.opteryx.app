@@ -117,6 +117,15 @@ def _query_collection_group(
 
         for doc in query.stream():
             try:
+                # Same $-prefix guard as service_document.py's twin query and
+                # opteryx_catalog.list_collections(): skip drop tombstones
+                # ("$dropped") and workspace metadata ("$properties"), whose
+                # datasets/views subcollections are otherwise indistinguishable
+                # from a real collection's to a bare collection_group query.
+                parent_doc_id = doc.reference.parent.parent.id
+                if parent_doc_id.startswith("$"):
+                    continue
+
                 data = doc.to_dict()
                 workspace = data.get("workspace")
                 collection_name = data.get("namespace")
