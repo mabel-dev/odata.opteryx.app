@@ -16,6 +16,12 @@ sys.modules["opteryx.connectors"] = _connectors_mod
 _expr_mod = types.ModuleType("opteryx.managers.expression")
 _expr_mod.NodeType = type("NodeType", (), {})
 sys.modules["opteryx.managers.expression"] = _expr_mod
+_top_expr_mod = types.ModuleType("opteryx.expression")
+_top_expr_mod.NodeType = type("NodeType", (), {})
+sys.modules["opteryx.expression"] = _top_expr_mod
+_utils_mod = types.ModuleType("opteryx.utils")
+_utils_mod.random_string = lambda *args, **kwargs: "randomstring"
+sys.modules["opteryx.utils"] = _utils_mod
 _models_mod = types.ModuleType("opteryx.models")
 _models_mod.Node = type("Node", (), {})
 sys.modules["opteryx.models"] = _models_mod
@@ -76,6 +82,7 @@ class FakeDatasetWithSnapshot:
                 "snapshot_id": "snap-12345",
                 "summary": {"total-records": 42, "total-data-size": 1024},
                 "commit_message": "backfill Q3 records",
+                "author": "ichnos",
             },
         )()
 
@@ -117,6 +124,8 @@ def test_table_metadata_last_modified(monkeypatch):
     assert "Custom.Snapshot.TotalDataSize" in content
     assert "Custom.Snapshot.CommitMessage" in content
     assert "backfill Q3 records" in content
+    assert "Custom.Snapshot.Author" in content
+    assert "ichnos" in content
     # Description/LLM annotations
     assert "Custom.Description" in content
     assert "Custom.LLMDescribed" in content

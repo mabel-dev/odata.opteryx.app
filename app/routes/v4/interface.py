@@ -812,6 +812,7 @@ def dataset_metadata(
       * Custom.Statistics.Distribution: histogram of value distribution
       * Custom.OriginalType: source database type (for mapped types like DECIMAL→Edm.Double)
       * Custom.Snapshot.TotalRecords: row count at last snapshot (table only)
+      * Custom.Snapshot.Author: author of the last snapshot commit (table only)
       * Custom.SortOrder.Column/Custom.SortOrder.Direction: the column the
         underlying storage is physically sorted by, if any (table only)
 
@@ -1115,6 +1116,9 @@ def dataset_metadata(
                     commit_message = getattr(snapshot, "commit_message", None)
                     if commit_message:
                         snapshot_info["commit_message"] = str(commit_message)
+                    snapshot_author = getattr(snapshot, "author", None)
+                    if snapshot_author:
+                        snapshot_info["author"] = str(snapshot_author)
             except Exception:
                 # Be defensive: missing or failing snapshot should not break metadata
                 pass
@@ -1362,6 +1366,15 @@ def dataset_metadata(
                         attrib={
                             "Term": "Custom.Snapshot.CommitMessage",
                             "String": snapshot_info["commit_message"],
+                        },
+                    )
+                if "author" in snapshot_info:
+                    ET.SubElement(
+                        entity_set,
+                        f"{{{NS_EDM}}}Annotation",
+                        attrib={
+                            "Term": "Custom.Snapshot.Author",
+                            "String": snapshot_info["author"],
                         },
                     )
 
