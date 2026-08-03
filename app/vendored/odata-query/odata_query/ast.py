@@ -7,8 +7,6 @@ from typing import Optional
 from typing import Tuple
 from uuid import UUID
 
-from dateutil.parser import isoparse
-
 DURATION_PATTERN = re.compile(r"([+-])?P(\d+Y)?(\d+M)?(\d+D)?(?:T(\d+H)?(\d+M)?(\d+(?:\.\d+)?S)?)?")
 
 
@@ -213,7 +211,10 @@ class DateTime(_Literal):
 
     @property
     def py_val(self) -> dt.datetime:
-        return isoparse(self.val)
+        parsed = try_parse_iso(self.val)
+        if parsed is None:
+            raise ValueError(f"Invalid ISO datetime literal: {self.val!r}")
+        return parsed
 
     def to_opteryx_node(self):
         from opteryx.expression import NodeType
