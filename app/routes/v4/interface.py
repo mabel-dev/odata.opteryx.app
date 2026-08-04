@@ -64,14 +64,25 @@ DEFAULT_TOP = int(os.environ.get("ODATA_DEFAULT_TOP", "100"))
 MAX_TOP = int(os.environ.get("ODATA_MAX_TOP", "25000"))
 
 # OData clients refetch $metadata constantly -- Power BI does so on every refresh,
-# and the web UI does so every time a details panel is opened -- but building it
-# costs three catalog round trips (schema/describe/snapshot). So the rendered EDMX
-# is cached for a short window, and an ETag lets a client that already holds the
-# document skip the transfer and the XML parse entirely.
+# and the web UI does so every time a details panel is opened. The two savings
+# here are independent, and only one is on by default:
 #
-# The cache key carries the caller's role and policy because those appear in the
-# document as annotations; a permissions change is therefore visible after at most
-# one TTL. Set ODATA_METADATA_CACHE_TTL=0 to disable caching and serve only ETags.
+#  - ETag / If-None-Match (always on): the document is rebuilt fresh on every
+#    request -- this endpoint's entire job is to report what exists *now*, and a
+#    dataset can be dropped or altered between requests, so there is no way to
+#    know the previous answer is still correct without asking the catalog again.
+#    But if the freshly-rebuilt document is byte-identical to what the client
+#    already has, a 304 still saves the transfer and the client's XML parse.
+#  - The response cache (opt-in via ODATA_METADATA_CACHE_TTL, default 0/off):
+#    skips rebuilding -- and therefore the catalog round trips -- for a fixed
+#    window, at the cost of serving a stale answer to "does this exist / what
+#    does its schema look like" for up to that long. Off by default because that
+#    trade is exactly backwards for an endpoint whose purpose is to answer that
+#    question; set it explicitly if a deployment can tolerate the staleness in
+#    exchange for fewer catalog round trips under heavy $metadata polling.
+#
+# The cache key (when enabled) carries the caller's role and policy because
+# those appear in the document as annotations.
 _METADATA_CACHE_MAX_ENTRIES = 128
 _metadata_cache_lock = threading.Lock()
 _metadata_cache: "OrderedDict[tuple, Tuple[float, str, str, dict]]" = OrderedDict()
@@ -79,9 +90,9 @@ _metadata_cache: "OrderedDict[tuple, Tuple[float, str, str, dict]]" = OrderedDic
 
 def _metadata_cache_ttl() -> float:
     try:
-        return float(os.environ.get("ODATA_METADATA_CACHE_TTL", "60"))
+        return float(os.environ.get("ODATA_METADATA_CACHE_TTL", "0"))
     except ValueError:
-        return 60.0
+        return 0.0
 
 
 def _metadata_cache_get(key) -> Optional[Tuple[str, str, dict]]:
