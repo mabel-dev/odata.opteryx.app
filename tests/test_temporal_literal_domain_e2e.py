@@ -217,7 +217,12 @@ def test_non_utc_offset_shifts_the_boundary(dataset):
 
 
 @pytest.mark.xfail(
-    strict=True,
+    # Non-strict deliberately: this now PASSES against the local opteryx-core
+    # checkout, but CI resolves opteryx-core from PyPI (>=0.9.52,<0.10) and an
+    # unfixed release still fails. strict=True would turn the fixed case into a
+    # red build. Once the floor is raised to a release carrying the fix, drop
+    # this marker entirely and let it be an ordinary test.
+    strict=False,
     reason="SEPARATE, PRE-EXISTING BUG in opteryx-core: _parse_iso_parts "
     "(compiled/functions/timestamp.pyx) rejects any ISO timestamp longer than 26 "
     "characters, so 6 fractional digits plus a timezone designator - i.e. exactly "
@@ -309,7 +314,9 @@ def test_top_without_an_orderby_returns_a_full_page(dataset):
 
 
 @pytest.mark.xfail(
-    strict=True,
+    # Non-strict for the same reason as the marker above: fixed in the local
+    # opteryx-core checkout, possibly not in the PyPI release CI installs.
+    strict=False,
     reason="SEPARATE, PRE-EXISTING BUG in opteryx-core's TopNManifestPruningStrategy: "
     "$orderby + $top over a filtered scan prunes files by the sort column's bounds "
     "and each file's TOTAL record_count, ignoring that the filter will discard some "

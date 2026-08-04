@@ -2,6 +2,13 @@
 
 An OData v4-compliant API for querying and accessing Opteryx datasets with enterprise-grade authentication and authorization.
 
+> **📖 User documentation: [Querying via OData](https://docs.opteryx.app/docs/guides/querying-via-odata)**
+>
+> That guide is the place to start if you want to *use* the service — it has a
+> live "Try it" panel you can run queries in without signing up. This README
+> covers the service itself: its API surface, its deviations from the OData
+> spec, and how to run and develop it.
+
 ## Overview
 
 This service provides OData v4 endpoints that allow you to:
@@ -10,7 +17,16 @@ This service provides OData v4 endpoints that allow you to:
 - **Inspect schemas** through EDMX metadata documents
 - **Connect from BI tools** like Excel, Power BI, and Tableau
 
-All requests are authenticated and enforce row-level security based on your permissions.
+Requests enforce row-level security based on the permissions in your token.
+
+A small number of public collections are readable **without credentials** —
+currently `public.security.*` and `public.geopolitics.*` (see
+`ANONYMOUS_EXEMPT_PAIRS` in `app/auth/permissions.py`). This is what lets the
+documentation's "Try it" panel run real queries against
+`public.geopolitics.countries` anonymously. Every other dataset requires
+authentication: a request that omits the `Authorization` header entirely is
+treated as anonymous and rejected by the endpoint, while a request that sends
+malformed credentials is rejected at authentication.
 
 ## Quick Start
 
@@ -116,7 +132,7 @@ This returns an XML document describing EntityTypes, properties, and their data 
 | `$filter` | Filter results with comparison/logical operators | `$filter=age gt 21 and status eq 'active'` |
 | `$select` | Select specific columns | `$select=name,age,status` |
 | `$orderby` | Sort by one or more columns (asc/desc) | `$orderby=name asc, age desc` |
-| `$top` | Limit number of results (max 10000). If omitted, default is `100`. | `$top=100` |
+| `$top` | Limit number of results (max 25,000). If omitted, default is `100`. | `$top=100` |
 | `$skip` | Skip N results for pagination | `$skip=200` |
 | `$count` | Include total count of results | `$count=true` |
 | `$apply` | Aggregation and grouping operations | `$apply=groupby((Region), aggregate(Sales with sum as Total))` |
@@ -157,12 +173,17 @@ $apply=groupby((column1, column2), aggregate(amount with sum as Total, $count as
 ```
 
 **Supported Aggregation Methods:**
-- `column with sum as alias` - sum numeric values
 - `$count as alias` - count all records
-- `column with count as alias` - count non-null values in column
+- `column with sum as alias` - sum numeric values
 - `column with average as alias` - average numeric values
 - `column with min as alias` - minimum value
 - `column with max as alias` - maximum value
+
+Those four `with` methods — `sum`, `average`, `min`, `max` — are the complete
+set. `column with count as alias` is **not** supported and returns 400; use
+`$count as alias` to count records. Function-call syntax such as
+`aggregate(min(column) as alias)` or `aggregate(count(*) as alias)` is not part
+of the OData `$apply` grammar and is also rejected.
 
 ### Query Examples
 
@@ -193,7 +214,7 @@ GET /api/v4/workspace/collection/dataset?$apply=groupby((region,product_type), a
 
 **Combined query:**
 ```
-GET /api/v4/workspace/collection/dataset?$filter=year ge 2023&$apply=groupby((status), aggregate(count(*) as Count))&$select=status,Count
+GET /api/v4/workspace/collection/dataset?$filter=year ge 2023&$apply=groupby((status), aggregate($count as Count))&$select=status,Count
 ```
 
 ## Known Differences from OData Specification
@@ -262,7 +283,8 @@ Response includes:
 }
 ```
 
-**Max `$top` value:** The maximum allowed `$top` is 10,000 rows per request.
+**Max `$top` value:** The maximum allowed `$top` is 25,000 rows per request
+(configurable with `ODATA_MAX_TOP`). Exceeding it returns 400.
 
 **`$top=0` behavior:** `$top=0` returns zero rows and is useful with `$count=true` to fetch the total filtered count without data:
 
@@ -324,9 +346,9 @@ When LLMs or automated tools generate OData queries, be aware of these type-coer
 - **Type Coercion:** Numeric values in comparisons should not be quoted (e.g., `age gt 21` not `age gt '21'`).
 - **String Values:** Always quote string literals (e.g., `vendor eq 'ABC'`).
 - **Date/Datetime Values:** Never quote date or datetime literals (e.g., `shipped_date gt 2024-01-01`, not `shipped_date gt '2024-01-01'`). A quoted date literal is compared as a string and raises a type-mismatch error against a DATE/TIMESTAMP column.
-- **Maximum Results & Defaults:** Default `$top` is `100` if not specified. Maximum allowed is 10,000 records per request. While `$top` is optional, we recommend specifying it in client-generated queries to avoid unintended large responses.
+- **Maximum Results & Defaults:** Default `$top` is `100` if not specified. Maximum allowed is 25,000 records per request. While `$top` is optional, we recommend specifying it in client-generated queries to avoid unintended large responses.
 - **`$expand` and `Nav/$count` ordering:** `$expand` (navigation property expansion) and ordering by `Nav/$count` are currently **not implemented**. Queries using `$expand` or ordering by `Nav/$count` will produce an error. Use precomputed columns (for example `number_of_moons`) as a workaround for ordering by counts until `$expand` is implemented.
-- **Modulo and numeric coercion:** Currently, mixing floating/double and integer operands with the `mod` operator can raise an `IncorrectTypeError` (e.g., `round(n_nationkey) mod 5` where `ROUND()` yields DOUBLE). Prefer integer operands or explicit casts. This is a tracked issue and will be fixed by implementing numeric promotion for `%`.
+- **Modulo and numeric coercion:** Mixing double and integer operands with `mod` is supported — `round(n_nationkey) mod 5 eq 0` evaluates correctly even though `ROUND()` yields DOUBLE. (Earlier releases raised `IncorrectTypeError` here; numeric promotion for `%` has since landed.)
 - **URL encoding:** Always URL-encode query strings (spaces, parentheses, `$` and other special characters). For example: `Satellites/$count%20desc` for `Satellites/$count desc`.
 
 ## Permission Model
@@ -416,11 +438,21 @@ python scripts/test_odata.py --api-version v4 --test-service-doc
 python scripts/test_odata.py --api-version v4 --test-metadata
 ```
 
-Run integration tests:
+Run the test suite:
 
 ```bash
-pytest tests/test_auth_integration.py -v
+make t
 ```
+
+This runs everything under `tests/` and is exactly what CI runs. It needs no
+credentials and no network: queries go against the small local TPCH fixtures in
+`testdata/` (see [testdata/README.md](testdata/README.md)) and Opteryx's built-in
+`$planets` dataset. Tests that genuinely need a live Firestore/GCS catalog are
+marked `requires_catalog` and skip automatically when no credentials resolve —
+so a green run with skips is the expected local and CI result.
+
+`tests/manual/` holds exploratory developer scripts. They are gitignored, not
+collected by pytest, and several reference APIs that no longer exist.
 
 ### Environment Variables
 
@@ -430,6 +462,8 @@ pytest tests/test_auth_integration.py -v
 | `FIRESTORE_DATABASE` | Firestore database name | Required |
 | `GCS_BUCKET` | GCS bucket for data storage | Required |
 | `ODATA_DEFAULT_TOP` | Default $top value when not specified | `100` |
+| `ODATA_MAX_TOP` | Maximum accepted $top value | `25000` |
+| `CORS_ALLOW_ALL` | Allow all CORS origins. Development only — the allowlist in `app/middleware/cors.py` is used otherwise | `false` |
 
 ### Docker Build
 
@@ -462,4 +496,17 @@ The service architecture:
    - Access policies passed to every query
    - Automatic permission enforcement
 
-For implementation details, see [REDESIGN.md](REDESIGN.md).
+Authentication setup is documented in [AUTH_SETUP.md](AUTH_SETUP.md).
+
+## Documentation
+
+- **[Querying via OData](https://docs.opteryx.app/docs/guides/querying-via-odata)** — user guide, with a live "Try it" panel
+- [Opteryx documentation](https://docs.opteryx.app) — the full docs site
+
+## Licence
+
+Licensed under the Apache Licence 2.0 — see [LICENSE](LICENSE).
+
+This repository vendors [odata-query](https://github.com/gorilla-co/odata-query)
+under `app/vendored/odata-query/`, which is MIT licensed; its licence and
+copyright notice are retained in that directory.
