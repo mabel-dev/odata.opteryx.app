@@ -20,6 +20,8 @@ class DummyState:
 
 class DummyRequest:
     state = DummyState()
+    # Real requests always carry headers; the endpoint reads If-None-Match.
+    headers: dict = {}
 
 
 class FakeDataset:

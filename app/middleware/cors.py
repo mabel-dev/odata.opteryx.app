@@ -57,6 +57,20 @@ def configure_cors(app) -> None:
         allow_origins=allowed_origins if allowed_origins else [],
         allow_credentials=True,
         allow_methods=["GET", "POST"],  # Only allow necessary methods
-        allow_headers=["Authorization", "Content-Type", "X-Admin-Token"],
+        # If-None-Match lets a browser client revalidate a cached $metadata
+        # document instead of refetching it. It is not a CORS-safelisted request
+        # header, so without it here the preflight rejects the conditional request.
+        allow_headers=["Authorization", "Content-Type", "X-Admin-Token", "If-None-Match"],
+        # A cross-origin caller can only read headers named here. ETag is the
+        # other half of conditional requests -- unlisted, it reads as null and
+        # the client can never revalidate. The X-Dataset-* headers are response
+        # metadata browser clients are expected to act on.
+        expose_headers=[
+            "ETag",
+            "OData-Version",
+            "X-Dataset-Source",
+            "X-Dataset-LastModified",
+            "X-Dataset-Snapshot-Id",
+        ],
         max_age=3600,  # Cache preflight requests for 1 hour
     )

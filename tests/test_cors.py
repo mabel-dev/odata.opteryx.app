@@ -81,3 +81,45 @@ def test_cors_allow_all_is_opt_in(monkeypatch):
     """The wildcard escape hatch stays available for local development only."""
     monkeypatch.setenv("CORS_ALLOW_ALL", "true")
     assert get_cors_origins() == ["*"]
+
+
+def test_etag_is_exposed_to_browser_clients(client):
+    """A cross-origin caller can only read headers named in expose-headers.
+
+    Without ETag listed, `response.headers.get("ETag")` reads as null in the
+    browser and a client can never revalidate a cached $metadata document -- the
+    conditional-request path silently degrades to always refetching.
+    """
+    response = client.get("/probe", headers={"Origin": "https://opteryx.app"})
+    exposed = {
+        h.strip().lower()
+        for h in response.headers.get("access-control-expose-headers", "").split(",")
+    }
+    assert "etag" in exposed
+
+
+def test_dataset_headers_are_exposed_to_browser_clients(client):
+    response = client.get("/probe", headers={"Origin": "https://opteryx.app"})
+    exposed = {
+        h.strip().lower()
+        for h in response.headers.get("access-control-expose-headers", "").split(",")
+    }
+    assert {"x-dataset-source", "x-dataset-lastmodified", "odata-version"} <= exposed
+
+
+def test_if_none_match_survives_preflight(client):
+    """If-None-Match is not CORS-safelisted, so it must be explicitly allowed."""
+    response = client.options(
+        "/probe",
+        headers={
+            "Origin": "https://opteryx.app",
+            "Access-Control-Request-Method": "GET",
+            "Access-Control-Request-Headers": "authorization,if-none-match",
+        },
+    )
+    assert response.status_code == 200
+    allowed = {
+        h.strip().lower()
+        for h in response.headers.get("access-control-allow-headers", "").split(",")
+    }
+    assert "if-none-match" in allowed

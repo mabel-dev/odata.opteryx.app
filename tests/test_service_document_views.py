@@ -11,6 +11,8 @@ class DummyState:
 
 class DummyRequest:
     state = DummyState()
+    # Real requests always carry headers; the endpoint reads If-None-Match.
+    headers: dict = {}
 
 
 def test_service_document_includes_views(monkeypatch):

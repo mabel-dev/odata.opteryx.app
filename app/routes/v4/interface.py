@@ -16,13 +16,18 @@ sys.path.insert(
 import base64
 import datetime as dt
 import decimal
+import hashlib
 import json
+import threading
+import time
 import traceback
 import xml.etree.ElementTree as ET
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 from typing import List
 from typing import Optional
+from typing import Tuple
 
 import opteryx
 from fastapi import APIRouter
@@ -57,6 +62,86 @@ BUCKET_NAME = os.environ.get("GCS_BUCKET")
 GCP_PROJECT_ID = os.environ.get("GCP_PROJECT_ID")
 DEFAULT_TOP = int(os.environ.get("ODATA_DEFAULT_TOP", "100"))
 MAX_TOP = int(os.environ.get("ODATA_MAX_TOP", "25000"))
+
+# OData clients refetch $metadata constantly -- Power BI does so on every refresh,
+# and the web UI does so every time a details panel is opened -- but building it
+# costs three catalog round trips (schema/describe/snapshot). So the rendered EDMX
+# is cached for a short window, and an ETag lets a client that already holds the
+# document skip the transfer and the XML parse entirely.
+#
+# The cache key carries the caller's role and policy because those appear in the
+# document as annotations; a permissions change is therefore visible after at most
+# one TTL. Set ODATA_METADATA_CACHE_TTL=0 to disable caching and serve only ETags.
+_METADATA_CACHE_MAX_ENTRIES = 128
+_metadata_cache_lock = threading.Lock()
+_metadata_cache: "OrderedDict[tuple, Tuple[float, str, str, dict]]" = OrderedDict()
+
+
+def _metadata_cache_ttl() -> float:
+    try:
+        return float(os.environ.get("ODATA_METADATA_CACHE_TTL", "60"))
+    except ValueError:
+        return 60.0
+
+
+def _metadata_cache_get(key) -> Optional[Tuple[str, str, dict]]:
+    """Return (etag, xml, headers) for a live cache entry, else None."""
+    now = time.monotonic()
+    with _metadata_cache_lock:
+        entry = _metadata_cache.get(key)
+        if entry is None:
+            return None
+        expires_at, etag, xml, headers = entry
+        if expires_at <= now:
+            del _metadata_cache[key]
+            return None
+        _metadata_cache.move_to_end(key)
+        return etag, xml, dict(headers)
+
+
+def _metadata_cache_put(key, etag: str, xml: str, headers: dict) -> None:
+    ttl = _metadata_cache_ttl()
+    if ttl <= 0:
+        return
+    with _metadata_cache_lock:
+        _metadata_cache[key] = (time.monotonic() + ttl, etag, xml, dict(headers))
+        _metadata_cache.move_to_end(key)
+        while len(_metadata_cache) > _METADATA_CACHE_MAX_ENTRIES:
+            _metadata_cache.popitem(last=False)
+
+
+def clear_metadata_cache() -> None:
+    """Drop every cached metadata document. For tests and cache-invalidation hooks."""
+    with _metadata_cache_lock:
+        _metadata_cache.clear()
+
+
+def _etag_for(xml: str) -> str:
+    return '"' + hashlib.blake2b(xml.encode("utf-8"), digest_size=16).hexdigest() + '"'
+
+
+def _etag_matches(if_none_match: Optional[str], etag: str) -> bool:
+    """Whether an If-None-Match header covers `etag` (RFC 9110 §13.1.2)."""
+    if not if_none_match:
+        return False
+    if if_none_match.strip() == "*":
+        return True
+    for candidate in if_none_match.split(","):
+        candidate = candidate.strip()
+        if candidate.startswith("W/"):
+            candidate = candidate[2:]
+        if candidate == etag:
+            return True
+    return False
+
+
+def _metadata_response(xml: str, etag: str, headers: dict, if_none_match: Optional[str]) -> Response:
+    """Serve an EDMX document, or a 304 when the client already holds this version."""
+    headers = {**headers, "ETag": etag}
+    if _etag_matches(if_none_match, etag):
+        # A 304 carries no body, so media_type would be misleading here.
+        return Response(status_code=304, headers=headers)
+    return Response(content=xml, media_type="application/xml", headers=headers)
 
 opteryx.set_default_connector(
     OpteryxConnector,
@@ -164,7 +249,9 @@ def _execute_and_serialize_rows(
     jsonl_parts = []
     total_rows = 0
     for morsel in results_generator:
-        morsel.materialize()
+        # No morsel.materialize() here: write_jsonl reads the Cxx-backed buffers
+        # directly and produces byte-identical output, so materializing first
+        # would only buy a full PyObject-backed copy of every result set.
         if not col_names:
             col_names = [n.decode("utf-8") if isinstance(n, bytes) else n for n in morsel.column_names]
         if morsel.num_rows:
@@ -273,6 +360,50 @@ def _sanitize_value_for_odata(value: Any) -> Any:
     return str(value)
 
 
+def _execute_count_query(
+    make_session,
+    table_name: str,
+    filter_expr: Optional[str],
+    apply_expr: Optional[str],
+    visibility_filters=None,
+) -> int:
+    """Run a COUNT(*) plan over the same filters as the row query, returning the total.
+
+    Takes a session factory rather than a session because this runs concurrently
+    with the row query (see execute_odata_query) and a session carries per-execution
+    state, so the two must not share one.
+    """
+    count_builder = ODataLogicalPlanBuilder(table_name)
+    count_plan = count_builder.build(
+        filter_expr=filter_expr,
+        select_cols=None,
+        orderby_expr=None,
+        top=None,
+        skip=None,
+        apply_expr=apply_expr,
+        count_only=True,
+    )
+    count_table = _materialize_logical_plan_result(
+        make_session(), count_plan, visibility_filters=visibility_filters
+    )
+    # Strict validation: count query MUST return a 1x1 numeric result. Fail fast with clear error otherwise.
+    if not count_table:
+        raise ValueError(f"Count query returned no table object for {table_name}")
+    data = count_table.to_pydict()
+    if not data:
+        raise ValueError(f"Count query returned empty data for {table_name}")
+    first_col = next(iter(data))
+    vals = data.get(first_col)
+    if vals is None or len(vals) == 0:
+        raise ValueError(f"Count query returned no values for column '{first_col}' for {table_name}")
+    try:
+        return int(vals[0])
+    except Exception as e:
+        raise ValueError(
+            f"Count query returned non-integer value: {vals[0]} (col={first_col}) for {table_name}"
+        ) from e
+
+
 def execute_odata_query(
     table_name: str,
     filter_expr: Optional[str] = None,
@@ -357,11 +488,14 @@ def execute_odata_query(
     # rather than falling back to an empty (deny-all) execution context.
     # billing_account attributes the usage this query generates to the caller's
     # account; when None, Opteryx falls back to its default (house) account.
-    session = opteryx.session(
-        user=identity,
-        access_policies=access_policies or None,
-        billing_account=billing_account,
-    )
+    def make_session():
+        return opteryx.session(
+            user=identity,
+            access_policies=access_policies or None,
+            billing_account=billing_account,
+        )
+
+    session = make_session()
 
     # Step 3: Optimize the plan based on query constraints
     # This makes strategic decisions about query execution (e.g., schema+count split)
@@ -373,129 +507,92 @@ def execute_odata_query(
     # Step 4: Execute based on optimization strategy
     strategy = strategy_info.get("strategy")
 
-    if strategy == "schema_count_split":
-        # Special optimization: top=0 with count_requested
-        # Fetch schema and count separately, no data rows
-        value_bytes = b"[]"
-        row_count = 0
-        col_names = []
-        total_count = None
-        has_more_rows = False  # No data rows returned, so never truncated
+    # The count query shares no data dependency with the row (or schema) query, so
+    # start it on its own thread now and collect it at the end: the request then
+    # costs max(rows, count) instead of the sum of the two.
+    count_pool = None
+    count_future = None
+    if count_requested:
+        count_pool = ThreadPoolExecutor(max_workers=1)
+        count_future = count_pool.submit(
+            _execute_count_query,
+            make_session,
+            table_name,
+            filter_expr,
+            apply_expr,
+            visibility_filters,
+        )
 
-        # Get schema by running a query with top=1
-        try:
-            schema_builder = ODataLogicalPlanBuilder(table_name)
-            schema_plan = schema_builder.build(
-                filter_expr=filter_expr,
-                select_cols=select_cols,
-                orderby_expr=None,
-                top=1,
-                skip=None,
-                apply_expr=apply_expr,
-            )
-            schema_table = _materialize_logical_plan_result(
-                session, schema_plan, visibility_filters=visibility_filters
-            )
-            col_names = schema_table.column_names or []
-        except Exception as exc:
-            logger.error(f"Error getting schema for table {table_name}: {exc}")
-            raise
+    try:
+        if strategy == "schema_count_split":
+            # Special optimization: top=0 with count_requested
+            # Report the result's shape and its count, but fetch no data rows
+            value_bytes = b"[]"
+            row_count = 0
+            col_names = []
+            has_more_rows = False  # No data rows returned, so never truncated
 
-        # Get total count
-        try:
-            count_builder = ODataLogicalPlanBuilder(table_name)
-            count_plan = count_builder.build(
-                filter_expr=filter_expr,
-                select_cols=None,
-                orderby_expr=None,
-                top=None,
-                skip=None,
-                apply_expr=apply_expr,
-                count_only=True,
-            )
-            count_table = _materialize_logical_plan_result(
-                session, count_plan, visibility_filters=visibility_filters
-            )
-            # Strict validation: count query MUST return a 1x1 numeric result. Fail fast with clear error otherwise.
-            if not count_table:
-                raise ValueError(f"Count query returned no table object for {table_name}")
-            data = count_table.to_pydict()
-            if not data:
-                raise ValueError(f"Count query returned empty data for {table_name}")
-            first_col = next(iter(data))
-            vals = data.get(first_col)
-            if vals is None or len(vals) == 0:
-                raise ValueError(
-                    f"Count query returned no values for column '{first_col}' for {table_name}"
-                )
-            try:
-                total_count = int(vals[0])
-            except Exception as e:
-                # Include original data for debugging
-                raise ValueError(
-                    f"Count query returned non-integer value: {vals[0]} (col={first_col}) for {table_name}"
-                ) from e
-        except Exception as exc:
-            tb = traceback.format_exc()
-            logger.error(f"Error executing count(*) query for table {table_name}: {exc}\n{tb}")
-            raise
-    else:
-        # Standard path: execute the optimized logical plan, serializing rows
-        # directly from Morsels to JSON bytes (see _execute_and_serialize_rows)
-        # instead of materializing Python dicts.
-        value_bytes = b"[]"
-        col_names = []
-        has_more_rows = False
-        row_count = 0
-
-        try:
-            value_bytes, row_count, col_names, has_more_rows = _execute_and_serialize_rows(
-                session, optimized_plan, top, fetch_top, visibility_filters=visibility_filters
-            )
-        except Exception as exc:
-            logger.error(
-                f"Error executing logical plan for table {table_name} with orderby={orderby_expr}, filter={filter_expr}: {exc}"
-            )
-            raise
-
-        # Get total count if requested
-        total_count = None
-        if count_requested:
-            try:
-                count_builder = ODataLogicalPlanBuilder(table_name)
-                count_plan = count_builder.build(
-                    filter_expr=filter_expr,
-                    select_cols=None,
-                    orderby_expr=None,
-                    top=None,
-                    skip=None,
-                    apply_expr=apply_expr,
-                    count_only=True,
-                )
-                arrow_table = _materialize_logical_plan_result(
-                    session, count_plan, visibility_filters=visibility_filters
-                )
-                # Strict validation: count query MUST return a 1x1 numeric result. Fail fast with clear error otherwise.
-                if not arrow_table:
-                    raise ValueError(f"Count query returned no table object for {table_name}")
-                data = arrow_table.to_pydict()
-                if not data:
-                    raise ValueError(f"Count query returned empty data for {table_name}")
-                first_col = next(iter(data))
-                vals = data.get(first_col)
-                if vals is None or len(vals) == 0:
-                    raise ValueError(
-                        f"Count query returned no values for column '{first_col}' for {table_name}"
-                    )
+            explicit_select = plan_builder.expression_parser.parse_select(select_cols or "")
+            if explicit_select and explicit_select != ["*"]:
+                # An explicit $select fixes the response columns exactly, in the
+                # order the caller wrote them -- that is what Exit is given (see
+                # ODataLogicalPlanBuilder._add_exit_node). So the answer is already
+                # in hand and needs no query at all.
+                col_names = explicit_select
+            else:
+                # Otherwise the columns depend on the data (or on $apply's output,
+                # which the catalog cannot describe), so ask for a single row purely
+                # to learn the shape. This runs while the count query is in flight,
+                # so it costs nothing beyond the count it hides behind.
                 try:
-                    total_count = int(vals[0])
-                except Exception as e:
-                    raise ValueError(
-                        f"Count query returned non-integer value: {vals[0]} (col={first_col}) for {table_name}"
-                    ) from e
+                    schema_builder = ODataLogicalPlanBuilder(table_name)
+                    schema_plan = schema_builder.build(
+                        filter_expr=filter_expr,
+                        select_cols=select_cols,
+                        orderby_expr=None,
+                        top=1,
+                        skip=None,
+                        apply_expr=apply_expr,
+                    )
+                    schema_table = _materialize_logical_plan_result(
+                        session, schema_plan, visibility_filters=visibility_filters
+                    )
+                    col_names = schema_table.column_names or []
+                except Exception as exc:
+                    logger.error(f"Error getting schema for table {table_name}: {exc}")
+                    raise
+        else:
+            # Standard path: execute the optimized logical plan, serializing rows
+            # directly from Morsels to JSON bytes (see _execute_and_serialize_rows)
+            # instead of materializing Python dicts.
+            value_bytes = b"[]"
+            col_names = []
+            has_more_rows = False
+            row_count = 0
+
+            try:
+                value_bytes, row_count, col_names, has_more_rows = _execute_and_serialize_rows(
+                    session, optimized_plan, top, fetch_top, visibility_filters=visibility_filters
+                )
             except Exception as exc:
-                logger.error(f"Error executing count(*) query for table {table_name}: {exc}")
+                logger.error(
+                    f"Error executing logical plan for table {table_name} with orderby={orderby_expr}, filter={filter_expr}: {exc}"
+                )
                 raise
+
+        # Collected after the row/schema query so that when both fail, the row
+        # query's error is the one that surfaces -- as it did when these ran serially.
+        total_count = None
+        if count_future is not None:
+            try:
+                total_count = count_future.result()
+            except Exception as exc:
+                tb = traceback.format_exc()
+                logger.error(f"Error executing count(*) query for table {table_name}: {exc}\n{tb}")
+                raise
+    finally:
+        if count_pool is not None:
+            count_pool.shutdown(wait=True)
 
     elapsed_ms = (time.time() - start_time) * 1000
 
@@ -605,11 +702,13 @@ def read_dataset(
 
     table_name = f"{workstream}.{collection}.{dataset}"
 
-    # Parse and validate $top parameter
-    # Detect duplicate OData query parameters in the raw query string and disallow them
+    # Parse the raw query string once, here: it is needed for duplicate detection,
+    # for the $expand rejection below, and again for the @odata.nextLink further
+    # down. keep_blank_values is on because nextLink has to round-trip a blank
+    # parameter the caller sent rather than silently dropping it.
     from urllib.parse import parse_qs
 
-    parsed_qs = parse_qs(request.url.query)
+    query_params = parse_qs(request.url.query, keep_blank_values=True)
 
     # Reject unsupported query options
     if search and search.strip():
@@ -618,8 +717,9 @@ def read_dataset(
             detail="$search is not supported by this service"
         )
 
-    if "$expand" in parsed_qs and parsed_qs["$expand"]:
-        expand_value = parsed_qs.get("$expand", [None])[0]
+    # A blank "$expand=" asks for nothing and is allowed through; only an actual
+    # navigation property is a 501.
+    if any(query_params.get("$expand", [])):
         raise HTTPException(
             status_code=501,
             detail=f"$expand (navigation property expansion) is not supported by this service"
@@ -627,9 +727,7 @@ def read_dataset(
 
     # Parameters for which duplicates are disallowed
     duplicate_sensitive = ["$top", "$apply", "$count", "$select", "$orderby", "$filter", "$skip"]
-    duplicates = [
-        p for p in duplicate_sensitive if p in parsed_qs and len(parsed_qs.get(p, [])) > 1
-    ]
+    duplicates = [p for p in duplicate_sensitive if len(query_params.get(p, [])) > 1]
     if duplicates:
         raise HTTPException(
             status_code=400, detail=f"Multiple parameters not allowed: {', '.join(duplicates)}"
@@ -754,11 +852,7 @@ def read_dataset(
 
     # Build @odata.nextLink if result was truncated
     if has_more_rows:
-        from urllib.parse import parse_qs, urlencode, urlparse
-
-        # Parse the current query string to build the next link
-        parsed_url = urlparse(str(request.url))
-        query_params = parse_qs(parsed_url.query, keep_blank_values=True)
+        from urllib.parse import urlencode
 
         # Calculate new skip value
         current_skip = int(skip or 0)
@@ -914,6 +1008,15 @@ def dataset_metadata(
     if is_virtual_info_schema:
         assigned_role = "reader"
         assigned_policy = "virtual-information-schema"
+
+    # Everything the document's content depends on is now known, so a cached
+    # rendering can be served without touching the catalog at all.
+    if_none_match = request.headers.get("if-none-match")
+    cache_key = (table_name, assigned_role, assigned_policy, is_virtual_info_schema)
+    cached = _metadata_cache_get(cache_key)
+    if cached is not None:
+        cached_etag, cached_xml, cached_headers = cached
+        return _metadata_response(cached_xml, cached_etag, cached_headers, if_none_match)
 
     # Try to get enriched metadata from catalog
     col_names = []
@@ -1443,7 +1546,14 @@ def dataset_metadata(
     xml_str = ET.tostring(edmx, encoding="unicode", method="xml")
     xml_declaration = '<?xml version="1.0" encoding="UTF-8"?>\n'
     xml = xml_declaration + xml_str
-    return Response(content=xml, media_type="application/xml")
+
+    # The X-Dataset-* headers were set on the injected `response` as the document
+    # was assembled; carry them onto the response actually returned (and into the
+    # cache, so a hit reproduces them).
+    headers = dict(response.headers)
+    etag = _etag_for(xml)
+    _metadata_cache_put(cache_key, etag, xml, headers)
+    return _metadata_response(xml, etag, headers, if_none_match)
 
 
 __all__ = ["router"]

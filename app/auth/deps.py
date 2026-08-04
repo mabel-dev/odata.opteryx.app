@@ -1,5 +1,6 @@
 import base64
 import os
+from functools import lru_cache
 from typing import Any
 from typing import Dict
 from typing import Optional
@@ -20,9 +21,15 @@ from app.auth.external_auth import authenticate_with_external_service
 from app.secret_store import load_public_key
 
 
+@lru_cache(maxsize=30)
 def _fetch_jwks(auth_url: str, timeout: float = 2.0):
     """Fetch JWKS from the auth server using optional discovery.
     Falls back to `/.well-known/jwks.json`. Returns dict or None.
+
+    Cached: this is up to two sequential HTTP round trips, and it sits on the
+    verification path for every request whose key isn't already in the secret
+    store. There are at most ~30 keys in play, so 30 slots holds the working
+    set. Matches how `secret_store.load_public_key` caches the same material.
     """
     try:
         discovery = requests.get(

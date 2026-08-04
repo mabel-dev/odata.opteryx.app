@@ -141,7 +141,17 @@ def load_app_module(module_name, *relative_parts):
     return module
 
 
+# Every module handed out by load_with_stubs. These are distinct module objects,
+# not the ones under `app.` in sys.modules, so each carries its own copy of any
+# module-level state -- including the process caches that conftest resets between
+# tests. Without this registry those copies would be unreachable from conftest and
+# would leak state across tests.
+LOADED_MODULES = []
+
+
 def load_with_stubs(module_name, *relative_parts):
     """Load an app module against the stubs and restore sys.modules immediately."""
     with stubbed_opteryx():
-        return load_app_module(module_name, *relative_parts)
+        module = load_app_module(module_name, *relative_parts)
+    LOADED_MODULES.append(module)
+    return module

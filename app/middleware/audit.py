@@ -97,23 +97,26 @@ class AuditMiddleware:
                 "detail": detail,
             }
 
-            # If a bearer token is present, extract the 'sub' (identity) claim
-            # via unverified claims and include it in the audit payload. We do not
-            # attempt to verify the token here (audit should not require key fetch).
+            # If a bearer token is present, record the 'sub' (identity) claim.
+            # require_authentication has already decoded this token and stashed the
+            # claims on request.state, which is backed by the ASGI scope and so is
+            # visible here once the app has run -- read those rather than paying a
+            # second JWT decode per request. Falls back to an unverified decode only
+            # when the request never reached that dependency (rejected upstream, no
+            # matching route), where there is nothing on state to read. We never
+            # verify here: audit must not require a key fetch.
             auth = request.headers.get("authorization")
             if auth and auth.lower().startswith("bearer "):
-                try:
-                    token = auth.split(" ", 1)[1]
-                    claims = jose_jwt.get_unverified_claims(token)
-                    sub = claims.get("sub") if isinstance(claims, dict) else None
-                    if sub:
-                        payload["jwt_sub"] = sub
-                        payload["jwt_present"] = True
-                    else:
-                        payload["jwt_present"] = True
-                except JWTError:
-                    # best-effort: ignore any parsing errors
-                    payload["jwt_present"] = True
+                payload["jwt_present"] = True
+                claims = scope.get("state", {}).get("claims")
+                if not isinstance(claims, dict):
+                    try:
+                        claims = jose_jwt.get_unverified_claims(auth.split(" ", 1)[1])
+                    except JWTError:
+                        claims = None  # best-effort: ignore any parsing errors
+                sub = claims.get("sub") if isinstance(claims, dict) else None
+                if sub:
+                    payload["jwt_sub"] = sub
 
             logger.audit(payload)
 

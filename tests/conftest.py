@@ -93,6 +93,35 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(skip)
 
 
+@pytest.fixture(autouse=True)
+def _isolate_process_caches():
+    """Empty the process-wide caches around every test.
+
+    $metadata responses and basic-auth exchanges are cached by
+    (dataset, role, policy) and by credentials respectively. Tests reuse those
+    keys while swapping the catalog or auth service underneath them, so without
+    this a test would be served the previous test's document or claims.
+    """
+    from app.auth.external_auth import clear_credential_cache
+    from app.routes.v4.interface import clear_metadata_cache
+
+    from tests._opteryx_stubs import LOADED_MODULES
+
+    def _clear():
+        clear_metadata_cache()
+        clear_credential_cache()
+        # Stub-loaded copies of interface.py hold their own caches (see
+        # _opteryx_stubs.LOADED_MODULES), so clearing the app's is not enough.
+        for module in LOADED_MODULES:
+            module_clear = getattr(module, "clear_metadata_cache", None)
+            if callable(module_clear):
+                module_clear()
+
+    _clear()
+    yield
+    _clear()
+
+
 def _build_app(authenticate):
     """Build a FastAPI app wired up the way app.main builds the real service.
 

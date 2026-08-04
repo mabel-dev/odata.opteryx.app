@@ -15,6 +15,8 @@ class DummyState:
 
 class DummyRequest:
     state = DummyState()
+    # Real requests always carry headers; the endpoint reads If-None-Match.
+    headers: dict = {}
 
 
 def test_edmx_metadata_includes_source_annotation(monkeypatch):
