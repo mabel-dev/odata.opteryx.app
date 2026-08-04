@@ -7,14 +7,14 @@ Base URL: `GET https://odata.opteryx.app/api/v4/{workspace}/{collection}/{datase
 - `$filter` - Filter records: comparison (`eq`, `ne`, `gt`, `ge`, `lt`, `le`), logical (`and`, `or`, `not`), string functions (`contains()`, `startswith()`, `endswith()`)
 - `$select` - Columns to return: `$select=col1,col2,col3`
 - `$orderby` - Sort: `$orderby=col1 asc, col2 desc`
-- `$top` - Optional (default `100`). Limit results (0-10000): `$top=50`. LLMs should include an explicit `$top` to avoid returning excessively large result sets.
+- `$top` - Optional (default `100`). Limit results (0-25000): `$top=50`. LLMs should include an explicit `$top` to avoid returning excessively large result sets.
 - `$skip` - Offset for pagination: `$skip=100`
 - `$count` - Include total count: `$count=true`
 - `$apply` - Aggregation: `$apply=groupby((col), aggregate(amount with sum as Total))`
 
 ## Key Rules
 
-1. **MANDATORY — `$top` MUST be provided**. Use integer 1–10000. If the user does not supply `$top`, choose a conservative default (e.g., `$top=50`).
+1. **MANDATORY — `$top` MUST be provided**. Use integer 1–25000. If the user does not supply `$top`, choose a conservative default (e.g., `$top=50`).
 2. **String values are case-sensitive**: `vendor eq 'Oracle'` ≠ `vendor eq 'oracle'`
 3. **Quote strings, not numbers**: `status eq 'active'` and `age gt 21`
 4. **Dates/datetimes are unquoted, not strings**: `shipped_date gt 2024-01-01` or `created_at ge 2024-01-01T00:00:00Z`. Quoting a date (`shipped_date gt '2024-01-01'`) compares it as text and raises a type-mismatch error against a DATE/TIMESTAMP column.
@@ -74,7 +74,11 @@ Supported methods:
 - `average` - arithmetic mean: `price with average as AvgPrice`
 - `min` - minimum value: `value with min as MinVal`
 - `max` - maximum value: `value with max as MaxVal`
-- `count` - count non-null values: `status with count as StatusCount`
 - `$count` - count all records: `$count as TotalCount`
+
+`sum`, `average`, `min` and `max` are the ONLY methods usable with `with`.
+To count, you MUST use `$count as alias`. `column with count as alias` is NOT
+supported and returns 400, as does function-call syntax like
+`aggregate(count(*) as alias)` or `aggregate(min(column) as alias)`.
 
 Example: `$apply=groupby((region), aggregate(revenue with sum as Total, $count as Count, price with average as AvgPrice))`

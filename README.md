@@ -394,12 +394,22 @@ All v4 endpoints return errors in OData format:
 }
 ```
 
-Common error codes:
-- `Unauthorized` (401) - Missing or invalid authentication
-- `Forbidden` (403) - Valid auth but insufficient permissions
-- `NotFound` (404) - Dataset does not exist or is not accessible
-- `InternalServerError` (500) - Server error
-- `ServiceUnavailable` (503) - Dependent service unavailable
+Error codes:
+
+| Status | `error.code` | Meaning |
+|---|---|---|
+| 400 | `BadRequest` | Malformed `$filter`, `$top` outside `0..25000`, duplicated query parameter, invalid `$apply` |
+| 401 | `Unauthorized` | Missing or invalid authentication |
+| 403 | `Forbidden` | Valid auth but insufficient permissions |
+| 404 | `NotFound` | Dataset does not exist or is not accessible |
+| 500 | `InternalServerError` | Server error |
+| 501 | `Error` | `$search` or `$expand` requested — not implemented |
+| 502 | `BadGateway` | Upstream dependency returned an error |
+| 503 | `ServiceUnavailable` | Dependent service unavailable |
+| 504 | `GatewayTimeout` | Dependent service (e.g. Firestore) unreachable |
+
+Statuses without an explicit mapping — 501 among them — report `error.code` as
+the generic `"Error"`; see `_map_status_to_code` in `app/routes/v4/errors.py`.
 
 ---
 
@@ -505,7 +515,7 @@ Authentication setup is documented in [AUTH_SETUP.md](AUTH_SETUP.md).
 
 ## Licence
 
-Licensed under the Apache Licence 2.0 — see [LICENSE](LICENSE).
+Licensed under the Apache Licence 2.0 — see [LICENSE.md](LICENSE.md).
 
 This repository vendors [odata-query](https://github.com/gorilla-co/odata-query)
 under `app/vendored/odata-query/`, which is MIT licensed; its licence and
