@@ -51,6 +51,13 @@ class ODataLogicalPlanBuilder:
         # a wildcard would lose the aggregate's columns. Referencing the aggregate
         # Node objects directly (set here) sidesteps that lookup entirely.
         self._pending_aggregate_columns: Optional[List[Node]] = None
+        # Columns an explicit (non-wildcard) $select asked for, in the order the
+        # caller wrote them. Consumed by _add_exit_node. A wildcard Exit would
+        # emit every column the Project node carried -- including the
+        # passthrough columns that exist only to keep ORDER BY working -- so
+        # Exit has to name the $select columns itself for $select to actually
+        # restrict the response (OData v4.01 Part 1 §11.2.4.1).
+        self._exit_columns: Optional[List[Node]] = None
 
     def build(
         self,
@@ -368,6 +375,7 @@ class ODataLogicalPlanBuilder:
             # With wildcard, all columns are selected, so passthrough_columns will be empty
         else:
             # Parse individual columns
+            exit_columns = []
             for col_name in selected_cols_list:
                 col_node = LogicalColumn(
                     node_type=NodeType.IDENTIFIER,
@@ -376,6 +384,19 @@ class ODataLogicalPlanBuilder:
                 )
                 col_node.query_column = col_name
                 columns.append(col_node)
+
+                # A distinct node for Exit: the binder mutates the nodes it
+                # binds (visit_project and visit_exit each rewrite the entry
+                # they are given), so Project and Exit must not share objects.
+                exit_col_node = LogicalColumn(
+                    node_type=NodeType.IDENTIFIER,
+                    source_column=col_name,
+                    alias=None,
+                )
+                exit_col_node.query_column = col_name
+                exit_columns.append(exit_col_node)
+
+            self._exit_columns = exit_columns
 
         project_node.columns = columns
 
@@ -409,6 +430,12 @@ class ODataLogicalPlanBuilder:
             # Reference the aggregate's output nodes directly rather than a
             # wildcard — see the note on self._pending_aggregate_columns.
             exit_node.columns = list(self._pending_aggregate_columns)
+        elif self._exit_columns is not None:
+            # An explicit $select: name exactly those columns, in the requested
+            # order. This is what Opteryx's own SQL planner does (it hands Exit
+            # the projection list), and it is what stops ORDER BY passthrough
+            # columns reaching the response.
+            exit_node.columns = list(self._exit_columns)
         else:
             # Use WILDCARD node to represent "*" - all columns
             # This tells the optimizer we want all columns from the previous step

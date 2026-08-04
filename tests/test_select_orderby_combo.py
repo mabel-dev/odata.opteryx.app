@@ -33,7 +33,8 @@ def test_orderby_column_not_in_select():
     """$orderby on a column outside $select populates Project.passthrough_columns.
 
     This is the exact shape that regressed: the ordering column has to survive
-    the projection so the Order node can use it.
+    the projection so the Order node can use it -- and then be dropped again
+    before serialisation, because $select restricts the response.
     """
     builder = ODataLogicalPlanBuilder(table_name="$planets")
     plan = builder.build(select_cols="name", orderby_expr="gravity desc", top=4)
@@ -47,12 +48,19 @@ def test_orderby_column_not_in_select():
     assert passthrough is not None, "passthrough_columns is None -- stale field name?"
     assert [c.source_column for c in passthrough] == ["gravity"]
 
-    _, rows = execute_plan(plan)
+    col_names, rows = execute_plan(plan)
     assert len(rows) == 4, f"Expected 4 rows, got {len(rows)}"
 
-    # NOTE: reading 'gravity' back only works because _add_exit_node uses a
-    # WILDCARD, so passthrough columns leak past the projection. Per OData,
-    # $select=name should return only 'name'. Tracked as a separate follow-up;
-    # tighten this assertion when the Exit node lists columns explicitly.
-    gravities = [row["gravity"] for row in rows]
+    # The passthrough column carries the ordering through the projection but must
+    # not reach the response -- $select=name means one property, 'name'.
+    assert col_names == ["name"], col_names
+    assert all(set(row) == {"name"} for row in rows), rows
+
+    # ...and the ordering it enabled must still be correct. Take the expected
+    # order from the same query without a projection, which can still read gravity.
+    _, unprojected = execute_plan(
+        ODataLogicalPlanBuilder(table_name="$planets").build(orderby_expr="gravity desc", top=4)
+    )
+    gravities = [row["gravity"] for row in unprojected]
     assert gravities == sorted(gravities, reverse=True), f"Not ordered by gravity: {gravities}"
+    assert [row["name"] for row in rows] == [row["name"] for row in unprojected]

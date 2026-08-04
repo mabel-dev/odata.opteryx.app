@@ -108,21 +108,19 @@ def test_select_with_count():
 def test_apply_with_select():
     """$apply builds an Aggregate node; $select then projects its output.
 
-    KNOWN GAP (pre-existing, unrelated to the passthrough_columns fix): layering
-    $select over an aggregate loses the aggregate's alias. The same $apply
-    without $select returns ['number_of_moons', 'cnt'], but with $select it
-    returns ['number_of_moons', 'COUNT(*)'] -- so a client that asked for 'cnt'
-    gets a property named 'COUNT(*)'. Assert on the shape that is in scope here
-    rather than cementing that behaviour either way.
+    Layering $select over an aggregate used to lose the aggregate's alias -- the
+    same $apply without $select returned ['orbital_eccentricity', 'cnt'], but
+    with $select it returned ['orbital_eccentricity', 'COUNT(*)']. Now that Exit
+    names the $select columns instead of expanding a wildcard, the requested
+    alias survives.
     """
     result = execute_odata_query(
         table_name=TABLE,
-        apply_expr="groupby((orbitalEccentricity),aggregate($count as cnt))",
-        select_cols="orbitalEccentricity,cnt",
+        apply_expr="groupby((orbital_eccentricity),aggregate($count as cnt))",
+        select_cols="orbital_eccentricity,cnt",
     )
 
-    assert len(result["col_names"]) == 2, result["col_names"]
-    assert "orbital_eccentricity" in result["col_names"]
+    assert result["col_names"] == ["orbital_eccentricity", "cnt"], result["col_names"]
     assert result["row_count"] > 0
     assert len(_rows(result)) == result["row_count"]
 
