@@ -121,7 +121,33 @@ def test_etag_from_a_list_of_validators_is_matched(catalog_calls):
     assert res.status_code == 304
 
 
-def test_repeat_request_is_served_without_touching_the_catalog(catalog_calls):
+def test_default_ttl_is_zero_so_every_request_hits_the_catalog(catalog_calls):
+    """Blind time-based caching is wrong for an endpoint whose job is to answer
+    "what does this dataset look like right now" -- a dropped or altered table
+    must be visible on the very next request, not after some TTL elapses. So the
+    response cache is opt-in, not on by default.
+    """
+    _get()
+    _get()
+
+    assert len(catalog_calls) == 2, "each request must re-check the catalog by default"
+
+
+def test_304_saves_the_transfer_even_with_caching_off(catalog_calls):
+    """The catalog is still queried (content might have changed), but if the
+    freshly-rebuilt document is unchanged, the client still gets a 304 -- the
+    transfer and its own parse are saved even though the server did the work.
+    """
+    etag = _get().headers["etag"]
+    assert len(catalog_calls) == 1
+
+    res = _get({"if-none-match": etag})
+    assert res.status_code == 304
+    assert len(catalog_calls) == 2, "content is still freshly checked, just not re-sent"
+
+
+def test_repeat_request_is_served_without_touching_the_catalog(catalog_calls, monkeypatch):
+    monkeypatch.setenv("ODATA_METADATA_CACHE_TTL", "60")
     _get()
     assert len(catalog_calls) == 1
 
@@ -129,7 +155,8 @@ def test_repeat_request_is_served_without_touching_the_catalog(catalog_calls):
     assert len(catalog_calls) == 1, "second request should have been served from cache"
 
 
-def test_304_is_served_without_touching_the_catalog(catalog_calls):
+def test_304_is_served_without_touching_the_catalog(catalog_calls, monkeypatch):
+    monkeypatch.setenv("ODATA_METADATA_CACHE_TTL", "60")
     etag = _get().headers["etag"]
     assert len(catalog_calls) == 1
 

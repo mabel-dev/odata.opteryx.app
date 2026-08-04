@@ -9,7 +9,7 @@ from opteryx.models.logical_column import LogicalColumn
 from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import LogicalPlanNode
 from opteryx.planner.logical_planner import LogicalPlanStepType
-from orso.tools import random_string
+from opteryx.utils import random_string
 
 sys.path.insert(1, os.path.join(sys.path[0], "../opteryx-core"))
 
