@@ -206,3 +206,7 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 REDESIGN.md
+
+# Local developer/exploratory scripts. Not part of the CI suite and not
+# published; see tests/manual/README.md for what lives here and why.
+tests/manual/

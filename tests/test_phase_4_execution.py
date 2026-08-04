@@ -22,19 +22,38 @@ sys.path.insert(0, str(Path(__file__).parent / "app"))
 def execute_plan(plan):
     """Execute a logical plan through Opteryx optimizer and executor.
 
+    The module-level ``opteryx.execute_logical_plan`` no longer exists; execution
+    goes through ``Session.execute_logical_plan``, which returns a
+    ``(results_generator, ResultType)`` tuple of Draken Morsels rather than a
+    materialized table. Mirror what app.routes.v4.interface does so these tests
+    exercise the same API production uses.
+
     Returns:
-        Tuple of (success: bool, result or error message)
+        Tuple of (column_names, rows) where rows is a list of dicts.
+
+    Raises:
+        Whatever the planner/binder/executor raises -- callers assert on success.
     """
-    try:
-        # Execute the plan (Opteryx handles optimization internally)
-        arrow_table = opteryx.execute_logical_plan(plan)
+    from opteryx.constants import ResultType
 
-        # Convert to list of rows
-        rows = arrow_table.to_pylist()
+    session = opteryx.session()
+    results_generator, result_type = session.execute_logical_plan(plan, connection=session)
 
-        return True, rows
-    except Exception as e:
-        return False, str(e)
+    if result_type != ResultType.TABULAR:
+        return [], []
+
+    column_names = None
+    rows = []
+    for morsel in results_generator:
+        morsel.materialize()
+        names = [n.decode("utf-8") if isinstance(n, bytes) else n for n in morsel.column_names]
+        if column_names is None:
+            column_names = names
+        columns = {name: morsel.column(name).to_pylist() for name in names}
+        for i in range(morsel.num_rows):
+            rows.append({name: columns[name][i] for name in names})
+
+    return column_names or [], rows
 
 
 def test_4_1_simple_query():
@@ -59,26 +78,10 @@ def test_4_1_simple_query():
     print(f"    Nodes: {len(list(plan.nodes()))}")
 
     print("  Executing plan...")
-    try:
-        arrow_table = opteryx.execute_logical_plan(plan)
-        rows = arrow_table.to_pylist()
-        print("    ✓ Execution successful")
-        print(f"    Rows returned: {len(rows)}")
+    col_names, rows = execute_plan(plan)
+    print(f"    Rows returned: {len(rows)}, columns: {col_names}")
 
-        if len(rows) > 0:
-            print(f"    Columns: {len(rows[0]) if rows else 0}")
-            print("  ✓✓ PASS: Query executed successfully")
-            return True
-        else:
-            print("    ✗ No rows returned")
-            return False
-
-    except Exception as e:
-        print(f"    ✗ Execution failed: {e}")
-        import traceback
-
-        traceback.print_exc()
-        return False
+    assert len(rows) > 0, "SELECT * FROM $planets returned no rows"
 
 
 def test_4_2_query_with_filter():
@@ -100,25 +103,10 @@ def test_4_2_query_with_filter():
     )
 
     print("  Executing plan...")
-    try:
-        arrow_table = opteryx.execute_logical_plan(plan)
-        rows = arrow_table.to_pylist()
-        print("    ✓ Execution successful")
-        print(f"    Rows returned: {len(rows)}")
+    _, rows = execute_plan(plan)
+    print(f"    Rows returned: {len(rows)}")
 
-        if len(rows) == 1:
-            print("  ✓✓ PASS: Correct number of rows (1)")
-            return True
-        else:
-            print(f"  ✗ FAIL: Expected 1 row, got {len(rows)}")
-            return False
-
-    except Exception as e:
-        print(f"    ✗ Execution failed: {e}")
-        import traceback
-
-        traceback.print_exc()
-        return False
+    assert len(rows) == 1, f"Expected 1 row for 'id eq 1', got {len(rows)}"
 
 
 def test_4_3_query_with_orderby():
@@ -140,25 +128,12 @@ def test_4_3_query_with_orderby():
     )
 
     print("  Executing plan...")
-    try:
-        arrow_table = opteryx.execute_logical_plan(plan)
-        rows = arrow_table.to_pylist()
-        print("    ✓ Execution successful")
-        print(f"    Rows returned: {len(rows)}")
+    _, rows = execute_plan(plan)
+    print(f"    Rows returned: {len(rows)}")
 
-        if len(rows) > 0:
-            print("  ✓✓ PASS: Query with ORDER BY executed")
-            return True
-        else:
-            print("  ✗ FAIL: No rows returned")
-            return False
-
-    except Exception as e:
-        print(f"    ✗ Execution failed: {e}")
-        import traceback
-
-        traceback.print_exc()
-        return False
+    assert len(rows) > 0, "ORDER BY query returned no rows"
+    ids = [row["id"] for row in rows]
+    assert ids == sorted(ids), f"Rows not in ascending id order: {ids}"
 
 
 def test_4_4_query_with_limit():
@@ -180,25 +155,10 @@ def test_4_4_query_with_limit():
     )
 
     print("  Executing plan...")
-    try:
-        arrow_table = opteryx.execute_logical_plan(plan)
-        rows = arrow_table.to_pylist()
-        print("    ✓ Execution successful")
-        print(f"    Rows returned: {len(rows)}")
+    _, rows = execute_plan(plan)
+    print(f"    Rows returned: {len(rows)}")
 
-        if len(rows) == 5:
-            print("  ✓✓ PASS: Correct number of rows (5)")
-            return True
-        else:
-            print(f"  ✗ FAIL: Expected 5 rows, got {len(rows)}")
-            return False
-
-    except Exception as e:
-        print(f"    ✗ Execution failed: {e}")
-        import traceback
-
-        traceback.print_exc()
-        return False
+    assert len(rows) == 5, f"Expected 5 rows for top=5, got {len(rows)}"
 
 
 def test_4_5_complex_query():
@@ -220,25 +180,10 @@ def test_4_5_complex_query():
     )
 
     print("  Executing plan...")
-    try:
-        arrow_table = opteryx.execute_logical_plan(plan)
-        rows = arrow_table.to_pylist()
-        print("    ✓ Execution successful")
-        print(f"    Rows returned: {len(rows)}")
+    _, rows = execute_plan(plan)
+    print(f"    Rows returned: {len(rows)}")
 
-        if len(rows) == 3:
-            print("  ✓✓ PASS: Complex query executed correctly")
-            return True
-        else:
-            print(f"  ✗ FAIL: Expected 3 rows, got {len(rows)}")
-            return False
-
-    except Exception as e:
-        print(f"    ✗ Execution failed: {e}")
-        import traceback
-
-        traceback.print_exc()
-        return False
+    assert len(rows) == 3, f"Expected 3 rows for filter+order+top=3, got {len(rows)}"
 
 
 def test_4_6_query_with_select():
@@ -260,32 +205,11 @@ def test_4_6_query_with_select():
     )
 
     print("  Executing plan...")
-    try:
-        arrow_table = opteryx.execute_logical_plan(plan)
-        rows = arrow_table.to_pylist()
-        print("    ✓ Execution successful")
-        print(f"    Rows returned: {len(rows)}")
+    col_names, rows = execute_plan(plan)
+    print(f"    Rows returned: {len(rows)}, columns: {col_names}")
 
-        if len(rows) > 0:
-            col_count = len(rows[0])
-            print(f"    Columns: {col_count}")
-
-            if col_count == 2:
-                print("  ✓✓ PASS: Correct number of columns (2)")
-                return True
-            else:
-                print(f"  ✗ FAIL: Expected 2 columns, got {col_count}")
-                return False
-        else:
-            print("  ✗ FAIL: No rows returned")
-            return False
-
-    except Exception as e:
-        print(f"    ✗ Execution failed: {e}")
-        import traceback
-
-        traceback.print_exc()
-        return False
+    assert len(rows) > 0, "$select query returned no rows"
+    assert col_names == ["id", "name"], f"Expected columns ['id', 'name'], got {col_names}"
 
 
 def main():
@@ -303,13 +227,15 @@ def main():
         ("4.6", test_4_6_query_with_select),
     ]
 
+    # The test functions assert rather than return a status; a test "passes"
+    # exactly when it returns without raising.
     results = []
     for test_num, test_func in tests:
         try:
-            result = test_func()
-            results.append((test_num, result))
+            test_func()
+            results.append((test_num, True))
         except Exception as e:
-            print(f"\n  ✗✗ EXCEPTION in test {test_num}: {e}")
+            print(f"\n  ✗✗ FAILED test {test_num}: {e}")
             import traceback
 
             traceback.print_exc()

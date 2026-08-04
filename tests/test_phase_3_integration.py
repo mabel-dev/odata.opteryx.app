@@ -8,7 +8,7 @@ to Opteryx logical plans.
 import sys
 from pathlib import Path
 
-from opteryx.managers.expression import NodeType
+from opteryx.expression import NodeType
 from opteryx.planner.logical_planner import LogicalPlanStepType
 
 from app.odata.odata_to_logical_plan import build_logical_plan

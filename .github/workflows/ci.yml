@@ -9,20 +9,23 @@ on:
 
 jobs:
   test:
+    # This job name is the status-check context used by branch protection.
+    # Deliberately NOT a matrix: a matrix would render it "Run tests (3.14)",
+    # so bumping the Python version would rename the check and silently stop
+    # the required-check rule from ever matching again.
     name: Run tests
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: [3.13]
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Setup Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
+          # Must satisfy requires-python in pyproject.toml (>=3.14); on 3.13 the
+          # `pip install -e .` step below fails before any test runs.
+          python-version: "3.14"
 
       - name: Install dependencies
         run: |
@@ -30,5 +33,7 @@ jobs:
           pip install -e .
           pip install pytest
 
-      - name: Run odata battery (canonical)
+      - name: Run test suite
+        # `make t` runs the whole of tests/. Catalog-backed tests skip
+        # automatically when there are no GCP credentials, which is the case here.
         run: make t

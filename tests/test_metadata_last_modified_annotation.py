@@ -1,11 +1,8 @@
 """Tests for last-modified annotations in EDMX metadata."""
 
-import sys
-import types
+from fastapi import Response
 
-# Minimal fake modules to allow importing metadata module without heavy deps
-sys.modules.setdefault("opteryx", types.ModuleType("opteryx"))
-_opteryx_catalog_mod = types.ModuleType("opteryx_catalog")
+from tests._opteryx_stubs import load_with_stubs
 
 
 class FakeSnapshot:
@@ -30,22 +27,10 @@ class FakeCatalog:
         return FakeDataset(1700000000000)
 
 
-_opteryx_catalog_mod.OpteryxCatalog = FakeCatalog
-sys.modules["opteryx_catalog"] = _opteryx_catalog_mod
-
-# Import module under test by file to avoid importing package-level modules
-import importlib.util
-from pathlib import Path
-
-spec = importlib.util.spec_from_file_location(
-    "metadata_mod",
-    str(Path(__file__).resolve().parents[1] / "app" / "routes" / "v4" / "metadata.py"),
-)
-metadata = importlib.util.module_from_spec(spec)
-loader = spec.loader
-assert loader is not None
-loader.exec_module(metadata)
-from fastapi import Response
+# Load against the stubs so the heavy engine/catalog imports are skipped; the
+# stubs are torn down immediately so later tests still get the real opteryx.
+metadata = load_with_stubs("metadata_mod", "app", "routes", "v4", "metadata.py")
+metadata.OpteryxCatalog = FakeCatalog
 
 
 def test_edmx_metadata_includes_last_modified(monkeypatch):
@@ -59,6 +44,9 @@ def test_edmx_metadata_includes_last_modified(monkeypatch):
         last_modified_ms=1600000000000,
     )
 
+    # No Firestore in tests: hand the endpoint a placeholder client so it gets
+    # past the connectivity check -- the dataset lookups below never use it.
+    monkeypatch.setattr(metadata, "_get_firestore_client", lambda **kwargs: object())
     monkeypatch.setattr(metadata, "_get_personal_datasets", lambda db, identity: [ds])
     monkeypatch.setattr(metadata, "_get_workspace_datasets", lambda db, ids: [])
     monkeypatch.setattr(metadata, "_get_dataset_schema", lambda dataset_info: [("id", "Edm.Int64")])

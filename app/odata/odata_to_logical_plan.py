@@ -310,7 +310,7 @@ class ODataLogicalPlanBuilder:
 
         Args:
             select_cols: OData $select expression (comma-separated columns)
-            orderby_expr: OData $orderby expression to determine order_by_columns
+            orderby_expr: OData $orderby expression to determine passthrough_columns
 
         Returns:
             Step ID of the project node
@@ -365,7 +365,7 @@ class ODataLogicalPlanBuilder:
             wildcard_node = Node(node_type=NodeType.WILDCARD)
             wildcard_node.except_columns = None  # No exclusions for basic wildcard
             columns.append(wildcard_node)
-            # With wildcard, all columns are selected, so order_by_columns will be empty
+            # With wildcard, all columns are selected, so passthrough_columns will be empty
         else:
             # Parse individual columns
             for col_name in selected_cols_list:
@@ -379,9 +379,9 @@ class ODataLogicalPlanBuilder:
 
         project_node.columns = columns
 
-        # Compute order_by_columns: columns in ORDER BY but not in SELECT
+        # Compute passthrough_columns: columns in ORDER BY but not in SELECT
         # This allows ordering by columns that aren't in the final projection
-        order_by_columns = []
+        passthrough_columns = []
         if orderby_expr and selected_cols_list != ["*"]:
             # Parse the orderby expression to extract column names
             orderby_tuples = self.expression_parser.parse_orderby(orderby_expr)
@@ -394,9 +394,9 @@ class ODataLogicalPlanBuilder:
                         alias=None,
                     )
                     col_node.query_column = col_name
-                    order_by_columns.append(col_node)
+                    passthrough_columns.append(col_node)
 
-        project_node.order_by_columns = order_by_columns
+        project_node.passthrough_columns = passthrough_columns
         # Initialize except_columns as empty list (for EXCEPT modifier if needed)
         project_node.except_columns = []
 

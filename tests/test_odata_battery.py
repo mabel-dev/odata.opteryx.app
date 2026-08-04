@@ -144,7 +144,10 @@ def run_test_case(
             count_requested=parsed_params.get("count_requested", False),
         )
 
-        actual_rows = len(result["rows"])
+        # execute_odata_query() returns the rows already serialised as
+        # `value_bytes` (a complete JSON array) plus their count, rather than a
+        # materialised "rows" list -- so take the count directly.
+        actual_rows = result["row_count"]
         actual_columns = len(result["col_names"])
         actual_count = result.get("total_count")
 
@@ -678,14 +681,14 @@ PLANETS_TEST_BATTERY = [
     ('testdata.tpch.part', "$filter=startswith(p_type,'MEDIUM') and p_size gt 10", None, 9, None, None),
     ('testdata.tpch.part', '$filter=tolower(p_brand) eq tolower(p_brand)&$top=25', 25, 9, None, None),
     ('testdata.tpch.part', "$filter=contains(p_container,'BOX')&$top=70", None, 9, None, None),
-    ('testdata.tpch.nation', '$apply=groupby((n_regionkey),aggregate($count as NationCount))&$orderby=NationCount desc&$top=1', None, None, None, 'Exception'),
-    ('testdata.tpch.supplier', '$apply=groupby((s_nationkey),aggregate($count as SupplierCount))&$orderby=SupplierCount desc&$top=1', None, None, None, 'Exception'),
-    ('testdata.tpch.customer', '$apply=groupby((c_nationkey),aggregate($count as CustomerCount))&$orderby=CustomerCount desc&$top=1', None, None, None, 'Exception'),
-    ('testdata.tpch.nation', '$count=true&$top=0&$apply=groupby((n_regionkey),aggregate($count as NationCount))&$orderby=NationCount desc&$top=1', None, None, None, 'Exception'),
+    ('testdata.tpch.nation', '$apply=groupby((n_regionkey),aggregate($count as NationCount))&$orderby=NationCount desc&$top=1', 1, 2, None, None),
+    ('testdata.tpch.supplier', '$apply=groupby((s_nationkey),aggregate($count as SupplierCount))&$orderby=SupplierCount desc&$top=1', 1, 2, None, None),
+    ('testdata.tpch.customer', '$apply=groupby((c_nationkey),aggregate($count as CustomerCount))&$orderby=CustomerCount desc&$top=1', 1, 2, None, None),
+    ('testdata.tpch.nation', '$count=true&$top=0&$apply=groupby((n_regionkey),aggregate($count as NationCount))&$orderby=NationCount desc&$top=1', 0, 2, 5, None),
     ('testdata.tpch.supplier', '$apply=groupby((s_nationkey),aggregate(s_suppkey with count as SupplierCount))', None, 7, None, 'Exception'),
-    ('testdata.tpch.nation', '$apply=groupby((n_regionkey),aggregate($count as total))&$orderby=total desc', None, None, None, 'Exception'),
-    ('testdata.tpch.part', '$apply=groupby((p_size),aggregate($count as PartCount))&$orderby=PartCount desc&$top=5', None, None, None, 'Exception'),
-    ('testdata.tpch.customer', '$apply=groupby((c_nationkey),aggregate($count as cnt))&$filter=cnt gt 10', None, None, None, 'Exception'),
+    ('testdata.tpch.nation', '$apply=groupby((n_regionkey),aggregate($count as total))&$orderby=total desc', 5, 2, None, None),
+    ('testdata.tpch.part', '$apply=groupby((p_size),aggregate($count as PartCount))&$orderby=PartCount desc&$top=5', 5, 2, None, None),
+    ('testdata.tpch.customer', '$apply=groupby((c_nationkey),aggregate($count as cnt))&$filter=cnt gt 10', 25, 2, None, None),
     ('$planets', "$filter=tolower(name) eq 'earth'", 1, 20, None, None),
     ('$planets', "$filter=toupper(name) eq 'MARS'", 1, 20, None, None),
     ('$planets', "$filter=startswith(tolower(name),'m')", 2, 20, None, None),
@@ -753,7 +756,7 @@ PLANETS_TEST_BATTERY = [
     ('testdata.tpch.part', '$filter=floor(p_size) lt 10&$top=60', None, 9, None, None),
     ('testdata.tpch.part', '$filter=round(p_size) eq 25&$top=30', None, 9, None, None),
     ('$planets', '$filter=ceiling(mass) gt 1 and floor(number_of_moons) gt 0', 5, 20, None, None),
-    ('testdata.tpch.nation', '$filter=round(n_nationkey) mod 5 eq 0&$top=20', None, 4, None, 'Exception'),
+    ('testdata.tpch.nation', '$filter=round(n_nationkey) mod 5 eq 0&$top=20', 4, 4, None, None),
     ('$planets', '$filter=length(name) gt 5', 5, 20, None, None),
     ('$planets', '$filter=length(name) eq 4', 1, 20, None, None),
     ('$planets', '$filter=length(name) lt 6', 4, 20, None, None),

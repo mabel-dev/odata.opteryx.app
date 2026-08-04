@@ -1,54 +1,14 @@
 """Test that tables include snapshot last-modified header and annotation."""
 
-import sys
-import types
-import importlib.util
-from pathlib import Path
 from fastapi import Response
 
-# Provide lightweight fakes
-sys.modules.setdefault("opteryx", types.ModuleType("opteryx"))
-opteryx_mod = sys.modules["opteryx"]
-opteryx_mod.set_default_connector = lambda *args, **kwargs: None
-_connectors_mod = types.ModuleType("opteryx.connectors")
-_connectors_mod.OpteryxConnector = type("OpteryxConnector", (), {})
-sys.modules["opteryx.connectors"] = _connectors_mod
-_expr_mod = types.ModuleType("opteryx.managers.expression")
-_expr_mod.NodeType = type("NodeType", (), {})
-sys.modules["opteryx.managers.expression"] = _expr_mod
-_top_expr_mod = types.ModuleType("opteryx.expression")
-_top_expr_mod.NodeType = type("NodeType", (), {})
-sys.modules["opteryx.expression"] = _top_expr_mod
-_utils_mod = types.ModuleType("opteryx.utils")
-_utils_mod.random_string = lambda *args, **kwargs: "randomstring"
-sys.modules["opteryx.utils"] = _utils_mod
-_models_mod = types.ModuleType("opteryx.models")
-_models_mod.Node = type("Node", (), {})
-sys.modules["opteryx.models"] = _models_mod
-_planner_mod = types.ModuleType("opteryx.planner.logical_planner")
-_planner_mod.LogicalPlan = type("LogicalPlan", (), {})
-_planner_mod.LogicalPlanNode = type("LogicalPlanNode", (), {})
-_planner_mod.LogicalPlanStepType = type("LogicalPlanStepType", (), {})
-sys.modules["opteryx.planner.logical_planner"] = _planner_mod
-_logical_col_mod = types.ModuleType("opteryx.models.logical_column")
-_logical_col_mod.LogicalColumn = type("LogicalColumn", (), {})
-sys.modules["opteryx.models.logical_column"] = _logical_col_mod
-# Minimal opteryx_catalog
-_opteryx_catalog_mod = types.ModuleType("opteryx_catalog")
-_opteryx_catalog_mod.OpteryxCatalog = type(
-    "OpteryxCatalog", (), {"load_dataset": lambda self, p: None}
-)
-sys.modules["opteryx_catalog"] = _opteryx_catalog_mod
+from tests._opteryx_stubs import load_with_stubs
 
-# Load interface module by file
-spec = importlib.util.spec_from_file_location(
-    "interface_mod",
-    str(Path(__file__).resolve().parents[1] / "app" / "routes" / "v4" / "interface.py"),
-)
-interface = importlib.util.module_from_spec(spec)
-loader = spec.loader
-assert loader is not None
-loader.exec_module(interface)
+# Load interface.py against lightweight fakes so this test needs no engine or
+# catalog. load_with_stubs tears the fakes back out of sys.modules as soon as
+# the module is loaded -- leaving them installed poisons every later test that
+# imports the real opteryx ("cannot import name ... (unknown location)").
+interface = load_with_stubs("interface_mod", "app", "routes", "v4", "interface.py")
 
 
 class DummyState:

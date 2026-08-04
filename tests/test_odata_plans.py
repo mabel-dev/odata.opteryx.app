@@ -69,7 +69,12 @@ print_plan(
 def test_apply_aggregate_only_plan():
     builder = ODataLogicalPlanBuilder("public.github.events")
     plan = builder.build(
-        apply_expr="aggregate(min(published_at) as min_published_at, max(published_at) as max_published_at)"
+        # OData v4 $apply aggregate syntax is "<property> with <method> as <alias>";
+        # min(...)/max(...) function-call form is not part of the spec grammar.
+        apply_expr=(
+            "aggregate(published_at with min as min_published_at, "
+            "published_at with max as max_published_at)"
+        )
     )
 
     found = False

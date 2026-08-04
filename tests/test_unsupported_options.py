@@ -1,21 +1,4 @@
 """Tests for rejecting unsupported OData query options ($search, $expand)."""
-
-import pytest
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
-
-from app.routes.v4.interface import router, require_authentication
-
-
-@pytest.fixture
-def client():
-    """Create a test client with authentication mocked out."""
-    app = FastAPI()
-    app.dependency_overrides[require_authentication] = lambda: None
-    app.include_router(router)
-    return TestClient(app)
-
-
 class TestSearchRejection:
     """Test that $search queries are rejected with 501."""
 

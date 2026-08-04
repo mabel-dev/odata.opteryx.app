@@ -8,7 +8,7 @@ with proper structure, references, and attributes.
 
 import sys
 
-from opteryx.managers.expression import NodeType
+from opteryx.expression import NodeType
 from opteryx.planner.logical_planner import LogicalPlanStepType
 
 from app.odata.odata_to_logical_plan import ODataLogicalPlanBuilder
@@ -269,17 +269,16 @@ def test_project_node():
             return False
     print(f"✓ All columns are IDENTIFIER nodes: {', '.join(expected_cols)}")
 
-    # Check order_by_columns attribute (should be empty list, not None)
-    if not hasattr(project_node, "order_by_columns"):
-        print("✗ Project node missing order_by_columns attribute")
-        return False
-    if project_node.order_by_columns is None:
-        print("✗ Project node order_by_columns is None (should be [])")
-        return False
-    if project_node.order_by_columns != []:
-        print(f"✗ Project node order_by_columns should be [], got {project_node.order_by_columns}")
-        return False
-    print("✓ Project node has order_by_columns = []")
+    # Check passthrough_columns attribute (should be empty list, not None).
+    # LogicalPlanNode.__getattr__ returns None for unset attributes, so an
+    # explicit `is None` check is what catches a stale/misspelled field name.
+    assert (
+        project_node.passthrough_columns is not None
+    ), "Project node passthrough_columns is None (should be [])"
+    assert (
+        project_node.passthrough_columns == []
+    ), f"Project node passthrough_columns should be [], got {project_node.passthrough_columns}"
+    print("✓ Project node has passthrough_columns = []")
 
     print("✓✓ Phase 2.5 PASS: Project node structure correct")
     return True

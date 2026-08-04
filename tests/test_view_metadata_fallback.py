@@ -1,52 +1,8 @@
 """Tests for view fallback in dataset metadata endpoint."""
 
-import sys
-import types
-import importlib.util
-from pathlib import Path
 from fastapi import Response
 
-# Provide lightweight fake modules required by interface imports
-opteryx_mod = sys.modules.setdefault("opteryx", types.ModuleType("opteryx"))
-# Provide a stub for set_default_connector used by interface module
-opteryx_mod.set_default_connector = lambda *args, **kwargs: None
-# opteryx.connectors
-_connectors_mod = types.ModuleType("opteryx.connectors")
-_connectors_mod.OpteryxConnector = type("OpteryxConnector", (), {})
-sys.modules["opteryx.connectors"] = _connectors_mod
-# Minimal opteryx.managers.expression with NodeType
-_expr_mod = types.ModuleType("opteryx.managers.expression")
-_expr_mod.NodeType = type("NodeType", (), {})
-sys.modules["opteryx.managers.expression"] = _expr_mod
-# Minimal opteryx.models and submodules
-_models_mod = types.ModuleType("opteryx.models")
-_models_mod.Node = type("Node", (), {})
-sys.modules["opteryx.models"] = _models_mod
-_logical_col_mod = types.ModuleType("opteryx.models.logical_column")
-_logical_col_mod.LogicalColumn = type("LogicalColumn", (), {})
-sys.modules["opteryx.models.logical_column"] = _logical_col_mod
-# Minimal planner modules
-_planner_mod = types.ModuleType("opteryx.planner.logical_planner")
-_planner_mod.LogicalPlan = type("LogicalPlan", (), {})
-_planner_mod.LogicalPlanNode = type("LogicalPlanNode", (), {})
-_planner_mod.LogicalPlanStepType = type("LogicalPlanStepType", (), {})
-sys.modules["opteryx.planner.logical_planner"] = _planner_mod
-# Minimal opteryx_catalog
-_opteryx_catalog_mod = types.ModuleType("opteryx_catalog")
-_opteryx_catalog_mod.OpteryxCatalog = type(
-    "OpteryxCatalog", (), {"load_dataset": lambda self, path: None}
-)
-sys.modules["opteryx_catalog"] = _opteryx_catalog_mod
-
-# Load interface module by file to avoid package import side-effects
-spec = importlib.util.spec_from_file_location(
-    "interface_mod",
-    str(Path(__file__).resolve().parents[1] / "app" / "routes" / "v4" / "interface.py"),
-)
-interface = importlib.util.module_from_spec(spec)
-loader = spec.loader
-assert loader is not None
-loader.exec_module(interface)
+from app.routes.v4 import interface
 
 
 class DummyState:

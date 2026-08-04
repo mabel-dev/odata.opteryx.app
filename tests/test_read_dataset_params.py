@@ -17,7 +17,7 @@ def test_duplicate_top_parameters_rejected():
 
     res = client.get("/api/v4/public/github/events?$top=0&$top=1")
     assert res.status_code == 400
-    assert "Multiple $top parameters" in res.json().get("detail", "")
+    assert "Multiple parameters not allowed: $top" in res.json().get("detail", "")
 
 
 def test_count_with_groupby_returns_group_count():

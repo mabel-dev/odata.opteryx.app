@@ -4,7 +4,7 @@ import os
 import sys
 
 import opteryx
-from opteryx.managers.expression import NodeType
+from opteryx.expression import NodeType
 from opteryx.models.logical_column import LogicalColumn
 from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import LogicalPlanNode
@@ -84,7 +84,7 @@ def test_order_with_project():
     plan = LogicalPlan()
 
     # Scan
-    from opteryx.managers.expression import Node
+    from opteryx.expression import Node
 
     scan_id = random_string()
     scan_node = LogicalPlanNode(node_type=LogicalPlanStepType.Scan)

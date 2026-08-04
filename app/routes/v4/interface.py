@@ -706,6 +706,10 @@ def read_dataset(
         raise HTTPException(status_code=403, detail=str(e))
     except opteryx.exceptions.PermissionsError as e:
         raise HTTPException(status_code=403, detail=str(e))
+    except opteryx.exceptions.DatasetNotFoundError as e:
+        # Match the $metadata endpoint: an unknown dataset is a 404, not a 400,
+        # even though DatasetNotFoundError is (surprisingly) a subclass of SqlError.
+        raise HTTPException(status_code=404, detail="dataset not found in catalog") from e
     except (opteryx.exceptions.SqlError, opteryx.exceptions.IncompatibleTypesError) as e:
         # "The query as given is invalid" — client-fixable (bad/uncast filter
         # literal, unknown column, unsupported syntax, etc.), not a server fault.

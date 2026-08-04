@@ -25,6 +25,13 @@ dependencies = [
     "valkey==6.1.1",
 ]
 
+[tool.pytest.ini_options]
+# Only the maintained suite: tests/manual holds developer scripts (see its
+# README) and app/vendored ships the upstream odata-query test suite -- neither
+# is ours to keep green.
+testpaths = ["tests"]
+norecursedirs = ["manual", "app/vendored"]
+
 [tool.isort]
 profile = "black"
 extend_skip_glob = ["tests/**"]
