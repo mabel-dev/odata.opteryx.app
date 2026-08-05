@@ -35,7 +35,7 @@ service.add_exception_handler(Exception, generic_exception_handler)
 
 configure_cors(service)
 
-service.add_middleware(CompressionMiddleware, quality=4, minimum_size=1024)
+service.add_middleware(CompressionMiddleware, quality=1, minimum_size=4096)
 service.add_middleware(AuditMiddleware)
 
 # include routes
