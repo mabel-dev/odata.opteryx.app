@@ -63,6 +63,35 @@ GCP_PROJECT_ID = os.environ.get("GCP_PROJECT_ID")
 DEFAULT_TOP = int(os.environ.get("ODATA_DEFAULT_TOP", "100"))
 MAX_TOP = int(os.environ.get("ODATA_MAX_TOP", "25000"))
 
+# A materialized view is a real dataset -- it has a schema, snapshots and a sort
+# order like any table -- that the catalog tags with `dataset-type`
+# (MATERIALIZED_VIEW_TYPE in opteryx_catalog.opteryx_catalog, surfaced on a
+# loaded dataset as `ds.metadata.dataset_type`). It is surfaced under its own
+# source label, but must follow the *Table* code path everywhere else. The value
+# is duplicated rather than imported so this module stays importable without the
+# catalog package (several tests load it against stubs).
+MATERIALIZED_VIEW_DATASET_TYPE = "materialized_view"
+MATERIALIZED_VIEW_SOURCE = "MaterializedView"
+# Source labels backed by a physical table: real schema, snapshots, sort orders.
+TABLE_LIKE_SOURCES = ("Table", MATERIALIZED_VIEW_SOURCE)
+
+
+def _loaded_dataset_source_type(ds) -> str:
+    """"Table" or "MaterializedView" for an already-loaded catalog dataset.
+
+    Reads `ds.metadata.dataset_type`, which the catalog populates from the
+    dataset document's `dataset-type` field -- no extra round trip. Defensive
+    because older opteryx-catalog wheels have no such attribute.
+    """
+    try:
+        if getattr(getattr(ds, "metadata", None), "dataset_type", None) == (
+            MATERIALIZED_VIEW_DATASET_TYPE
+        ):
+            return MATERIALIZED_VIEW_SOURCE
+    except Exception:
+        pass
+    return "Table"
+
 # OData clients refetch $metadata constantly -- Power BI does so on every refresh,
 # and the web UI does so every time a details panel is opened. The two savings
 # here are independent, and only one is on by default:
@@ -1060,7 +1089,10 @@ def dataset_metadata(
             source_type = "Table"
             try:
                 ds = workspace.load_dataset(f"{collection}.{dataset}")
-                source_type = "Table"
+                # A materialized view is a dataset whose metadata carries a
+                # `dataset_type`; it is physically a table (schema, snapshots,
+                # sort order) and only its label differs.
+                source_type = _loaded_dataset_source_type(ds)
             except Exception:
                 try:
                     ds = workspace.load_view(f"{collection}.{dataset}")
@@ -1091,7 +1123,7 @@ def dataset_metadata(
             def _fetch_snapshot():
                 try:
                     if (
-                        source_type == "Table"
+                        source_type in TABLE_LIKE_SOURCES
                         and hasattr(ds, "snapshot")
                         and callable(getattr(ds, "snapshot"))
                     ):
@@ -1159,6 +1191,9 @@ def dataset_metadata(
             else:
                 # If this is a view and the catalog object does not provide a schema,
                 # emit a minimal placeholder so the metadata document remains valid.
+                # Materialized views deliberately do *not* take this branch: they
+                # are physical tables and always have a schema, so its absence is
+                # the same invalid catalog state it is for any other table.
                 if source_type == "View":
                     # Single string key placeholder
                     col_names = ["id"]
@@ -1175,7 +1210,7 @@ def dataset_metadata(
             # is already fetched above.
             sort_order_column = None
             sort_order_ascending = True
-            if source_type == "Table":
+            if source_type in TABLE_LIKE_SOURCES:
                 try:
                     from opteryx_catalog.catalog.compaction import normalize_sort_order
 
@@ -1447,8 +1482,9 @@ def dataset_metadata(
         except Exception:
             pass
 
-    # If this is a table, add snapshot and table-level metadata annotations
-    if source_type == "Table":
+    # If this is a table (or a materialized view, which is one physically), add
+    # snapshot and table-level metadata annotations
+    if source_type in TABLE_LIKE_SOURCES:
         try:
             # Snapshot annotations
             if snapshot_info:
@@ -1530,6 +1566,53 @@ def dataset_metadata(
                     attrib={
                         "Term": "Custom.SortOrder.Direction",
                         "String": "asc" if sort_order_ascending else "desc",
+                    },
+                )
+        except Exception:
+            pass
+
+    # A materialized view additionally has a registration record: the SQL it is
+    # refreshed from, the tables it reads, and its last refresh outcome. Best
+    # effort only -- older catalog wheels have no get_materialized_view(), and a
+    # missing record must not break an otherwise valid metadata document.
+    if source_type == MATERIALIZED_VIEW_SOURCE:
+        try:
+            mv = workspace.get_materialized_view(f"{collection}.{dataset}")
+            # Custom.Definition is the term views already use for defining SQL.
+            if mv.get("sql"):
+                ET.SubElement(
+                    entity_set,
+                    f"{{{NS_EDM}}}Annotation",
+                    attrib={"Term": "Custom.Definition", "String": str(mv["sql"])},
+                )
+            source_tables = mv.get("source-tables") or []
+            if source_tables:
+                ET.SubElement(
+                    entity_set,
+                    f"{{{NS_EDM}}}Annotation",
+                    attrib={
+                        "Term": "Custom.MaterializedView.SourceTables",
+                        "String": ",".join(str(t) for t in source_tables),
+                    },
+                )
+            refreshed_at = mv.get("last-refreshed-at-ms")
+            if refreshed_at:
+                ET.SubElement(
+                    entity_set,
+                    f"{{{NS_EDM}}}Annotation",
+                    attrib={
+                        "Term": "Custom.MaterializedView.LastRefreshed",
+                        "Int": str(int(refreshed_at)),
+                    },
+                )
+            refresh_status = mv.get("last-refresh-status")
+            if refresh_status:
+                ET.SubElement(
+                    entity_set,
+                    f"{{{NS_EDM}}}Annotation",
+                    attrib={
+                        "Term": "Custom.MaterializedView.LastRefreshStatus",
+                        "String": str(refresh_status),
                     },
                 )
         except Exception:

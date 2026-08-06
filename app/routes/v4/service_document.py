@@ -17,6 +17,29 @@ from opteryx_catalog.catalog.compaction import normalize_sort_order
 logger = get_logger()
 router = APIRouter(prefix="/api/v4")
 
+# A materialized view is a real dataset -- it lives in the `datasets`
+# subcollection and has snapshots, a schema and a sort order -- that the catalog
+# tags with a `dataset-type` field (MATERIALIZED_VIEW_TYPE in
+# opteryx_catalog.opteryx_catalog). Plain datasets carry no such field. The value
+# is duplicated rather than imported so these route modules stay importable
+# without the catalog package (several tests load them against stubs).
+MATERIALIZED_VIEW_DATASET_TYPE = "materialized_view"
+MATERIALIZED_VIEW_SOURCE = "MaterializedView"
+
+
+def _source_type_from_doc(data, collection: str) -> str:
+    """Source label for a catalog document: View, MaterializedView or Table.
+
+    `collection` is the subcollection the document came from ("datasets" or
+    "views"); materialized views live in "datasets" and are told apart from
+    plain datasets by their `dataset-type` field.
+    """
+    if collection == "views":
+        return "View"
+    if isinstance(data, dict) and data.get("dataset-type") == MATERIALIZED_VIEW_DATASET_TYPE:
+        return MATERIALIZED_VIEW_SOURCE
+    return "Table"
+
 
 def _normalize_resource_name(resource: str) -> str:
     """Normalize resource name by removing trailing '.*' or '.' segments."""
@@ -213,8 +236,9 @@ def _query_collection_group(
                 resource_name = f"{workspace}.{collection_name}.{name}"
                 resource_name = _normalize_resource_name(resource_name)
 
-                # Determine source type based on collection group ('datasets' => Table, 'views' => View)
-                source_type = "View" if collection == "views" else "Table"
+                # Determine source type from the collection group ('views' => View)
+                # and, for datasets, the doc's `dataset-type` (=> MaterializedView)
+                source_type = _source_type_from_doc(data, collection)
                 ordered, order_by, order_direction, pending_sort_key = _sort_order_from_doc(data)
 
                 schema_ref = None
@@ -265,7 +289,7 @@ def _get_personal_datasets(db, identity: str) -> list[DatasetInfo]:
                     resource_name = f"{workspace}.{collection_name}.{name}"
                     resource_name = _normalize_resource_name(resource_name)
 
-                    source_type = "View" if child == "views" else "Table"
+                    source_type = _source_type_from_doc(data, child)
                     ordered, order_by, order_direction, pending_sort_key = _sort_order_from_doc(data)
 
                     schema_ref = None
@@ -350,7 +374,10 @@ def get_service_document(
         * name: fully-qualified dataset name (workspace.collection.dataset)
         * kind: always "EntitySet"
         * url: relative URL for querying (workspace/collection/dataset)
-        * source: "Table", "View", or "Virtual" (synthetic, e.g. information_schema.tables) indicating dataset type
+        * source: "Table", "View", "MaterializedView" (a dataset the catalog marks
+          with dataset-type "materialized_view" -- physically a table, refreshed
+          from a query), or "Virtual" (synthetic, e.g. information_schema.tables)
+          indicating dataset type
         * role: user's permission level (reader, writer, admin, owner)
         * policy: access-control policy that grants permission
         * ordered: whether the underlying storage has a configured physical sort order

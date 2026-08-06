@@ -30,6 +30,29 @@ FIRESTORE_DATABASE = os.environ.get("FIRESTORE_DATABASE")
 BUCKET_NAME = os.environ.get("GCS_BUCKET")
 GCP_PROJECT_ID = os.environ.get("GCP_PROJECT_ID")
 
+# A materialized view is a real dataset -- it lives in the `datasets`
+# subcollection and has snapshots, a schema and a sort order -- that the catalog
+# tags with a `dataset-type` field (MATERIALIZED_VIEW_TYPE in
+# opteryx_catalog.opteryx_catalog). Plain datasets carry no such field. The value
+# is duplicated rather than imported so this module stays importable without the
+# catalog package (several tests load it against stubs).
+MATERIALIZED_VIEW_DATASET_TYPE = "materialized_view"
+MATERIALIZED_VIEW_SOURCE = "MaterializedView"
+
+
+def _source_type_from_doc(data, collection: str) -> str:
+    """Source label for a catalog document: View, MaterializedView or Table.
+
+    `collection` is the subcollection the document came from ("datasets" or
+    "views"); materialized views live in "datasets" and are told apart from
+    plain datasets by their `dataset-type` field.
+    """
+    if collection == "views":
+        return "View"
+    if isinstance(data, dict) and data.get("dataset-type") == MATERIALIZED_VIEW_DATASET_TYPE:
+        return MATERIALIZED_VIEW_SOURCE
+    return "Table"
+
 
 def _normalize_resource_name(resource: str) -> str:
     """Normalize resource name by removing trailing '.*' or '.' segments."""
@@ -150,8 +173,9 @@ def _query_collection_group(
                 resource_name = f"{workspace}.{collection_name}.{name}"
                 resource_name = _normalize_resource_name(resource_name)
 
-                # Determine source type based on collection group ('datasets' => Table, 'views' => View)
-                source_type = "View" if collection == "views" else "Table"
+                # Determine source type from the collection group ('views' => View)
+                # and, for datasets, the doc's `dataset-type` (=> MaterializedView)
+                source_type = _source_type_from_doc(data, collection)
 
                 # Try to capture last modified information from Firestore doc (common field names)
                 last_modified = None
@@ -224,6 +248,7 @@ def _get_personal_datasets(db, identity: str) -> list[DatasetInfo]:
                         workspace=workspace,
                         collection=collection_name,
                         name=name,
+                        source=_source_type_from_doc(data, "datasets"),
                     )
                 )
             except Exception:
@@ -335,7 +360,7 @@ def get_edmx_metadata(
             - Name: fully-qualified dataset name (workspace_collection_dataset)
             - Key: first column used as primary key
             - Properties: column definitions with Name, Type, Nullable
-            - Annotations: Custom.SourceType (Table/View), Custom.LastModified
+            - Annotations: Custom.SourceType (Table/View/MaterializedView), Custom.LastModified
           * EntityContainer (wrapper for EntitySets)
             - EntitySet elements: one per dataset
               * Name: underscored dataset name (CSDL SimpleIdentifier)
@@ -343,7 +368,9 @@ def get_edmx_metadata(
               * Annotations: source type, access control, last modified timestamp
 
     Custom annotations:
-    - Custom.SourceType: "Table" or "View"
+    - Custom.SourceType: "Table", "View", "MaterializedView" (a dataset the catalog
+      marks with dataset-type "materialized_view" -- physically a table, refreshed
+      from a query), or "Virtual" (synthetic information_schema datasets)
     - Custom.LastModified: ISO 8601 timestamp of last modification
     - Per-dataset column statistics available at /{ws}/{coll}/{ds}/$metadata
 
@@ -520,7 +547,7 @@ def get_edmx_metadata(
             attrib={"Name": entity_set_name, "EntityType": f"OData.{entity_type_name}"},
         )
 
-        # Add annotation indicating source type (Table or View)
+        # Add annotation indicating source type (Table, View, MaterializedView, Virtual)
         ET.SubElement(
             entity_set,
             "{" + NS_EDM + "}Annotation",
