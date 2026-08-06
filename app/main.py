@@ -3,7 +3,6 @@ import sys
 
 from fastapi import FastAPI
 from fastapi import HTTPException
-from fastapi.responses import ORJSONResponse
 from app.logging import get_logger
 from app.logging import set_log_name
 
@@ -26,7 +25,16 @@ set_log_name("opteryx.odata")
 logger = get_logger()
 logger.setLevel(5)
 
-service = FastAPI(title="Opteryx OData Service", default_response_class=ORJSONResponse)
+# No default_response_class: nothing that matters is serialized through one.
+# Every response with a payload worth the name is already built as bytes and
+# returned as a bare Response — query results (read_dataset splices rugo's
+# write_jsonl output straight into the body) and both EDMX documents (XML).
+# Those bypass the response class entirely: no jsonable_encoder, no render().
+# What is left going through it is the service document and /health, which are
+# small dicts where the serializer is unmeasurable. ORJSONResponse was carrying
+# a deprecation warning and an orjson dependency to accelerate a path that is
+# effectively never taken, so both are gone and FastAPI's default stands.
+service = FastAPI(title="Opteryx OData v4 Service")
 
 # Register exception handlers for OData v4 error format
 service.add_exception_handler(ODataError, odata_error_handler)

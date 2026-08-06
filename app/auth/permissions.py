@@ -132,6 +132,13 @@ AUTHENTICATED_READ_RELATIONS = (
     "opteryx.ops.query_count_billing",
     "opteryx.ops.storage_billing",
     "opteryx.ops.processed_billing",
+    # AI assistant usage (tokens, conversation turns, describes). Reports usage
+    # only — the cost column is a literal zero because AI is not charged for yet.
+    # Listed here for the same reason as the others: it aggregates the same
+    # billing rows, so the row-level filter on BILLING_RELATION scopes it, but
+    # table-level permission is checked against the VIEW name, which without
+    # this entry has no grant and is denied.
+    "opteryx.ops.ai_usage_billing",
 )
 
 
