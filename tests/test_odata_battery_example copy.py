@@ -21,7 +21,7 @@ from urllib.parse import parse_qs
 
 os.environ["OPTERYX_DEBUG"] = "1"
 
-sys.path.insert(1, os.path.join(sys.path[0], "../../pyiceberg-firestore-gcs"))
+sys.path.insert(1, os.path.join(sys.path[0], "../../opteryx-catalog"))
 sys.path.insert(1, os.path.join(sys.path[0], "../../opteryx-core"))
 sys.path.insert(0, os.path.join(sys.path[0], "../"))
 

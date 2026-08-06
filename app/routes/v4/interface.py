@@ -10,7 +10,7 @@ import sys
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../opteryx-core")))
 sys.path.insert(
-    0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../pyiceberg-firestore-gcs"))
+    0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../opteryx-catalog"))
 )
 
 import base64

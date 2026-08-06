@@ -26,7 +26,7 @@ _tests_dir = Path(__file__).resolve().parent
 _project_root = _tests_dir.parent
 # The external dev packages live at the workspace root (one level up from repo root)
 _workspace_root = _project_root.parent
-sys.path.insert(1, str(_workspace_root / "pyiceberg-firestore-gcs"))
+sys.path.insert(1, str(_workspace_root / "opteryx-catalog"))
 sys.path.insert(1, str(_workspace_root / "opteryx-core"))
 sys.path.insert(0, str(_project_root / "app"))
 

@@ -7,7 +7,7 @@ import sys
 from app.odata.odata_to_logical_plan import ODataLogicalPlanBuilder
 from opteryx.planner.logical_planner import LogicalPlanStepType
 
-sys.path.insert(1, os.path.join(sys.path[0], "../pyiceberg-firestore-gcs"))
+sys.path.insert(1, os.path.join(sys.path[0], "../opteryx-catalog"))
 sys.path.insert(1, os.path.join(sys.path[0], "../opteryx-core"))
 sys.path.insert(0, os.path.join(sys.path[0], "app"))
 

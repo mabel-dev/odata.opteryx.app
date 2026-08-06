@@ -11,7 +11,7 @@ from opteryx_catalog import OpteryxCatalog
 
 from app.routes.v4.interface import read_dataset
 
-sys.path.insert(1, os.path.join(sys.path[0], "../pyiceberg-firestore-gcs"))
+sys.path.insert(1, os.path.join(sys.path[0], "../opteryx-catalog"))
 sys.path.insert(1, os.path.join(sys.path[0], "../opteryx-core"))
 sys.path.insert(0, os.path.join(sys.path[0], "app"))
 

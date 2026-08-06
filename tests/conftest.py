@@ -3,7 +3,7 @@
 Sets up sys.path so tests can import:
   - the app package itself (repo root)
   - the vendored odata_query parser (app/vendored/odata-query)
-  - local dev checkouts of opteryx-core / pyiceberg-firestore-gcs, when present
+  - local dev checkouts of opteryx-core / opteryx-catalog, when present
 
 The local dev checkouts are siblings of the repo root and only exist on a
 developer machine. In CI they are absent and the pip-installed distributions
@@ -34,7 +34,7 @@ _prepend(os.path.join(_root_dir, "app", "vendored", "odata-query"))
 
 # Local dev checkouts, if the developer has them alongside this repo.
 _prepend(os.path.abspath(os.path.join(_root_dir, "..", "opteryx-core")))
-_prepend(os.path.abspath(os.path.join(_root_dir, "..", "pyiceberg-firestore-gcs")))
+_prepend(os.path.abspath(os.path.join(_root_dir, "..", "opteryx-catalog")))
 
 
 import pytest  # noqa: E402  (must follow the sys.path setup above)
