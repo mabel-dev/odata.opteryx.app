@@ -17,6 +17,7 @@ from opteryx_catalog import OpteryxCatalog
 from app.logging import get_logger
 
 from app.auth.deps import require_authentication
+from app.config_client import get_config
 from app.core import _get_firestore_client
 from app.odata.edm_types import column_type_to_edm
 from app.odata.virtual_datasets import VIRTUAL_INFORMATION_SCHEMA_TABLES
@@ -26,9 +27,19 @@ logger = get_logger()
 router = APIRouter(prefix="/api/v4")
 
 
-FIRESTORE_DATABASE = os.environ.get("FIRESTORE_DATABASE")
-BUCKET_NAME = os.environ.get("GCS_BUCKET")
 GCP_PROJECT_ID = os.environ.get("GCP_PROJECT_ID")
+
+
+# Resolved per use, not at import. A module-level constant is evaluated once
+# at startup and then frozen for the life of the process, so config changes
+# would never reach it without a redeploy.
+def _firestore_database() -> str:
+    return get_config("FIRESTORE_DATABASE")
+
+
+def _bucket_name() -> str:
+    return get_config("GCS_BUCKET")
+
 
 # A materialized view is a real dataset -- it lives in the `datasets`
 # subcollection and has snapshots, a schema and a sort order -- that the catalog
@@ -304,8 +315,8 @@ def _get_dataset_schema(dataset_info: DatasetInfo) -> list[tuple[str, str]]:
         catalog = OpteryxCatalog(
             dataset_info.workspace,
             firestore_project=GCP_PROJECT_ID,
-            firestore_database=FIRESTORE_DATABASE,
-            gcs_bucket=BUCKET_NAME,
+            firestore_database=_firestore_database(),
+            gcs_bucket=_bucket_name(),
         )
 
         # Load dataset from catalog (namespace.table_name format)
@@ -560,8 +571,8 @@ def get_edmx_metadata(
             catalog = OpteryxCatalog(
                 dataset.workspace,
                 firestore_project=GCP_PROJECT_ID,
-                firestore_database=FIRESTORE_DATABASE,
-                gcs_bucket=BUCKET_NAME,
+                firestore_database=_firestore_database(),
+                gcs_bucket=_bucket_name(),
             )
             ds_obj = catalog.load_dataset(f"{dataset.collection}.{dataset.name}")
             snapshot = ds_obj.snapshot()

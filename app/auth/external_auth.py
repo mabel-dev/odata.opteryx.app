@@ -22,6 +22,7 @@ from fastapi import HTTPException
 from fastapi import status
 from jose import JWTError
 from jose import jwt as jose_jwt
+from app.config_client import get_config
 from app.logging import get_logger
 
 logger = get_logger()
@@ -45,13 +46,13 @@ _claims_cache: "OrderedDict[bytes, Tuple[float, Dict[str, Any]]]" = OrderedDict(
 
 
 def _auth_url() -> str:
-    return os.environ.get("AUTH_URL", "https://authenticate.opteryx.app")
+    return get_config("AUTH_URL", "https://authenticate.opteryx.app")
 
 
 def _cache_ttl() -> float:
     """Seconds to cache a successful exchange. Set AUTH_CACHE_TTL=0 to disable."""
     try:
-        return float(os.environ.get("AUTH_CACHE_TTL", "300"))
+        return float(get_config("AUTH_CACHE_TTL", "300"))
     except ValueError:
         return 300.0
 

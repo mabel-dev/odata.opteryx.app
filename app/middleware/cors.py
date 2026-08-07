@@ -4,9 +4,8 @@ This module provides secure CORS configuration for the OData service.
 By default, CORS is restrictive and requires explicit origin configuration.
 """
 
-import os
-
 from fastapi.middleware.cors import CORSMiddleware
+from app.config_client import get_config
 from app.logging import get_logger
 
 logger = get_logger()
@@ -31,7 +30,7 @@ def get_cors_origins() -> list[str]:
         Returns ["*"] only if CORS_ALLOW_ALL=true (development mode).
     """
     # Check for development mode first
-    if os.environ.get("CORS_ALLOW_ALL", "").lower() == "true":
+    if get_config("CORS_ALLOW_ALL", "").lower() == "true":
         logger.error("CORS_ALLOW_ALL is enabled - this should only be used in development!")
         return ["*"]
 

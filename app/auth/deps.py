@@ -1,5 +1,4 @@
 import base64
-import os
 from functools import lru_cache
 from typing import Any
 from typing import Dict
@@ -18,6 +17,7 @@ from jose import jwt as jose_jwt
 from app.logging import get_logger
 
 from app.auth.external_auth import authenticate_with_external_service
+from app.config_client import get_config
 from app.secret_store import load_public_key
 
 
@@ -117,9 +117,9 @@ def require_bearer_token(authorization: Optional[str] = Header(None)) -> Dict[st
     token = authorization.split(" ", 1)[1]
 
     # Resolve expected values from environment
-    auth_url = os.environ.get("AUTH_URL", "https://authenticate.opteryx.app")
-    issuer = os.environ.get("JWT_ISSUER", auth_url)
-    audience = os.environ.get("DATA_AUDIENCE", "opteryx")
+    auth_url = get_config("AUTH_URL", "https://authenticate.opteryx.app")
+    issuer = get_config("JWT_ISSUER", auth_url)
+    audience = get_config("DATA_AUDIENCE", "opteryx")
 
     try:
         headers = jose_jwt.get_unverified_header(token)
@@ -209,7 +209,7 @@ def require_bearer_token(authorization: Optional[str] = Header(None)) -> Dict[st
     # Accept Google-signed OIDC tokens (used by Cloud Tasks OIDC) if library is available
     if not pub_key and iss in ("https://accounts.google.com", "accounts.google.com"):
         # Use google_auth library to verify token and audience and issuer
-        expected_aud = os.environ.get("TASKS_OIDC_AUDIENCE")
+        expected_aud = get_config("TASKS_OIDC_AUDIENCE")
         try:
             google_claims = google_id_token.verify_oauth2_token(
                 token, google_auth_requests.Request(), audience=expected_aud
@@ -221,7 +221,7 @@ def require_bearer_token(authorization: Optional[str] = Header(None)) -> Dict[st
             ) from exc
 
         # Optionally restrict to invoker SA
-        invoker_sa = os.environ.get("TASKS_OIDC_SA")
+        invoker_sa = get_config("TASKS_OIDC_SA")
         if invoker_sa and google_claims.get("email") != invoker_sa:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden caller")
         # Accept Google claims as valid

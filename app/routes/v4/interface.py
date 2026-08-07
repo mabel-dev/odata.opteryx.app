@@ -48,6 +48,7 @@ from opteryx_catalog import OpteryxCatalog
 from app.logging import get_logger
 
 from app.auth.deps import require_authentication
+from app.config_client import get_config
 from app.odata.odata_to_logical_plan import ODataLogicalPlanBuilder
 from app.odata.plan_optimizer import ODataLogicalPlanOptimizer
 from app.odata.edm_types import column_type_to_edm
@@ -57,9 +58,20 @@ from app.odata.virtual_datasets import is_virtual_information_schema
 
 logger = get_logger()
 
-FIRESTORE_DATABASE = os.environ.get("FIRESTORE_DATABASE")
-BUCKET_NAME = os.environ.get("GCS_BUCKET")
 GCP_PROJECT_ID = os.environ.get("GCP_PROJECT_ID")
+
+
+# Resolved per use, not at import. A module-level constant is evaluated once
+# at startup and then frozen for the life of the process, so config changes
+# would never reach it without a redeploy.
+def _firestore_database() -> str:
+    return get_config("FIRESTORE_DATABASE")
+
+
+def _bucket_name() -> str:
+    return get_config("GCS_BUCKET")
+
+
 DEFAULT_TOP = int(os.environ.get("ODATA_DEFAULT_TOP", "100"))
 MAX_TOP = int(os.environ.get("ODATA_MAX_TOP", "25000"))
 
@@ -183,13 +195,32 @@ def _metadata_response(xml: str, etag: str, headers: dict, if_none_match: Option
         return Response(status_code=304, headers=headers)
     return Response(content=xml, media_type="application/xml", headers=headers)
 
-opteryx.set_default_connector(
-    OpteryxConnector,
-    catalog=OpteryxCatalog,
-    firestore_project=GCP_PROJECT_ID,
-    firestore_database=FIRESTORE_DATABASE,
-    gcs_bucket=BUCKET_NAME,
-)
+
+def register_default_connector() -> None:
+    """(Re-)register the default connector with freshly resolved configuration.
+
+    `opteryx.connectors.set_default_connector` just rebinds a module-level
+    dict (see opteryx-core `opteryx/connectors/__init__.py`), so calling it
+    again is cheap and idempotent -- and it is the only way the connector's
+    own `firestore_database`/`gcs_bucket` can ever pick up a config change:
+    the registration captures those values by value, so a registration done
+    once at import stays frozen for the life of the process.
+
+    Called at import (below) to preserve the import-time side effect other
+    modules rely on -- `app.routes.clickbench` builds opteryx sessions
+    without registering a connector of its own -- and again from
+    `execute_odata_query` so every query re-resolves.
+    """
+    opteryx.set_default_connector(
+        OpteryxConnector,
+        catalog=OpteryxCatalog,
+        firestore_project=GCP_PROJECT_ID,
+        firestore_database=_firestore_database(),
+        gcs_bucket=_bucket_name(),
+    )
+
+
+register_default_connector()
 
 
 class _MaterializedResult:
@@ -529,6 +560,9 @@ def execute_odata_query(
     # billing_account attributes the usage this query generates to the caller's
     # account; when None, Opteryx falls back to its default (house) account.
     def make_session():
+        # Re-resolve the platform config and re-register before every session,
+        # so a config change reaches the connector without a redeploy.
+        register_default_connector()
         return opteryx.session(
             user=identity,
             access_policies=access_policies or None,
@@ -1080,8 +1114,8 @@ def dataset_metadata(
             workspace = OpteryxCatalog(
                 workstream,
                 firestore_project=GCP_PROJECT_ID,
-                firestore_database=FIRESTORE_DATABASE,
-                gcs_bucket=BUCKET_NAME,
+                firestore_database=_firestore_database(),
+                gcs_bucket=_bucket_name(),
             )
 
             # Try to load as a dataset first, then as a view
