@@ -36,7 +36,7 @@ def test_edmx_metadata_includes_source_annotation(monkeypatch):
     monkeypatch.setattr(metadata, "_get_personal_datasets", lambda db, identity: [ds])
     monkeypatch.setattr(metadata, "_get_workspace_datasets", lambda db, ids: [])
     # Ensure dataset schema lookup returns a minimal column so EntityType is created
-    monkeypatch.setattr(metadata, "_get_dataset_schema", lambda dataset_info: [("id", "Edm.Int64")])
+    monkeypatch.setattr(metadata, "_get_dataset_schema", lambda dataset_info: [("id", "Edm.Int64", {})])
 
     # Prepare a fake request with claims allowing access to public workspace
     req = DummyRequest()

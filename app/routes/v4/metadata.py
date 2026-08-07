@@ -20,6 +20,7 @@ from app.auth.deps import require_authentication
 from app.config_client import get_config
 from app.core import _get_firestore_client
 from app.odata.edm_types import column_type_to_edm
+from app.odata.edm_types import edm_type_facets
 from app.odata.virtual_datasets import VIRTUAL_INFORMATION_SCHEMA_TABLES
 from app.odata.virtual_datasets import is_virtual_information_schema
 
@@ -298,14 +299,17 @@ def _get_workspace_datasets(db, workspace_ids: set[str]) -> list[DatasetInfo]:
 
 
 @lru_cache(maxsize=512)
-def _get_dataset_schema(dataset_info: DatasetInfo) -> list[tuple[str, str]]:
+def _get_dataset_schema(dataset_info: DatasetInfo) -> list[tuple[str, str, dict[str, str]]]:
     """Get dataset schema from catalog instead of querying Opteryx.
 
     Args:
         dataset_info: DatasetInfo with workspace, collection, name
 
     Returns:
-        List of (column_name, edm_type) tuples
+        List of (column_name, edm_type, csdl_facets) tuples. The facets are not
+        optional decoration -- see edm_type_facets: a Decimal without Scale, or
+        a DateTimeOffset without Precision, means something different in CSDL
+        than what the rows actually carry.
     """
     if is_virtual_information_schema(dataset_info.collection, dataset_info.name):
         return VIRTUAL_INFORMATION_SCHEMA_TABLES[dataset_info.name]
@@ -330,8 +334,8 @@ def _get_dataset_schema(dataset_info: DatasetInfo) -> list[tuple[str, str]]:
         for column in schema.columns:
             col_name = column.name
             # Map Opteryx type to EDM type
-            edm_type = column_type_to_edm(column.type)
-            columns.append((col_name, edm_type))
+            edm_type = column_type_to_edm(column.type, getattr(column, "element_type", None))
+            columns.append((col_name, edm_type, edm_type_facets(column.type)))
 
         return columns
 
@@ -524,7 +528,7 @@ def get_edmx_metadata(
         ET.SubElement(key, "{" + NS_EDM + "}PropertyRef", attrib={"Name": columns[0][0]})
 
         # Add properties
-        for col_name, edm_type in columns:
+        for col_name, edm_type, facets in columns:
             # First property is the key and must not be nullable
             is_key = col_name == columns[0][0]
             attrib = {"Name": col_name, "Type": edm_type}
@@ -532,6 +536,7 @@ def get_edmx_metadata(
                 attrib["Nullable"] = "true"
             else:
                 attrib["Nullable"] = "false"
+            attrib.update(facets)
             ET.SubElement(entity_type, "{" + NS_EDM + "}Property", attrib=attrib)
 
         entity_types_created.add(entity_type_name)

@@ -222,7 +222,7 @@ def test_service_metadata_emits_materialized_view_source_annotation(monkeypatch)
     monkeypatch.setattr(metadata, "_get_firestore_client", lambda **kwargs: object())
     monkeypatch.setattr(metadata, "_get_personal_datasets", lambda db, identity: [ds])
     monkeypatch.setattr(metadata, "_get_workspace_datasets", lambda db, ids: [])
-    monkeypatch.setattr(metadata, "_get_dataset_schema", lambda dataset_info: [("id", "Edm.Int64")])
+    monkeypatch.setattr(metadata, "_get_dataset_schema", lambda dataset_info: [("id", "Edm.Int64", {})])
 
     req = DummyRequest()
     req.state.claims = {

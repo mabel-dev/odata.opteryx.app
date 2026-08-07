@@ -5,43 +5,50 @@ look up -- so their schema is hardcoded here and shared by every endpoint that n
 know about them (service document, service-wide $metadata, per-dataset $metadata).
 """
 
-from app.odata.edm_types import column_type_to_edm
+from app.odata.edm_types import column_type_to_edm, edm_type_facets
 
-# name -> [(column_name, edm_type), ...], in column order.
-VIRTUAL_INFORMATION_SCHEMA_TABLES: dict[str, list[tuple[str, str]]] = {
+
+def _col(name: str, source_type: str) -> tuple[str, str, dict[str, str]]:
+    """A fixed virtual column, carrying the same EDM type + CSDL facets a real
+    catalog column of `source_type` would get."""
+    return name, column_type_to_edm(source_type), edm_type_facets(source_type)
+
+
+# name -> [(column_name, edm_type, facets), ...], in column order.
+VIRTUAL_INFORMATION_SCHEMA_TABLES: dict[str, list[tuple[str, str, dict[str, str]]]] = {
     "tables": [
-        ("table_catalog", column_type_to_edm("VARCHAR")),
-        ("table_schema", column_type_to_edm("VARCHAR")),
-        ("table_name", column_type_to_edm("VARCHAR")),
-        ("table_type", column_type_to_edm("VARCHAR")),
-        ("table_sort_order", column_type_to_edm("VARCHAR")),
-        ("snapshot_id", column_type_to_edm("BIGINT")),
-        ("snapshot_sequence_id", column_type_to_edm("BIGINT")),
-        ("table_updated_at", column_type_to_edm("TIMESTAMP")),
-        ("table_file_count", column_type_to_edm("BIGINT")),
-        ("table_bytes", column_type_to_edm("BIGINT")),
-        ("table_record_count", column_type_to_edm("BIGINT")),
+        _col("table_catalog", "VARCHAR"),
+        _col("table_schema", "VARCHAR"),
+        _col("table_name", "VARCHAR"),
+        _col("table_type", "VARCHAR"),
+        _col("table_sort_order", "VARCHAR"),
+        _col("snapshot_id", "BIGINT"),
+        _col("snapshot_sequence_id", "BIGINT"),
+        _col("table_updated_at", "TIMESTAMP"),
+        _col("table_file_count", "BIGINT"),
+        _col("table_bytes", "BIGINT"),
+        _col("table_record_count", "BIGINT"),
     ],
     "columns": [
-        ("table_catalog", column_type_to_edm("VARCHAR")),
-        ("table_schema", column_type_to_edm("VARCHAR")),
-        ("table_name", column_type_to_edm("VARCHAR")),
-        ("column_name", column_type_to_edm("VARCHAR")),
-        ("ordinal_position", column_type_to_edm("INTEGER")),
-        ("data_type", column_type_to_edm("VARCHAR")),
-        ("is_nullable", column_type_to_edm("VARCHAR")),
+        _col("table_catalog", "VARCHAR"),
+        _col("table_schema", "VARCHAR"),
+        _col("table_name", "VARCHAR"),
+        _col("column_name", "VARCHAR"),
+        _col("ordinal_position", "INTEGER"),
+        _col("data_type", "VARCHAR"),
+        _col("is_nullable", "VARCHAR"),
     ],
     "views": [
-        ("table_catalog", column_type_to_edm("VARCHAR")),
-        ("table_schema", column_type_to_edm("VARCHAR")),
-        ("table_name", column_type_to_edm("VARCHAR")),
-        ("view_definition", column_type_to_edm("VARCHAR")),
-        ("view_owner", column_type_to_edm("VARCHAR")),
-        ("view_updated_at", column_type_to_edm("TIMESTAMP")),
+        _col("table_catalog", "VARCHAR"),
+        _col("table_schema", "VARCHAR"),
+        _col("table_name", "VARCHAR"),
+        _col("view_definition", "VARCHAR"),
+        _col("view_owner", "VARCHAR"),
+        _col("view_updated_at", "TIMESTAMP"),
     ],
     "schemata": [
-        ("catalog_name", column_type_to_edm("VARCHAR")),
-        ("schema_name", column_type_to_edm("VARCHAR")),
+        _col("catalog_name", "VARCHAR"),
+        _col("schema_name", "VARCHAR"),
     ],
 }
 

@@ -51,7 +51,10 @@ from app.auth.deps import require_authentication
 from app.config_client import get_config
 from app.odata.odata_to_logical_plan import ODataLogicalPlanBuilder
 from app.odata.plan_optimizer import ODataLogicalPlanOptimizer
+from app.odata.edm_types import EDM_UNKNOWN
 from app.odata.edm_types import column_type_to_edm
+from app.odata.edm_types import edm_type_facets
+from app.odata.edm_types import is_lossy_mapping
 from app.odata.virtual_datasets import VIRTUAL_INFORMATION_SCHEMA_DESCRIPTIONS
 from app.odata.virtual_datasets import VIRTUAL_INFORMATION_SCHEMA_TABLES
 from app.odata.virtual_datasets import is_virtual_information_schema
@@ -1103,8 +1106,11 @@ def dataset_metadata(
         source_type = "Virtual"
         response.headers["X-Dataset-Source"] = source_type
         virtual_columns = VIRTUAL_INFORMATION_SCHEMA_TABLES[dataset]
-        col_names = [name for name, _ in virtual_columns]
-        col_metadata = {name: {"type": edm_type} for name, edm_type in virtual_columns}
+        col_names = [name for name, _, _ in virtual_columns]
+        col_metadata = {
+            name: {"type": edm_type, "facets": facets}
+            for name, edm_type, facets in virtual_columns
+        }
         sort_order_column = None
         sort_order_ascending = True
         last_ts_ms = None
@@ -1182,46 +1188,25 @@ def dataset_metadata(
                     if field_id is not None:
                         col_id_to_name[field_id] = col_name
                     # Map the catalog column type to its OData EDM type (unified mapper).
-                    edm_type = column_type_to_edm(field.type)
+                    edm_type = column_type_to_edm(
+                        field.type, getattr(field, "element_type", None)
+                    )
                     col_types.append(edm_type)
                     col_metadata[col_name] = {
                         "type": edm_type,
+                        "facets": edm_type_facets(field.type),
                         "source_type": str(field.type),
                         "nullable": field.nullable,
                     }
 
-                # Post-process column `source_type` to refine types for arrays/structs/binary
-                try:
-                    import re
-
-                    for col_name, meta in col_metadata.items():
-                        st = str(meta.get("source_type", "")).upper()
-                        # ARRAY -> Collection(Edm.<inner>) when inner exists
-                        if "ARRAY" in st:
-                            inner = None
-                            m = re.search(r"ARRAY\s*[<\(]\s*([^>\)]+)\s*[>\)]", st)
-                            if m:
-                                inner = m.group(1).strip().upper()
-                            if inner in ("INTEGER", "INT", "BIGINT", "TINYINT", "SMALLINT"):
-                                meta["type"] = "Collection(Edm.Int64)"
-                            elif inner in ("DOUBLE", "FLOAT", "REAL", "DECIMAL", "NUMERIC"):
-                                meta["type"] = "Collection(Edm.Double)"
-                            else:
-                                meta["type"] = "Collection(Edm.String)"
-                            meta["original_type"] = st
-
-                        # STRUCT/JSON -> expose as binary and annotate original type
-                        if any(x in st for x in ("STRUCT", "JSON", "JSONB")):
-                            meta["type"] = "Edm.Binary"
-                            meta["original_type"] = st
-
-                        # Blob/varbinary/binary -> binary EDM type
-                        if any(x in st for x in ("BLOB", "VARBINARY", "BINARY")):
-                            meta["type"] = "Edm.Binary"
-                            meta["original_type"] = st
-                except Exception:
-                    # Be conservative: do not fail if introspection fails
-                    pass
+                # Annotate columns whose EDM type is broader than the source type, so
+                # clients can still recover the original. The EDM type itself comes
+                # solely from column_type_to_edm -- this loop must not second-guess it,
+                # or the two $metadata endpoints drift apart again.
+                for meta in col_metadata.values():
+                    st = str(meta.get("source_type", ""))
+                    if st and is_lossy_mapping(st):
+                        meta["original_type"] = st.upper()
             else:
                 # If this is a view and the catalog object does not provide a schema,
                 # emit a minimal placeholder so the metadata document remains valid.
@@ -1353,7 +1338,7 @@ def dataset_metadata(
     # Add Property elements with annotations for statistics
     for col_name in col_names:
         meta = col_metadata.get(col_name, {})
-        edm_type = meta.get("type", "Edm.String")
+        edm_type = meta.get("type", EDM_UNKNOWN)
 
         # First property is key, must be non-nullable
         is_key = col_name == col_names[0]
@@ -1362,6 +1347,9 @@ def dataset_metadata(
             prop_attrib["Nullable"] = "true"
         else:
             prop_attrib["Nullable"] = "false"
+        # Facets are load-bearing, not decoration: CSDL defaults Scale to 0 and
+        # temporal Precision to 0, either of which would misdescribe the rows.
+        prop_attrib.update(meta.get("facets") or {})
 
         prop = ET.SubElement(entity_type, f"{{{NS_EDM}}}Property", attrib=prop_attrib)
 

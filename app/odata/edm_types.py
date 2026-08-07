@@ -2,62 +2,290 @@
 
 Consolidates type mapping logic for both service-wide $metadata and per-dataset
 $metadata endpoints, ensuring consistent EDM type declarations that match the
-sanitizer's payload output.
+payload the service actually emits.
 
-Policy: "broad, client-compatible"
-- All date/time/timestamp types → Edm.DateTimeOffset (matches sanitizer output)
-- DECIMAL → Edm.Double (matches sanitizer's float output)
-- ARRAY<T> → Collection(Edm.T) with simplified inner mapping
-- STRUCT/JSON → Edm.Binary with Custom.OriginalType annotation
-- Integrators and integers → sensible defaults
+The source vocabulary
+---------------------
+Column types reach us as strings. The catalog stores them and renders them via
+``SimpleDataset.schema()`` -> ``SchemaColumn.type``, which mirrors
+``str(opteryx.types.logical_type.ColumnType)``. That is the *Draken* vocabulary
+(``INT64``, ``FLOAT64``, ``BOOL``, ``TIMESTAMP[us]``, ``VARIANT``, ...), not the
+older orso ``OrsoTypes`` names -- opteryx no longer depends on orso. Names from
+the orso era are still accepted, because schemas persisted back then still say
+``INTEGER``/``DOUBLE``/``BLOB`` and re-reading them must not change their
+meaning; opteryx keeps the same aliases in ``_SQL_NAME_ALIASES``.
+
+The target vocabulary
+---------------------
+All of OData v4's primitive types are available and this module uses them.
+Nothing here is narrowed for "client compatibility": a client that is told
+``Edm.Int32`` gets a value that fits in an Int32, and one told ``Edm.Decimal``
+with a Scale facet gets the exact scaled decimal.
+
+Every mapping below describes the JSON the row payload actually carries. That
+payload does NOT go through ``_sanitize_value_for_odata`` -- rows are rendered
+natively by ``_execute_and_serialize_rows`` -> rugo ``write_jsonl`` ->
+``rugo/src/_text_render.hpp``, whose per-type emitters are the authority:
+
+    INT8..INT64      -> JSON number            SByte / Int16 / Int32 / Int64
+    UINT8..UINT64    -> JSON number            Byte / Int32 / Int64 / Decimal
+    IPV4             -> "192.0.2.1"  (ej_ipv4) String
+    BOOL             -> true / false           Boolean
+    FLOAT32/FLOAT64  -> JSON number            Single / Double
+    DECIMAL(p, s)    -> exact scaled number    Decimal + Precision/Scale
+    DATE32           -> "YYYY-MM-DD"           Date
+    TIMESTAMP64      -> RFC 3339 + "+00:00"    DateTimeOffset + Precision
+    TIME32/TIME64    -> "HH:MM:SS[.ffffff]"    TimeOfDay + Precision
+    VARCHAR/NVARCHAR/VARIANT/VARBINARY -> JSON string    String
+    ARRAY            -> JSON array             Collection(element)
+    VECTOR_FP16      -> JSON array of floats   Collection(Double)
+    INTERVAL, NULL   -> null                   EDM_UNKNOWN
+
+Anything not recognised maps to :data:`EDM_UNKNOWN`, never to ``Edm.String``.
+Declaring an unrecognised column as a string is a lie clients act on (they
+parse, sort and filter it as text); the abstract type says "primitive, but we
+cannot narrow it", which is the truth.
 """
 
+import re
 from typing import Any
 
+#: EDM type used when the source type is unknown or has no wire representation.
+#:
+#: ``Edm.PrimitiveType`` is the built-in abstract primitive type (CSDL v4.0
+#: §4.4) and is legal as a structural property type, so the metadata document
+#: stays valid for 4.0 clients. OData v4 has no ``Edm.Null``; a column whose
+#: every value is null is a nullable property of unknown type, which is exactly
+#: what this says. ``Edm.Untyped`` would be more expressive but is 4.01-only,
+#: and this service advertises ``OData-Version: 4.0``.
+EDM_UNKNOWN = "Edm.PrimitiveType"
 
-def _extract_base_type(type_str: str) -> str:
+#: source base type -> EDM type. Canonical Draken spelling first, then the
+#: legacy (orso-era) aliases older persisted schemas may still hold.
+_SCALAR_TYPES: dict[str, str] = {
+    # --- signed integers -------------------------------------------------
+    # Edm.SByte is the SIGNED 8-bit type; Edm.Byte is unsigned (0..255).
+    "INT8": "Edm.SByte",
+    "INT16": "Edm.Int16",
+    "INT32": "Edm.Int32",
+    "INT64": "Edm.Int64",
+    "TINYINT": "Edm.SByte",  # legacy
+    "SMALLINT": "Edm.Int16",  # legacy
+    "INTEGER": "Edm.Int64",  # legacy -- opteryx aliases INTEGER/INT/BIGINT to INT64
+    "INT": "Edm.Int64",  # legacy
+    "BIGINT": "Edm.Int64",  # legacy
+    # --- unsigned integers -----------------------------------------------
+    # OData has one unsigned type (Edm.Byte), so the wider ones are promoted to
+    # the smallest signed type that holds their whole range. UINT64 has no such
+    # type and is handled in _map_scalar (Edm.Decimal, precision 20, scale 0).
+    "UINT8": "Edm.Byte",
+    "UINT16": "Edm.Int32",
+    "UINT32": "Edm.Int64",
+    # --- floating point ---------------------------------------------------
+    # Edm.Single is single precision; rugo's ej_float renders FLOAT32 from the
+    # un-promoted value, so the declared type matches what is written.
+    "FLOAT32": "Edm.Single",
+    "FLOAT64": "Edm.Double",
+    "REAL": "Edm.Single",  # legacy -- single precision per the SQL standard
+    "DOUBLE": "Edm.Double",  # legacy
+    "FLOAT": "Edm.Double",  # legacy -- opteryx aliases bare FLOAT to FLOAT64
+    # --- boolean ----------------------------------------------------------
+    "BOOL": "Edm.Boolean",
+    "BOOLEAN": "Edm.Boolean",  # legacy
+    # --- temporal ---------------------------------------------------------
+    # Distinct EDM types, matching rugo's three distinct renderings. The old
+    # "every temporal is a DateTimeOffset" policy described the Python
+    # sanitizer, which the row path no longer uses.
+    "DATE": "Edm.Date",
+    "DATE32": "Edm.Date",
+    "TIMESTAMP": "Edm.DateTimeOffset",
+    "TIMESTAMP64": "Edm.DateTimeOffset",
+    "DATETIME": "Edm.DateTimeOffset",  # legacy
+    "TIME": "Edm.TimeOfDay",
+    "TIME32": "Edm.TimeOfDay",
+    "TIME64": "Edm.TimeOfDay",
+    # --- text -------------------------------------------------------------
+    # VARIANT means "type not narrowed", but DrakenType.VARIANT is rendered by
+    # ej_string, so it really is text on the wire.
+    "VARCHAR": "Edm.String",
+    "NVARCHAR": "Edm.String",
+    "VARIANT": "Edm.String",
+    "STRING": "Edm.String",  # legacy
+    "TEXT": "Edm.String",  # legacy
+    "CHAR": "Edm.String",  # legacy
+    "UUID": "Edm.String",  # legacy
+    # STRUCT and JSONB alias to NVARCHAR in opteryx today -- they arrive as JSON
+    # text, not as the base64 blobs this service used to declare.
+    "STRUCT": "Edm.String",  # legacy
+    "JSON": "Edm.String",  # legacy
+    "JSONB": "Edm.String",  # legacy
+    "MAP": "Edm.String",  # legacy
+    # --- binary -----------------------------------------------------------
+    # NOT Edm.Binary. rugo routes VARBINARY through ej_string, the same emitter
+    # VARCHAR uses, so the payload is a plain JSON string of the bytes -- not
+    # base64. Declaring Edm.Binary would tell clients to base64-decode it and
+    # hand them garbage. See is_lossy_mapping: the source type is annotated.
+    "VARBINARY": "Edm.String",
+    "BINARY": "Edm.String",  # legacy
+    "BLOB": "Edm.String",  # legacy
+    "BYTES": "Edm.String",  # legacy
+    # --- IPv4 -------------------------------------------------------------
+    # Physically UINT32, but the logical descriptor makes rugo pick ej_ipv4,
+    # which writes a quoted dotted-decimal address.
+    "IPV4": "Edm.String",
+}
+
+_ARRAY_TYPES = frozenset({"ARRAY", "LIST"})
+_VECTOR_TYPES = frozenset({"VECTOR", "VECTOR_FP16"})
+_DECIMAL_TYPES = frozenset({"DECIMAL", "DECIMAL128", "NUMERIC"})
+
+#: Source types whose EDM type describes them exactly -- no width, precision,
+#: unit, element type or semantic refinement is lost on the way out. Everything
+#: else gets a ``Custom.OriginalType`` annotation (see is_lossy_mapping).
+_EXACTLY_DESCRIBED = frozenset(
+    {
+        "INT8", "INT16", "INT32", "INT64", "TINYINT", "SMALLINT",
+        "INTEGER", "INT", "BIGINT",
+        "UINT8",
+        "FLOAT32", "FLOAT64", "REAL", "DOUBLE", "FLOAT",
+        "BOOL", "BOOLEAN",
+        "DATE", "DATE32", "TIMESTAMP", "TIMESTAMP64", "DATETIME",
+        "TIME", "TIME32", "TIME64",
+        "VARCHAR", "NVARCHAR", "STRING", "TEXT", "CHAR",
+        # DECIMAL is exact *because* the Precision/Scale facets go out with it.
+        "DECIMAL", "DECIMAL128", "NUMERIC",
+    }
+)
+
+#: TIMESTAMP[unit] / TIME[unit] -> the CSDL Precision facet (fractional digits).
+_UNIT_PRECISION = {"s": "0", "ms": "3", "us": "6", "ns": "9"}
+#: opteryx's canonical temporal unit when the type string carries none.
+_DEFAULT_UNIT_PRECISION = "6"
+
+
+def extract_base_type(type_str: str) -> str:
     """Extract base category from a canonical type string.
 
     Examples:
-        "DECIMAL(15, 2)" -> "DECIMAL"
-        "ARRAY<VARCHAR>" -> "ARRAY"
-        "INTEGER" -> "INTEGER"
+        "DECIMAL(15, 2)"   -> "DECIMAL"
+        "TIMESTAMP[us]"    -> "TIMESTAMP"
+        "ARRAY<VARCHAR>"   -> "ARRAY"
+        "INT64"            -> "INT64"
         "DOUBLE PRECISION" -> "DOUBLE"
     """
     if not isinstance(type_str, str):
         type_str = str(type_str)
-    # Remove parameters/angles and take first word (handles "DOUBLE PRECISION" -> "DOUBLE")
-    return (
-        type_str.strip()
-        .upper()
-        .split("(", 1)[0]
-        .split("<", 1)[0]
-        .split()[0]  # Take first word to handle compound types like "DOUBLE PRECISION"
-        .strip()
-    )
+    # Drop parameters -- "(p, s)", "[unit]" and "<element>" -- then take the
+    # first word so compound spellings like "DOUBLE PRECISION" still resolve.
+    head = type_str.strip().upper()
+    for sep in ("(", "[", "<"):
+        head = head.split(sep, 1)[0]
+    head = head.strip()
+    if not head:
+        return ""
+    return head.split()[0]
 
 
-def column_type_to_edm(column_type: Any) -> str:
+def _type_name(type_like: Any) -> str | None:
+    """Best-effort canonical name for a type string or type-like object."""
+    if type_like is None:
+        return None
+    if isinstance(type_like, str):
+        return type_like.upper() or None
+    name = getattr(type_like, "name", None)
+    return str(name or type_like).upper() or None
+
+
+def _map_scalar(type_str: str) -> str | None:
+    """Map a non-collection type string to an EDM type, or None if unrecognised.
+
+    Returning None (rather than a string fallback) is what lets callers tell
+    "we know this is text" apart from "we have no idea what this is".
+    """
+    base = extract_base_type(type_str)
+    if not base:
+        return None
+
+    # DECIMAL carries Precision/Scale facets (see edm_type_facets); without a
+    # Scale facet CSDL defaults it to 0 and clients read the values as integers.
+    if base in _DECIMAL_TYPES:
+        return "Edm.Decimal"
+
+    # UINT64's range exceeds Edm.Int64. Edm.Decimal with precision 20, scale 0
+    # is the only OData primitive that holds it exactly, and it is still a plain
+    # JSON number on the wire -- which is what rugo writes.
+    if base == "UINT64":
+        return "Edm.Decimal"
+
+    return _SCALAR_TYPES.get(base)
+
+
+def edm_type_facets(column_type: Any) -> dict[str, str]:
+    """CSDL facet attributes that must accompany this column's EDM type.
+
+    Not decoration -- omitting them changes meaning. CSDL v4.0 §7.2 defaults
+    ``Scale`` to 0, so an ``Edm.Decimal`` property with no Scale declares an
+    integer; and it defaults temporal ``Precision`` to 0, so a DateTimeOffset
+    with no Precision declares whole seconds while rugo writes microseconds.
+
+    Returns an empty dict for types that need no facets.
+    """
+    name = _type_name(column_type) or ""
+    base = extract_base_type(name)
+
+    if base in _DECIMAL_TYPES:
+        precision, scale = _extract_decimal_params(name)
+        # opteryx's own default when the catalog stored no parameters.
+        return {"Precision": str(precision or 38), "Scale": str(scale if scale is not None else 9)}
+
+    if base == "UINT64":
+        return {"Precision": "20", "Scale": "0"}
+
+    if base in ("TIMESTAMP", "TIMESTAMP64", "TIME", "TIME32", "TIME64"):
+        return {"Precision": _extract_unit_precision(name)}
+
+    return {}
+
+
+def is_lossy_mapping(column_type: Any) -> bool:
+    """Whether the EDM type for `column_type` loses information about it.
+
+    Drives the ``Custom.OriginalType`` annotation: a client reading
+    ``Edm.String`` cannot tell an IPv4 address from a VARBINARY blob from a
+    JSONB document, and ``Edm.Int64`` cannot tell a UINT32 from an INT64.
+    Emitting the source type beside the EDM type is how those callers get the
+    difference back.
+    """
+    base = extract_base_type(_type_name(column_type) or "")
+    return bool(base) and base not in _EXACTLY_DESCRIBED
+
+
+def column_type_to_edm(column_type: Any, element_type: Any = None) -> str:
     """Convert an Opteryx column type to its OData EDM type.
 
     Accepts either:
-    - A canonical Opteryx type string (from the catalog, e.g. "INTEGER",
-      "DECIMAL(38, 9)", "ARRAY<VARCHAR>")
+    - A canonical opteryx type string (from the catalog, e.g. "INT64",
+      "DECIMAL(38, 9)", "TIMESTAMP[us]", "ARRAY<VARCHAR>")
     - A type-like object exposing a .name attribute
     - A Python type object (legacy path)
 
-    Uses a simplified, highly compatible set of EDM types to maximize client
-    compatibility and match sanitizer behavior. This policy prioritizes broader
-    types over precise types because:
-    1. The sanitizer coerces all temporals to ISO datetime strings
-    2. DECIMAL is coerced to float
-    3. Client compatibility is more important than precision
+    Types we cannot recognise, and types with no wire representation, map to
+    :data:`EDM_UNKNOWN` rather than ``Edm.String``.
+
+    Callers emitting CSDL must also apply :func:`edm_type_facets` -- several of
+    these types are wrong without their facets.
 
     Args:
         column_type: Canonical type string, type-like object, or Python type.
+        element_type: Element type of an ARRAY/LIST column, for callers whose
+            schema carries it beside the column type rather than inside it
+            (``SchemaColumn.element_type``). The catalog normally renders
+            ``ARRAY<element>`` into the type string itself, so this is a
+            fallback.
 
     Returns:
-        OData EDM type string (e.g., "Edm.String", "Edm.DateTimeOffset").
+        OData EDM type string (e.g. "Edm.Int32", "Edm.DateTimeOffset",
+        "Collection(Edm.Double)", or "Edm.PrimitiveType" when unknown).
     """
     import datetime as _dt
     import decimal as _dec
@@ -75,84 +303,103 @@ def column_type_to_edm(column_type: Any) -> str:
             if hasattr(column_type, "name")
             else str(column_type)
         )
-        type_str = type_str.upper()
-        base = _extract_base_type(type_str)
+        type_str = str(type_str).upper()
+        base = extract_base_type(type_str)
 
-        # Integer types -> Int64 for maximum range and compatibility
-        if base in ("INTEGER", "BIGINT", "TINYINT", "SMALLINT", "INT"):
-            return "Edm.Int64"
+        # Arrays -> Collection of an element EDM type when the element is known.
+        # The element can live in the type string itself ("ARRAY<VARCHAR>"), in
+        # the object's repr while .name is the bare "ARRAY", or alongside the
+        # column as a separate element_type -- check all three.
+        if base in _ARRAY_TYPES:
+            inner = (
+                _extract_array_inner_type(type_str)
+                or _extract_array_inner_type(str(column_type).upper())
+                or _type_name(element_type)
+            )
+            inner_edm = _map_scalar(inner) if inner else None
+            return f"Collection({inner_edm or EDM_UNKNOWN})"
 
-        # All numeric types -> Double (avoids Decimal IEEE754Compatible issues)
-        if base in ("DOUBLE", "FLOAT", "REAL", "DECIMAL", "NUMERIC"):
-            return "Edm.Double"
+        # VECTOR_FP16 is rendered by ej_fp16 as a JSON array of fp16-widened
+        # doubles. The dimension is not expressible in CSDL and is annotated.
+        if base in _VECTOR_TYPES:
+            return "Collection(Edm.Double)"
 
-        # Boolean
-        if base in ("BOOLEAN", "BOOL"):
-            return "Edm.Boolean"
+        # INTERVAL has NO case in rugo's resolve_col, so it falls to ej_null and
+        # every value renders as JSON null. There is nothing to declare: the
+        # column is unrepresentable on this wire, not a duration the client can
+        # parse. Edm.Duration would promise an ISO-8601 string that never comes.
+        if base == "INTERVAL":
+            return EDM_UNKNOWN
 
-        # String types
-        if base in ("VARCHAR", "NVARCHAR", "VARIANT", "TEXT", "CHAR", "STRING"):
-            return "Edm.String"
+        # An all-NULL column carries no type information -- and OData v4 has no
+        # Edm.Null -- so it is a nullable property of unknown type.
+        if base == "NULL":
+            return EDM_UNKNOWN
 
-        # Date/Time -> Use only DateTimeOffset for all temporal types
-        # (matches sanitizer behavior: dates are coerced to ISO datetime strings)
-        if base in ("TIMESTAMP", "DATETIME", "DATE", "TIME"):
-            return "Edm.DateTimeOffset"
+        scalar = _map_scalar(type_str)
+        if scalar is not None:
+            return scalar
 
-        # Arrays -> Collection of an inner EDM type when inner type is known
-        if base in ("ARRAY", "LIST"):
-            inner = _extract_array_inner_type(type_str)
-            # Extract base type from inner (e.g., "DECIMAL(15,2)" -> "DECIMAL")
-            inner_base = _extract_base_type(inner) if inner else ""
-            if inner_base in ("INTEGER", "INT", "BIGINT", "TINYINT", "SMALLINT"):
-                return "Collection(Edm.Int64)"
-            if inner_base in ("DOUBLE", "FLOAT", "REAL", "DECIMAL", "NUMERIC"):
-                return "Collection(Edm.Double)"
-            # Default inner -> string
-            return "Collection(Edm.String)"
-
-        # Binary types
-        if base in ("BINARY", "BLOB", "VARBINARY"):
-            return "Edm.Binary"
-
-        # Structs / JSON-like types -> expose as binary (base64)
-        if base in ("STRUCT", "JSON", "JSONB"):
-            return "Edm.Binary"
-
-        # Default to string for unknown types
-        return "Edm.String"
+        return EDM_UNKNOWN
 
     # Handle Python types (legacy path)
+    if column_type is bool:
+        return "Edm.Boolean"
     if column_type is int:
         return "Edm.Int64"
     if column_type is float:
         return "Edm.Double"
-    if column_type is bool:
-        return "Edm.Boolean"
     if column_type is str:
         return "Edm.String"
+    if column_type in (bytes, bytearray):
+        return "Edm.Binary"
     if _uuid and column_type is _uuid.UUID:
-        return "Edm.String"  # Serialize UUIDs as strings
+        return "Edm.Guid"
     if column_type is _dec.Decimal:
-        return "Edm.Double"  # Avoid Decimal type issues
-    if column_type in (_dt.datetime, _dt.date, _dt.time):
+        return "Edm.Decimal"
+    if column_type is _dt.datetime:
         return "Edm.DateTimeOffset"
+    if column_type is _dt.date:
+        return "Edm.Date"
+    if column_type is _dt.time:
+        return "Edm.TimeOfDay"
 
-    # Default fallback
-    return "Edm.String"
+    # Unknown Python type -- say so rather than guessing "string"
+    return EDM_UNKNOWN
+
+
+def _extract_decimal_params(type_str: str) -> tuple[int | None, int | None]:
+    """Pull (precision, scale) out of "DECIMAL(15, 2)". (None, None) if absent."""
+    m = re.search(r"\(\s*(\d+)\s*(?:,\s*(\d+)\s*)?\)", type_str)
+    if not m:
+        return None, None
+    precision = int(m.group(1))
+    scale = int(m.group(2)) if m.group(2) is not None else None
+    return precision, scale
+
+
+def _extract_unit_precision(type_str: str) -> str:
+    """Fractional-second digits for "TIMESTAMP[us]" / "TIME[ms]" and friends."""
+    m = re.search(r"\[\s*([A-Za-z]+)\s*\]", type_str)
+    if m:
+        return _UNIT_PRECISION.get(m.group(1).lower(), _DEFAULT_UNIT_PRECISION)
+    return _DEFAULT_UNIT_PRECISION
 
 
 def _extract_array_inner_type(array_type_str: str) -> str | None:
-    """Extract inner type from ARRAY<T> or ARRAY(T) notation.
+    """Extract the element type from ARRAY<T> / ARRAY(T) notation.
+
+    Takes the outermost bracket pair so parameterized elements survive intact.
 
     Examples:
-        "ARRAY<VARCHAR>" -> "VARCHAR"
-        "ARRAY(INT)" -> "INT"
-        "ARRAY" -> None
+        "ARRAY<VARCHAR>"        -> "VARCHAR"
+        "ARRAY(INT64)"          -> "INT64"
+        "ARRAY<DECIMAL(15, 2)>" -> "DECIMAL(15, 2)"
+        "ARRAY"                 -> None
     """
-    import re
-
-    m = re.search(r"ARRAY\s*[<\(]\s*([^>\)]+)\s*[>\)]", array_type_str)
+    m = re.match(r"\s*(?:ARRAY|LIST)\s*<(.+)>\s*$", array_type_str)
+    if m is None:
+        m = re.match(r"\s*(?:ARRAY|LIST)\s*\((.+)\)\s*$", array_type_str)
     if m:
-        return m.group(1).strip()
+        return m.group(1).strip() or None
     return None

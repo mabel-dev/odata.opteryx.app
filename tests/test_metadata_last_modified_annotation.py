@@ -49,7 +49,7 @@ def test_edmx_metadata_includes_last_modified(monkeypatch):
     monkeypatch.setattr(metadata, "_get_firestore_client", lambda **kwargs: object())
     monkeypatch.setattr(metadata, "_get_personal_datasets", lambda db, identity: [ds])
     monkeypatch.setattr(metadata, "_get_workspace_datasets", lambda db, ids: [])
-    monkeypatch.setattr(metadata, "_get_dataset_schema", lambda dataset_info: [("id", "Edm.Int64")])
+    monkeypatch.setattr(metadata, "_get_dataset_schema", lambda dataset_info: [("id", "Edm.Int64", {})])
 
     req = type("R", (), {})()
     req.state = type("S", (), {})()
