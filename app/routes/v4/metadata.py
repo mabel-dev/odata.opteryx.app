@@ -6,23 +6,19 @@ import xml.etree.ElementTree as ET
 from functools import lru_cache
 from typing import Any
 
-from fastapi import APIRouter
-from fastapi import Depends
-from fastapi import HTTPException
-from fastapi import Request
-from fastapi import Response
-from fastapi import status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from google.cloud.firestore_v1.base_query import FieldFilter
 from opteryx_catalog import OpteryxCatalog
-from app.logging import get_logger
 
 from app.auth.deps import require_authentication
 from app.config_client import get_config
 from app.core import _get_firestore_client
-from app.odata.edm_types import column_type_to_edm
-from app.odata.edm_types import edm_type_facets
-from app.odata.virtual_datasets import VIRTUAL_INFORMATION_SCHEMA_TABLES
-from app.odata.virtual_datasets import is_virtual_information_schema
+from app.logging import get_logger
+from app.odata.edm_types import ORIGINAL_TYPE_TERM, EdmProperty, edm_property
+from app.odata.virtual_datasets import (
+    VIRTUAL_INFORMATION_SCHEMA_TABLES,
+    is_virtual_information_schema,
+)
 
 logger = get_logger()
 router = APIRouter(prefix="/api/v4")
@@ -72,12 +68,10 @@ def _normalize_resource_name(resource: str) -> str:
         return resource
 
     # Remove trailing wildcard pattern
-    if resource.endswith(".*"):
-        resource = resource[:-2]
+    resource = resource.removesuffix(".*")
 
     # Remove trailing dot if present
-    if resource.endswith("."):
-        resource = resource[:-1]
+    resource = resource.removesuffix(".")
 
     return resource
 
@@ -299,17 +293,16 @@ def _get_workspace_datasets(db, workspace_ids: set[str]) -> list[DatasetInfo]:
 
 
 @lru_cache(maxsize=512)
-def _get_dataset_schema(dataset_info: DatasetInfo) -> list[tuple[str, str, dict[str, str]]]:
+def _get_dataset_schema(dataset_info: DatasetInfo) -> list[EdmProperty]:
     """Get dataset schema from catalog instead of querying Opteryx.
 
     Args:
         dataset_info: DatasetInfo with workspace, collection, name
 
     Returns:
-        List of (column_name, edm_type, csdl_facets) tuples. The facets are not
-        optional decoration -- see edm_type_facets: a Decimal without Scale, or
-        a DateTimeOffset without Precision, means something different in CSDL
-        than what the rows actually carry.
+        List of EdmProperty. The facets are not optional decoration -- see
+        edm_type_facets: a Decimal without Scale, or a DateTimeOffset without
+        Precision, means something different in CSDL than what the rows carry.
     """
     if is_virtual_information_schema(dataset_info.collection, dataset_info.name):
         return VIRTUAL_INFORMATION_SCHEMA_TABLES[dataset_info.name]
@@ -334,8 +327,9 @@ def _get_dataset_schema(dataset_info: DatasetInfo) -> list[tuple[str, str, dict[
         for column in schema.columns:
             col_name = column.name
             # Map Opteryx type to EDM type
-            edm_type = column_type_to_edm(column.type, getattr(column, "element_type", None))
-            columns.append((col_name, edm_type, edm_type_facets(column.type)))
+            columns.append(
+                edm_property(col_name, column.type, getattr(column, "element_type", None))
+            )
 
         return columns
 
@@ -426,9 +420,11 @@ def get_edmx_metadata(
         ]
     else:
         # Determine access policies from JWT "policies" claim (do not rely on a "permissions" key).
-        from app.auth.permissions import accessible_workstreams
-        from app.auth.permissions import get_access_policies_from_claims
-        from app.auth.permissions import read_grant_for_relation
+        from app.auth.permissions import (
+            accessible_workstreams,
+            get_access_policies_from_claims,
+            read_grant_for_relation,
+        )
 
         access_policies_list = get_access_policies_from_claims(claims)
 
@@ -528,16 +524,26 @@ def get_edmx_metadata(
         ET.SubElement(key, "{" + NS_EDM + "}PropertyRef", attrib={"Name": columns[0][0]})
 
         # Add properties
-        for col_name, edm_type, facets in columns:
+        for col in columns:
+            # Tolerate plain tuples as well as EdmProperty (test stubs supply them).
+            col = EdmProperty(*col)
             # First property is the key and must not be nullable
-            is_key = col_name == columns[0][0]
-            attrib = {"Name": col_name, "Type": edm_type}
+            is_key = col.name == columns[0][0]
+            attrib = {"Name": col.name, "Type": col.type}
             if not is_key:
                 attrib["Nullable"] = "true"
             else:
                 attrib["Nullable"] = "false"
-            attrib.update(facets)
-            ET.SubElement(entity_type, "{" + NS_EDM + "}Property", attrib=attrib)
+            attrib.update(col.facets)
+            prop = ET.SubElement(entity_type, "{" + NS_EDM + "}Property", attrib=attrib)
+            # The platform type OData cannot express -- emitted for every
+            # property so its absence is never ambiguous.
+            if col.source_type:
+                ET.SubElement(
+                    prop,
+                    "{" + NS_EDM + "}Annotation",
+                    attrib={"Term": ORIGINAL_TYPE_TERM, "String": col.source_type},
+                )
 
         entity_types_created.add(entity_type_name)
 
@@ -595,7 +601,7 @@ def get_edmx_metadata(
 
                 # Convert milliseconds to ISO 8601 UTC string
                 iso = (
-                    _dt.datetime.fromtimestamp(ts / 1000.0, tz=_dt.timezone.utc).isoformat()
+                    _dt.datetime.fromtimestamp(ts / 1000.0, tz=_dt.UTC).isoformat()
                 )
                 ET.SubElement(
                     entity_set,

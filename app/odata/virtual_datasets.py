@@ -5,17 +5,17 @@ look up -- so their schema is hardcoded here and shared by every endpoint that n
 know about them (service document, service-wide $metadata, per-dataset $metadata).
 """
 
-from app.odata.edm_types import column_type_to_edm, edm_type_facets
+from app.odata.edm_types import EdmProperty, edm_property
 
 
-def _col(name: str, source_type: str) -> tuple[str, str, dict[str, str]]:
-    """A fixed virtual column, carrying the same EDM type + CSDL facets a real
-    catalog column of `source_type` would get."""
-    return name, column_type_to_edm(source_type), edm_type_facets(source_type)
+def _col(name: str, source_type: str) -> EdmProperty:
+    """A fixed virtual column, described exactly as a real catalog column of
+    `source_type` would be."""
+    return edm_property(name, source_type)
 
 
-# name -> [(column_name, edm_type, facets), ...], in column order.
-VIRTUAL_INFORMATION_SCHEMA_TABLES: dict[str, list[tuple[str, str, dict[str, str]]]] = {
+# name -> [EdmProperty, ...], in column order.
+VIRTUAL_INFORMATION_SCHEMA_TABLES: dict[str, list[EdmProperty]] = {
     "tables": [
         _col("table_catalog", "VARCHAR"),
         _col("table_schema", "VARCHAR"),

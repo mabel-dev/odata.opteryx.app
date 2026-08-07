@@ -28,7 +28,7 @@ natively by ``_execute_and_serialize_rows`` -> rugo ``write_jsonl`` ->
 ``rugo/src/_text_render.hpp``, whose per-type emitters are the authority:
 
     INT8..INT64      -> JSON number            SByte / Int16 / Int32 / Int64
-    UINT8..UINT64    -> JSON number            Byte / Int32 / Int64 / Decimal
+    UINT8..UINT64    -> JSON number            Byte / Int32 / Int64 / Int64
     IPV4             -> "192.0.2.1"  (ej_ipv4) String
     BOOL             -> true / false           Boolean
     FLOAT32/FLOAT64  -> JSON number            Single / Double
@@ -48,7 +48,7 @@ cannot narrow it", which is the truth.
 """
 
 import re
-from typing import Any
+from typing import Any, NamedTuple
 
 #: EDM type used when the source type is unknown or has no wire representation.
 #:
@@ -76,11 +76,17 @@ _SCALAR_TYPES: dict[str, str] = {
     "BIGINT": "Edm.Int64",  # legacy
     # --- unsigned integers -----------------------------------------------
     # OData has one unsigned type (Edm.Byte), so the wider ones are promoted to
-    # the smallest signed type that holds their whole range. UINT64 has no such
-    # type and is handled in _map_scalar (Edm.Decimal, precision 20, scale 0).
+    # the smallest signed type that holds their whole range.
     "UINT8": "Edm.Byte",
     "UINT16": "Edm.Int32",
     "UINT32": "Edm.Int64",
+    # KNOWN NARROWING: UINT64's range (0..2**64-1) exceeds Edm.Int64's. rugo
+    # writes the true value -- `SELECT 18446744073709551615::UINT64` really does
+    # emit 18446744073709551615 -- so a client parsing strictly per the declared
+    # type will overflow above 2**63-1. Edm.Decimal(20, 0) would be exact;
+    # Edm.Int64 is the deliberate choice, and Custom.OriginalType carries UINT64
+    # so a caller that cares can tell.
+    "UINT64": "Edm.Int64",
     # --- floating point ---------------------------------------------------
     # Edm.Single is single precision; rugo's ej_float renders FLOAT32 from the
     # un-promoted value, so the declared type matches what is written.
@@ -124,7 +130,7 @@ _SCALAR_TYPES: dict[str, str] = {
     # NOT Edm.Binary. rugo routes VARBINARY through ej_string, the same emitter
     # VARCHAR uses, so the payload is a plain JSON string of the bytes -- not
     # base64. Declaring Edm.Binary would tell clients to base64-decode it and
-    # hand them garbage. See is_lossy_mapping: the source type is annotated.
+    # hand them garbage. Custom.OriginalType carries VARBINARY.
     "VARBINARY": "Edm.String",
     "BINARY": "Edm.String",  # legacy
     "BLOB": "Edm.String",  # legacy
@@ -139,28 +145,60 @@ _ARRAY_TYPES = frozenset({"ARRAY", "LIST"})
 _VECTOR_TYPES = frozenset({"VECTOR", "VECTOR_FP16"})
 _DECIMAL_TYPES = frozenset({"DECIMAL", "DECIMAL128", "NUMERIC"})
 
-#: Source types whose EDM type describes them exactly -- no width, precision,
-#: unit, element type or semantic refinement is lost on the way out. Everything
-#: else gets a ``Custom.OriginalType`` annotation (see is_lossy_mapping).
-_EXACTLY_DESCRIBED = frozenset(
-    {
-        "INT8", "INT16", "INT32", "INT64", "TINYINT", "SMALLINT",
-        "INTEGER", "INT", "BIGINT",
-        "UINT8",
-        "FLOAT32", "FLOAT64", "REAL", "DOUBLE", "FLOAT",
-        "BOOL", "BOOLEAN",
-        "DATE", "DATE32", "TIMESTAMP", "TIMESTAMP64", "DATETIME",
-        "TIME", "TIME32", "TIME64",
-        "VARCHAR", "NVARCHAR", "STRING", "TEXT", "CHAR",
-        # DECIMAL is exact *because* the Precision/Scale facets go out with it.
-        "DECIMAL", "DECIMAL128", "NUMERIC",
-    }
-)
-
 #: TIMESTAMP[unit] / TIME[unit] -> the CSDL Precision facet (fractional digits).
 _UNIT_PRECISION = {"s": "0", "ms": "3", "us": "6", "ns": "9"}
 #: opteryx's canonical temporal unit when the type string carries none.
 _DEFAULT_UNIT_PRECISION = "6"
+
+
+#: CSDL annotation term carrying the opteryx/Draken type a property came from.
+#:
+#: OData's own type system cannot express what this platform distinguishes: a
+#: UINT32 and an INT64 are both Edm.Int64; an IPv4 address, a VARBINARY blob, a
+#: JSONB document and a plain VARCHAR are all Edm.String; a DECIMAL and a
+#: FLOAT64 are different types with different exactness. CSDL forbids adding
+#: attributes to <Property> in the EDM namespace, so the sanctioned extension
+#: point is an <Annotation> child with a custom Term -- this one. It is emitted
+#: on EVERY property, by both $metadata endpoints, so a client never has to
+#: guess whether its absence means "same as the EDM type" or "we forgot".
+ORIGINAL_TYPE_TERM = "Custom.OriginalType"
+
+
+class EdmProperty(NamedTuple):
+    """Everything both $metadata endpoints need to emit one <Property>."""
+
+    name: str
+    #: EDM type reference, e.g. "Edm.Int32" or "Collection(Edm.Double)".
+    type: str
+    #: CSDL facet attributes (Precision/Scale). Not optional -- see edm_type_facets.
+    facets: dict[str, str]
+    #: The opteryx type this came from, for the ORIGINAL_TYPE_TERM annotation.
+    source_type: str = ""
+
+
+def edm_property(name: str, column_type: Any, element_type: Any = None) -> EdmProperty:
+    """Resolve one column into its complete CSDL property description."""
+    return EdmProperty(
+        name=name,
+        type=column_type_to_edm(column_type, element_type),
+        facets=edm_type_facets(column_type),
+        source_type=_source_type_display(column_type),
+    )
+
+
+def _source_type_display(column_type: Any) -> str:
+    """The platform type exactly as opteryx spells it, for the annotation.
+
+    Deliberately NOT upper-cased: `str(ColumnType)` writes `TIMESTAMP[us]`, and
+    that string round-trips through opteryx's own `parse_column_type` -- an
+    upper-cased `TIMESTAMP[US]` does not.
+    """
+    if column_type is None:
+        return ""
+    if isinstance(column_type, str):
+        return column_type.strip()
+    name = getattr(column_type, "name", None)
+    return str(name if name is not None else column_type).strip()
 
 
 def extract_base_type(type_str: str) -> str:
@@ -211,12 +249,6 @@ def _map_scalar(type_str: str) -> str | None:
     if base in _DECIMAL_TYPES:
         return "Edm.Decimal"
 
-    # UINT64's range exceeds Edm.Int64. Edm.Decimal with precision 20, scale 0
-    # is the only OData primitive that holds it exactly, and it is still a plain
-    # JSON number on the wire -- which is what rugo writes.
-    if base == "UINT64":
-        return "Edm.Decimal"
-
     return _SCALAR_TYPES.get(base)
 
 
@@ -238,26 +270,10 @@ def edm_type_facets(column_type: Any) -> dict[str, str]:
         # opteryx's own default when the catalog stored no parameters.
         return {"Precision": str(precision or 38), "Scale": str(scale if scale is not None else 9)}
 
-    if base == "UINT64":
-        return {"Precision": "20", "Scale": "0"}
-
     if base in ("TIMESTAMP", "TIMESTAMP64", "TIME", "TIME32", "TIME64"):
         return {"Precision": _extract_unit_precision(name)}
 
     return {}
-
-
-def is_lossy_mapping(column_type: Any) -> bool:
-    """Whether the EDM type for `column_type` loses information about it.
-
-    Drives the ``Custom.OriginalType`` annotation: a client reading
-    ``Edm.String`` cannot tell an IPv4 address from a VARBINARY blob from a
-    JSONB document, and ``Edm.Int64`` cannot tell a UINT32 from an INT64.
-    Emitting the source type beside the EDM type is how those callers get the
-    difference back.
-    """
-    base = extract_base_type(_type_name(column_type) or "")
-    return bool(base) and base not in _EXACTLY_DESCRIBED
 
 
 def column_type_to_edm(column_type: Any, element_type: Any = None) -> str:

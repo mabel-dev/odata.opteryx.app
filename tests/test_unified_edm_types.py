@@ -14,8 +14,8 @@ Verifies:
 
 from app.odata.edm_types import EDM_UNKNOWN
 from app.odata.edm_types import column_type_to_edm
+from app.odata.edm_types import edm_property
 from app.odata.edm_types import edm_type_facets
-from app.odata.edm_types import is_lossy_mapping
 
 
 class TestIntegerTypes:
@@ -31,11 +31,13 @@ class TestIntegerTypes:
         assert column_type_to_edm("UINT16") == "Edm.Int32"  # 0..65535
         assert column_type_to_edm("UINT32") == "Edm.Int64"  # 0..4294967295
 
-    def test_uint64_uses_decimal_because_int64_cannot_hold_it(self):
-        # 2**64-1 overflows Edm.Int64; Edm.Decimal(20, 0) is the only OData
-        # primitive that represents it exactly, and it is still a JSON number.
-        assert column_type_to_edm("UINT64") == "Edm.Decimal"
-        assert edm_type_facets("UINT64") == {"Precision": "20", "Scale": "0"}
+    def test_uint64_narrows_to_int64(self):
+        # Deliberate narrowing: rugo writes the true value (UINT64 max really
+        # does come out as 18446744073709551615), which exceeds Edm.Int64.
+        # Custom.OriginalType carries UINT64 for callers that need to know.
+        assert column_type_to_edm("UINT64") == "Edm.Int64"
+        assert edm_type_facets("UINT64") == {}
+        assert edm_property("u", "UINT64").source_type == "UINT64"
 
     def test_legacy_integer_spellings(self):
         # orso-era names; opteryx keeps the same aliases, and schemas persisted
@@ -242,19 +244,33 @@ class TestParsing:
         assert column_type_to_edm("DOUBLE PRECISION") == "Edm.Double"
 
 
-class TestLossyMappingAnnotation:
-    """`Custom.OriginalType` is emitted exactly when the EDM type loses detail."""
+class TestPlatformTypeAnnotation:
+    """Every property carries the opteryx type OData cannot express."""
 
-    def test_exactly_described_types_need_no_annotation(self):
-        for type_str in ("INT64", "INT32", "FLOAT64", "BOOL", "VARCHAR", "DECIMAL(15, 2)"):
-            assert not is_lossy_mapping(type_str), f"{type_str} should not be annotated"
+    def test_source_type_is_always_populated(self):
+        for type_str in ("INT64", "UINT32", "IPV4", "VARBINARY", "JSONB",
+                         "DECIMAL(15, 2)", "INTERVAL", "NULL", "ARRAY<VARCHAR>"):
+            assert edm_property("c", type_str).source_type == type_str, type_str
 
-    def test_widened_and_reinterpreted_types_are_annotated(self):
-        # A client seeing Edm.String cannot tell IPV4 from VARBINARY from JSONB;
-        # one seeing Edm.Int64 cannot tell UINT32 from INT64.
-        for type_str in ("UINT32", "UINT64", "IPV4", "VARBINARY", "JSONB", "VARIANT",
-                         "INTERVAL", "NULL", "VECTOR(768)", "ARRAY<VARCHAR>"):
-            assert is_lossy_mapping(type_str), f"{type_str} should be annotated"
+    def test_it_distinguishes_types_odata_collapses(self):
+        # All four are Edm.String; only the annotation tells them apart.
+        collapsed = {t: edm_property("c", t) for t in ("IPV4", "VARBINARY", "JSONB", "VARCHAR")}
+        assert {p.type for p in collapsed.values()} == {"Edm.String"}
+        assert {p.source_type for p in collapsed.values()} == {"IPV4", "VARBINARY", "JSONB", "VARCHAR"}
+
+        # Both are Edm.Int64.
+        assert edm_property("c", "UINT32").type == edm_property("c", "INT64").type
+        assert edm_property("c", "UINT32").source_type != edm_property("c", "INT64").source_type
+
+    def test_property_bundles_type_facets_and_source(self):
+        prop = edm_property("amount", "DECIMAL(15, 2)")
+        assert prop.name == "amount"
+        assert prop.type == "Edm.Decimal"
+        assert prop.facets == {"Precision": "15", "Scale": "2"}
+        assert prop.source_type == "DECIMAL(15, 2)"
+
+    def test_array_element_type_reaches_the_property(self):
+        assert edm_property("tags", "ARRAY", "VARCHAR").type == "Collection(Edm.String)"
 
 
 class TestConsistencyAcrossEndpoints:
@@ -274,7 +290,7 @@ class TestConsistencyAcrossEndpoints:
             ), f"{type_str} returned invalid EDM type: {edm_type}"
 
     def test_facets_are_strings_so_they_can_be_xml_attributes(self):
-        for type_str in ("DECIMAL(15, 2)", "UINT64", "TIMESTAMP[us]", "TIME[ms]"):
+        for type_str in ("DECIMAL(15, 2)", "DECIMAL", "TIMESTAMP[us]", "TIME[ms]"):
             facets = edm_type_facets(type_str)
             assert facets, f"{type_str} should carry facets"
             for key, value in facets.items():

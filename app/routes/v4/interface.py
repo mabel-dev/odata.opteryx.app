@@ -52,9 +52,8 @@ from app.config_client import get_config
 from app.odata.odata_to_logical_plan import ODataLogicalPlanBuilder
 from app.odata.plan_optimizer import ODataLogicalPlanOptimizer
 from app.odata.edm_types import EDM_UNKNOWN
-from app.odata.edm_types import column_type_to_edm
-from app.odata.edm_types import edm_type_facets
-from app.odata.edm_types import is_lossy_mapping
+from app.odata.edm_types import ORIGINAL_TYPE_TERM
+from app.odata.edm_types import edm_property
 from app.odata.virtual_datasets import VIRTUAL_INFORMATION_SCHEMA_DESCRIPTIONS
 from app.odata.virtual_datasets import VIRTUAL_INFORMATION_SCHEMA_TABLES
 from app.odata.virtual_datasets import is_virtual_information_schema
@@ -1106,10 +1105,14 @@ def dataset_metadata(
         source_type = "Virtual"
         response.headers["X-Dataset-Source"] = source_type
         virtual_columns = VIRTUAL_INFORMATION_SCHEMA_TABLES[dataset]
-        col_names = [name for name, _, _ in virtual_columns]
+        col_names = [col.name for col in virtual_columns]
         col_metadata = {
-            name: {"type": edm_type, "facets": facets}
-            for name, edm_type, facets in virtual_columns
+            col.name: {
+                "type": col.type,
+                "facets": col.facets,
+                "source_type": col.source_type,
+            }
+            for col in virtual_columns
         }
         sort_order_column = None
         sort_order_ascending = True
@@ -1188,25 +1191,16 @@ def dataset_metadata(
                     if field_id is not None:
                         col_id_to_name[field_id] = col_name
                     # Map the catalog column type to its OData EDM type (unified mapper).
-                    edm_type = column_type_to_edm(
-                        field.type, getattr(field, "element_type", None)
+                    col = edm_property(
+                        col_name, field.type, getattr(field, "element_type", None)
                     )
-                    col_types.append(edm_type)
+                    col_types.append(col.type)
                     col_metadata[col_name] = {
-                        "type": edm_type,
-                        "facets": edm_type_facets(field.type),
-                        "source_type": str(field.type),
+                        "type": col.type,
+                        "facets": col.facets,
+                        "source_type": col.source_type,
                         "nullable": field.nullable,
                     }
-
-                # Annotate columns whose EDM type is broader than the source type, so
-                # clients can still recover the original. The EDM type itself comes
-                # solely from column_type_to_edm -- this loop must not second-guess it,
-                # or the two $metadata endpoints drift apart again.
-                for meta in col_metadata.values():
-                    st = str(meta.get("source_type", ""))
-                    if st and is_lossy_mapping(st):
-                        meta["original_type"] = st.upper()
             else:
                 # If this is a view and the catalog object does not provide a schema,
                 # emit a minimal placeholder so the metadata document remains valid.
@@ -1361,12 +1355,14 @@ def dataset_metadata(
                 attrib={"Term": "Custom.Statistics.Min", "String": str(meta["min"])},
             )
 
-        # Emit original source type when we mapped to a different EDM type
-        if "original_type" in meta and meta["original_type"]:
+        # The platform type OData cannot express (unsigned width, IPv4 vs blob
+        # vs JSON, decimal vs float). Emitted for every property so its absence
+        # is never ambiguous.
+        if meta.get("source_type"):
             ET.SubElement(
                 prop,
                 f"{{{NS_EDM}}}Annotation",
-                attrib={"Term": "Custom.OriginalType", "String": str(meta["original_type"])},
+                attrib={"Term": ORIGINAL_TYPE_TERM, "String": str(meta["source_type"])},
             )
 
         if "max" in meta and meta["max"] is not None:
