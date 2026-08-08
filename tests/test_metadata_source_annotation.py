@@ -1,7 +1,5 @@
 """Tests for source type annotations in EDMX metadata."""
 
-from fastapi import Response
-
 from tests._opteryx_stubs import load_with_stubs
 
 # Load against the stubs so the heavy engine/catalog imports are skipped; the
@@ -35,8 +33,18 @@ def test_edmx_metadata_includes_source_annotation(monkeypatch):
     # Patch dataset retrieval functions to return our dataset
     monkeypatch.setattr(metadata, "_get_personal_datasets", lambda db, identity: [ds])
     monkeypatch.setattr(metadata, "_get_workspace_datasets", lambda db, ids: [])
-    # Ensure dataset schema lookup returns a minimal column so EntityType is created
-    monkeypatch.setattr(metadata, "_get_dataset_schema", lambda dataset_info: [("id", "Edm.Int64", {})])
+    # Stand in for the batched schema read with a minimal column, so an
+    # EntityType is created and the annotations below have somewhere to hang.
+    monkeypatch.setattr(
+        metadata,
+        "_facts_for",
+        lambda db, datasets: {
+            dataset.resource: metadata._DatasetFacts(
+                columns=[("id", "Edm.Int64", {})], last_modified_ms=None
+            )
+            for dataset in datasets
+        },
+    )
 
     # Prepare a fake request with claims allowing access to public workspace
     req = DummyRequest()
@@ -45,8 +53,7 @@ def test_edmx_metadata_includes_source_annotation(monkeypatch):
         "policies": [{"pattern": "public.*", "role": "reader"}],
     }
 
-    resp = Response()
-    res = metadata.get_edmx_metadata(req, resp)
+    res = metadata.get_edmx_metadata(req)
 
     # Response content should include our custom annotation term
     content = res.body.decode() if hasattr(res, "body") else res.content.decode()

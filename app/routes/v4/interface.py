@@ -16,18 +16,14 @@ sys.path.insert(
 import base64
 import datetime as dt
 import decimal
-import hashlib
 import json
-import threading
 import time
 import traceback
 import xml.etree.ElementTree as ET
-from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 from typing import List
 from typing import Optional
-from typing import Tuple
 
 import opteryx
 from fastapi import APIRouter
@@ -57,6 +53,14 @@ from app.odata.edm_types import edm_property
 from app.odata.virtual_datasets import VIRTUAL_INFORMATION_SCHEMA_DESCRIPTIONS
 from app.odata.virtual_datasets import VIRTUAL_INFORMATION_SCHEMA_TABLES
 from app.odata.virtual_datasets import is_virtual_information_schema
+from app.routes.v4.metadata_cache import clear_describe_cache
+from app.routes.v4.metadata_cache import clear_metadata_cache
+from app.routes.v4.metadata_cache import describe_cache_get
+from app.routes.v4.metadata_cache import describe_cache_put
+from app.routes.v4.metadata_cache import etag_for
+from app.routes.v4.metadata_cache import metadata_cache_get
+from app.routes.v4.metadata_cache import metadata_cache_put
+from app.routes.v4.metadata_cache import metadata_response
 
 logger = get_logger()
 
@@ -118,97 +122,6 @@ def _loaded_dataset_source_type(ds) -> str:
     except Exception:
         pass
     return "Table"
-
-# OData clients refetch $metadata constantly -- Power BI does so on every refresh,
-# and the web UI does so every time a details panel is opened. The two savings
-# here are independent, and only one is on by default:
-#
-#  - ETag / If-None-Match (always on): the document is rebuilt fresh on every
-#    request -- this endpoint's entire job is to report what exists *now*, and a
-#    dataset can be dropped or altered between requests, so there is no way to
-#    know the previous answer is still correct without asking the catalog again.
-#    But if the freshly-rebuilt document is byte-identical to what the client
-#    already has, a 304 still saves the transfer and the client's XML parse.
-#  - The response cache (opt-in via ODATA_METADATA_CACHE_TTL, default 0/off):
-#    skips rebuilding -- and therefore the catalog round trips -- for a fixed
-#    window, at the cost of serving a stale answer to "does this exist / what
-#    does its schema look like" for up to that long. Off by default because that
-#    trade is exactly backwards for an endpoint whose purpose is to answer that
-#    question; set it explicitly if a deployment can tolerate the staleness in
-#    exchange for fewer catalog round trips under heavy $metadata polling.
-#
-# The cache key (when enabled) carries the caller's role and policy because
-# those appear in the document as annotations.
-_METADATA_CACHE_MAX_ENTRIES = 128
-_metadata_cache_lock = threading.Lock()
-_metadata_cache: "OrderedDict[tuple, Tuple[float, str, str, dict]]" = OrderedDict()
-
-
-def _metadata_cache_ttl() -> float:
-    try:
-        return float(get_config("ODATA_METADATA_CACHE_TTL", "0"))
-    except ValueError:
-        return 0.0
-
-
-def _metadata_cache_get(key) -> Optional[Tuple[str, str, dict]]:
-    """Return (etag, xml, headers) for a live cache entry, else None."""
-    now = time.monotonic()
-    with _metadata_cache_lock:
-        entry = _metadata_cache.get(key)
-        if entry is None:
-            return None
-        expires_at, etag, xml, headers = entry
-        if expires_at <= now:
-            del _metadata_cache[key]
-            return None
-        _metadata_cache.move_to_end(key)
-        return etag, xml, dict(headers)
-
-
-def _metadata_cache_put(key, etag: str, xml: str, headers: dict) -> None:
-    ttl = _metadata_cache_ttl()
-    if ttl <= 0:
-        return
-    with _metadata_cache_lock:
-        _metadata_cache[key] = (time.monotonic() + ttl, etag, xml, dict(headers))
-        _metadata_cache.move_to_end(key)
-        while len(_metadata_cache) > _METADATA_CACHE_MAX_ENTRIES:
-            _metadata_cache.popitem(last=False)
-
-
-def clear_metadata_cache() -> None:
-    """Drop every cached metadata document. For tests and cache-invalidation hooks."""
-    with _metadata_cache_lock:
-        _metadata_cache.clear()
-
-
-def _etag_for(xml: str) -> str:
-    return '"' + hashlib.blake2b(xml.encode("utf-8"), digest_size=16).hexdigest() + '"'
-
-
-def _etag_matches(if_none_match: Optional[str], etag: str) -> bool:
-    """Whether an If-None-Match header covers `etag` (RFC 9110 §13.1.2)."""
-    if not if_none_match:
-        return False
-    if if_none_match.strip() == "*":
-        return True
-    for candidate in if_none_match.split(","):
-        candidate = candidate.strip()
-        if candidate.startswith("W/"):
-            candidate = candidate[2:]
-        if candidate == etag:
-            return True
-    return False
-
-
-def _metadata_response(xml: str, etag: str, headers: dict, if_none_match: Optional[str]) -> Response:
-    """Serve an EDMX document, or a 304 when the client already holds this version."""
-    headers = {**headers, "ETag": etag}
-    if _etag_matches(if_none_match, etag):
-        # A 304 carries no body, so media_type would be misleading here.
-        return Response(status_code=304, headers=headers)
-    return Response(content=xml, media_type="application/xml", headers=headers)
 
 
 def register_default_connector() -> None:
@@ -1103,10 +1016,10 @@ def dataset_metadata(
     # rendering can be served without touching the catalog at all.
     if_none_match = request.headers.get("if-none-match")
     cache_key = (table_name, assigned_role, assigned_policy, is_virtual_info_schema)
-    cached = _metadata_cache_get(cache_key)
+    cached = metadata_cache_get(cache_key)
     if cached is not None:
         cached_etag, cached_xml, cached_headers = cached
-        return _metadata_response(cached_xml, cached_etag, cached_headers, if_none_match)
+        return metadata_response(cached_xml, cached_etag, cached_headers, if_none_match)
 
     # Try to get enriched metadata from catalog
     col_names = []
@@ -1165,10 +1078,41 @@ def dataset_metadata(
             # Set source header for clients
             response.headers["X-Dataset-Source"] = source_type
 
-            # schema/describe/snapshot are independent catalog calls (each a likely
-            # Firestore/GCS round trip) with no data dependency on one another, so
-            # fetch them concurrently instead of serially -- this endpoint's latency
-            # is otherwise the sum of all three round trips instead of the slowest one.
+            # The current snapshot costs nothing: `snapshot()` with no argument
+            # is answered from the metadata `load_dataset` already fetched
+            # (SimpleDataset.snapshot -> DatasetMetadata.current_snapshot), so
+            # it is read here rather than dispatched alongside the two calls
+            # that really do go to the network.
+            snapshot = None
+            try:
+                if (
+                    source_type in TABLE_LIKE_SOURCES
+                    and hasattr(ds, "snapshot")
+                    and callable(getattr(ds, "snapshot"))
+                ):
+                    snapshot = ds.snapshot()
+            except Exception:
+                snapshot = None
+
+            # Which immutable artifacts a description would be computed from --
+            # None when there is no snapshot to pin it to, in which case the
+            # description is fetched but not cached.
+            snapshot_id = getattr(snapshot, "snapshot_id", None)
+            describe_key = (
+                (
+                    table_name,
+                    snapshot_id,
+                    getattr(getattr(ds, "metadata", None), "current_schema_id", None),
+                )
+                if snapshot_id is not None
+                else None
+            )
+
+            # schema and describe are independent catalog calls (a Firestore doc
+            # get and a GCS manifest fetch respectively) with no data dependency
+            # on one another, so fetch them concurrently instead of serially --
+            # this endpoint's latency is otherwise their sum rather than the
+            # slower of the two.
             def _fetch_schema():
                 try:
                     return ds.schema() if hasattr(ds, "schema") else None
@@ -1176,30 +1120,23 @@ def dataset_metadata(
                     return None
 
             def _fetch_description():
+                if describe_key is not None:
+                    cached_description = describe_cache_get(describe_key)
+                    if cached_description is not None:
+                        return cached_description
                 try:
-                    return ds.describe() if hasattr(ds, "describe") else None
+                    description = ds.describe() if hasattr(ds, "describe") else None
                 except Exception:
                     return None
+                if describe_key is not None and description is not None:
+                    describe_cache_put(describe_key, description)
+                return description
 
-            def _fetch_snapshot():
-                try:
-                    if (
-                        source_type in TABLE_LIKE_SOURCES
-                        and hasattr(ds, "snapshot")
-                        and callable(getattr(ds, "snapshot"))
-                    ):
-                        return ds.snapshot()
-                except Exception:
-                    pass
-                return None
-
-            with ThreadPoolExecutor(max_workers=3) as pool:
+            with ThreadPoolExecutor(max_workers=2) as pool:
                 schema_future = pool.submit(_fetch_schema)
                 description_future = pool.submit(_fetch_description)
-                snapshot_future = pool.submit(_fetch_snapshot)
                 schema = schema_future.result()
                 description = description_future.result()
-                snapshot = snapshot_future.result()
 
             if schema and hasattr(schema, "columns"):
                 mv_materialized = True
@@ -1703,9 +1640,9 @@ def dataset_metadata(
     # was assembled; carry them onto the response actually returned (and into the
     # cache, so a hit reproduces them).
     headers = dict(response.headers)
-    etag = _etag_for(xml)
-    _metadata_cache_put(cache_key, etag, xml, headers)
-    return _metadata_response(xml, etag, headers, if_none_match)
+    etag = etag_for(xml)
+    metadata_cache_put(cache_key, etag, xml, headers)
+    return metadata_response(xml, etag, headers, if_none_match)
 
 
 __all__ = ["router"]

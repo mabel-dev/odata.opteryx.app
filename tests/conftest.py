@@ -97,18 +97,21 @@ def pytest_collection_modifyitems(config, items):
 def _isolate_process_caches():
     """Empty the process-wide caches around every test.
 
-    $metadata responses and basic-auth exchanges are cached by
-    (dataset, role, policy) and by credentials respectively. Tests reuse those
-    keys while swapping the catalog or auth service underneath them, so without
-    this a test would be served the previous test's document or claims.
+    $metadata responses, column statistics and basic-auth exchanges are cached
+    by (dataset, role, policy), by (dataset, snapshot id, schema id) and by
+    credentials respectively. Tests reuse those keys while swapping the catalog
+    or auth service underneath them, so without this a test would be served the
+    previous test's document, statistics or claims.
     """
     from app.auth.external_auth import clear_credential_cache
+    from app.routes.v4.interface import clear_describe_cache
     from app.routes.v4.interface import clear_metadata_cache
 
     from tests._opteryx_stubs import LOADED_MODULES
 
     def _clear():
         clear_metadata_cache()
+        clear_describe_cache()
         clear_credential_cache()
         # Stub-loaded copies of interface.py hold their own caches (see
         # _opteryx_stubs.LOADED_MODULES), so clearing the app's is not enough.

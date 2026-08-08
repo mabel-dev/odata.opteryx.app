@@ -41,6 +41,7 @@ _STUBBED_NAMES = [
     "opteryx_catalog",
     "opteryx_catalog.catalog",
     "opteryx_catalog.catalog.compaction",
+    "opteryx_catalog.catalog.dataset",
 ]
 
 
@@ -99,6 +100,13 @@ def _build_stubs():
     compaction = types.ModuleType("opteryx_catalog.catalog.compaction")
     compaction.normalize_sort_order = lambda *args, **kwargs: None
     stubs["opteryx_catalog.catalog.compaction"] = compaction
+
+    # The real `_stored_type_display` renders DECIMAL precision/scale and ARRAY
+    # element types into the canonical display string; the bare name is enough
+    # for tests, which use simple scalar types.
+    dataset = types.ModuleType("opteryx_catalog.catalog.dataset")
+    dataset._stored_type_display = lambda column: str(column.get("type") or "VARCHAR").upper()
+    stubs["opteryx_catalog.catalog.dataset"] = dataset
 
     return stubs
 

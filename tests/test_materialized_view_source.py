@@ -222,7 +222,18 @@ def test_service_metadata_emits_materialized_view_source_annotation(monkeypatch)
     monkeypatch.setattr(metadata, "_get_firestore_client", lambda **kwargs: object())
     monkeypatch.setattr(metadata, "_get_personal_datasets", lambda db, identity: [ds])
     monkeypatch.setattr(metadata, "_get_workspace_datasets", lambda db, ids: [])
-    monkeypatch.setattr(metadata, "_get_dataset_schema", lambda dataset_info: [("id", "Edm.Int64", {})])
+    # Stand in for the batched schema read with a minimal column, so an
+    # EntityType is created and the annotations below have somewhere to hang.
+    monkeypatch.setattr(
+        metadata,
+        "_facts_for",
+        lambda db, datasets: {
+            dataset.resource: metadata._DatasetFacts(
+                columns=[("id", "Edm.Int64", {})], last_modified_ms=None
+            )
+            for dataset in datasets
+        },
+    )
 
     req = DummyRequest()
     req.state.claims = {
@@ -230,7 +241,7 @@ def test_service_metadata_emits_materialized_view_source_annotation(monkeypatch)
         "policies": [{"pattern": "public.*", "role": "reader"}],
     }
 
-    res = metadata.get_edmx_metadata(req, Response())
+    res = metadata.get_edmx_metadata(req)
     content = res.body.decode() if hasattr(res, "body") else res.content.decode()
 
     assert 'Term="Custom.SourceType" String="MaterializedView"' in content

@@ -1,14 +1,21 @@
 """OData v4 EDMX metadata endpoint."""
 
 # Get catalog configuration from environment
-import os
+import datetime as _dt
+import hashlib
+import json
 import xml.etree.ElementTree as ET
-from functools import lru_cache
-from typing import Any
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any, NamedTuple
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from google.cloud.firestore_v1.base_query import FieldFilter
-from opteryx_catalog import OpteryxCatalog
+
+# The catalog's own renderer for a persisted column's type. Imported rather than
+# reimplemented so a DECIMAL's precision and an ARRAY's element type are spelled
+# here exactly as they are everywhere else; if the catalog ever moves it, this
+# fails loudly at import instead of quietly emitting a different type.
+from opteryx_catalog.catalog.dataset import _stored_type_display
 
 from app.auth.deps import require_authentication
 from app.config_client import get_config
@@ -19,12 +26,16 @@ from app.odata.virtual_datasets import (
     VIRTUAL_INFORMATION_SCHEMA_TABLES,
     is_virtual_information_schema,
 )
+from app.routes.v4.metadata_cache import (
+    clear_metadata_cache,
+    etag_for,
+    metadata_cache_get,
+    metadata_cache_put,
+    metadata_response,
+)
 
 logger = get_logger()
 router = APIRouter(prefix="/api/v4")
-
-
-GCP_PROJECT_ID = os.environ.get("GCP_PROJECT_ID")
 
 
 # Resolved per use, not at import. A module-level constant is evaluated once
@@ -34,8 +45,17 @@ def _firestore_database() -> str:
     return get_config("FIRESTORE_DATABASE")
 
 
-def _bucket_name() -> str:
-    return get_config("GCS_BUCKET")
+def _metadata_workers() -> int:
+    """How many Firestore reads this endpoint may have in flight at once.
+
+    Every unit of work it fans out is a network round trip -- the thread spends
+    its life blocked, not running Python -- so the useful width is set by what
+    Firestore will tolerate, not by the core count.
+    """
+    try:
+        return max(1, int(get_config("ODATA_METADATA_WORKERS", "16")))
+    except ValueError:
+        return 16
 
 
 # A materialized view is a real dataset -- it lives in the `datasets`
@@ -100,7 +120,14 @@ def _parse_path_segments(path: str) -> tuple[str | None, str | None, str | None]
 
 
 class DatasetInfo:
-    """Information about a dataset accessible to the user."""
+    """Information about a dataset accessible to the user.
+
+    Everything here comes out of the catalog document the listing query already
+    streamed. The last three fields are what let the EDMX document be built
+    without going back to the catalog for a second look at the same document:
+    `schema_id` and `doc_ref` locate the one thing the listing does not carry
+    (the column list), and `inline_schema` means even that is already in hand.
+    """
 
     def __init__(
         self,
@@ -110,6 +137,9 @@ class DatasetInfo:
         name: str,
         source: str = "Table",
         last_modified_ms: int | None = None,
+        schema_id: str | None = None,
+        inline_schema: list | None = None,
+        doc_ref=None,
     ):
         self.resource = resource
         self.workspace = workspace
@@ -117,6 +147,14 @@ class DatasetInfo:
         self.name = name
         self.source = source
         self.last_modified_ms = last_modified_ms
+        #: `current-schema-id`: names the doc in the `schemas` subcollection.
+        self.schema_id = schema_id
+        #: Some documents carry their columns inline instead -- always, for a
+        #: view, whose schema is stored on the view document itself.
+        self.inline_schema = inline_schema
+        #: The Firestore reference this document came from, so the schema
+        #: subcollection can be addressed without reconstructing a path.
+        self.doc_ref = doc_ref
 
 
 def _query_collection_group(
@@ -126,11 +164,14 @@ def _query_collection_group(
     limit: int = 1000,
 ) -> list[DatasetInfo]:
     """
-    Query a collection group (datasets) and return formatted results.
+    Query a collection group and return formatted results.
+
+    Each document is read once, here, and every field the EDMX document needs
+    from it is captured on the DatasetInfo -- see that class for why.
 
     Args:
         db: Firestore client
-        collection: Collection name ("datasets")
+        collection: Subcollection name ("datasets" or "views")
         workspace_filter: Optional workspace ID to filter by
         limit: Maximum number of documents to retrieve
     """
@@ -183,9 +224,21 @@ def _query_collection_group(
                 # and, for datasets, the doc's `dataset-type` (=> MaterializedView)
                 source_type = _source_type_from_doc(data, collection)
 
-                # Try to capture last modified information from Firestore doc (common field names)
+                # Try to capture last modified information from Firestore doc (common field names).
+                #
+                # "timestamp-ms" is the one the catalog actually writes, and it
+                # is the same number as the current snapshot's timestamp: a
+                # commit takes `snapshot_id = int(time.time() * 1000)` and
+                # assigns it to the snapshot's timestamp_ms *and* to the
+                # dataset metadata's timestamp_ms (opteryx_catalog
+                # SimpleDataset.append -> save_dataset_metadata). So this is the
+                # last-modified time, not an approximation of it, and reading
+                # the snapshot document to get the same number would be a round
+                # trip for nothing. The rest are tolerated spellings from
+                # documents this service does not write.
                 last_modified = None
                 for key in (
+                    "timestamp-ms",
                     "last_modified",
                     "updated_at",
                     "updated",
@@ -201,8 +254,6 @@ def _query_collection_group(
                         # If ISO datetime string, try to parse
                         if isinstance(val, str):
                             try:
-                                import datetime as _dt
-
                                 iso = val
                                 if iso.endswith("Z"):
                                     iso = iso.replace("Z", "+00:00")
@@ -221,6 +272,9 @@ def _query_collection_group(
                         name=name,
                         source=source_type,
                         last_modified_ms=last_modified,
+                        schema_id=data.get("current-schema-id"),
+                        inline_schema=data.get("schema"),
+                        doc_ref=doc.reference,
                     )
                 )
             except Exception:
@@ -255,6 +309,10 @@ def _get_personal_datasets(db, identity: str) -> list[DatasetInfo]:
                         collection=collection_name,
                         name=name,
                         source=_source_type_from_doc(data, "datasets"),
+                        last_modified_ms=data.get("timestamp-ms"),
+                        schema_id=data.get("current-schema-id"),
+                        inline_schema=data.get("schema"),
+                        doc_ref=doc.reference,
                     )
                 )
             except Exception:
@@ -266,18 +324,39 @@ def _get_personal_datasets(db, identity: str) -> list[DatasetInfo]:
 
 
 def _get_workspace_datasets(db, workspace_ids: set[str]) -> list[DatasetInfo]:
-    """Retrieve all datasets from the given workspace IDs."""
-    results = []
+    """Retrieve all datasets and views from the given workspace IDs.
+
+    Both subcollections are queried, as the service document's twin listing
+    does. Querying only "datasets" left every view out of the EDMX document
+    entirely -- they were unlistable here while being perfectly queryable.
+
+    One collection-group query per (workspace, subcollection), issued
+    concurrently: they are independent Firestore round trips, so run serially
+    the caller waits for their sum rather than for the slowest one.
+    """
+    results: list[DatasetInfo] = []
+    queries = [
+        (workspace_id, subcollection)
+        for workspace_id in sorted(workspace_ids)
+        for subcollection in ("datasets", "views")
+    ]
+    if not queries:
+        return results
+
+    def _run(query):
+        workspace_id, subcollection = query
+        return _query_collection_group(
+            db, subcollection, workspace_filter=workspace_id, limit=1000
+        )
 
     try:
-        for workspace_id in workspace_ids:
-            datasets = _query_collection_group(
-                db,
-                "datasets",
-                workspace_filter=workspace_id,
-                limit=1000,
-            )
-            results.extend(datasets)
+        if len(queries) == 1:
+            batches = [_run(queries[0])]
+        else:
+            with ThreadPoolExecutor(max_workers=min(len(queries), _metadata_workers())) as pool:
+                batches = list(pool.map(_run, queries))
+        for batch in batches:
+            results.extend(batch)
     except Exception as exc:
         logger.error(f"Failed to retrieve datasets: {type(exc)} {exc}")
         raise HTTPException(
@@ -288,54 +367,181 @@ def _get_workspace_datasets(db, workspace_ids: set[str]) -> list[DatasetInfo]:
     return results
 
 
+class _DatasetFacts(NamedTuple):
+    """Everything the EDMX document needs about one dataset.
 
-
-
-
-@lru_cache(maxsize=512)
-def _get_dataset_schema(dataset_info: DatasetInfo) -> list[EdmProperty]:
-    """Get dataset schema from catalog instead of querying Opteryx.
-
-    Args:
-        dataset_info: DatasetInfo with workspace, collection, name
-
-    Returns:
-        List of EdmProperty. The facets are not optional decoration -- see
-        edm_type_facets: a Decimal without Scale, or a DateTimeOffset without
-        Precision, means something different in CSDL than what the rows carry.
+    Both halves come from the catalog document the listing query already
+    streamed -- the timestamp directly, the columns either inline or via the one
+    schema document that document points at.
     """
-    if is_virtual_information_schema(dataset_info.collection, dataset_info.name):
-        return VIRTUAL_INFORMATION_SCHEMA_TABLES[dataset_info.name]
 
-    try:
-        # Initialize catalog for this workspace
-        catalog = OpteryxCatalog(
-            dataset_info.workspace,
-            firestore_project=GCP_PROJECT_ID,
-            firestore_database=_firestore_database(),
-            gcs_bucket=_bucket_name(),
+    #: Column definitions, empty when no schema could be read. The facets are
+    #: not optional decoration -- see edm_type_facets: a Decimal without Scale,
+    #: or a DateTimeOffset without Precision, means something different in CSDL
+    #: than what the rows carry.
+    columns: list
+    #: Last-modified time, straight off the catalog document.
+    last_modified_ms: int | None
+
+
+_NO_FACTS = _DatasetFacts(columns=[], last_modified_ms=None)
+
+# How many schema documents to ask for in one Firestore batched read. Firestore
+# resolves a BatchGetDocuments as a single streamed call, so the whole point is
+# to make this large; it is chunked at all only to keep any one request a
+# sensible size, and the chunks are then fetched concurrently anyway.
+_SCHEMA_BATCH_SIZE = 300
+
+
+def _columns_from_stored(stored_columns) -> list:
+    """Turn a stored column list into EDM property definitions.
+
+    `_stored_type_display` is the catalog's own renderer for a persisted column
+    (it is what puts the precision and scale into `DECIMAL(38, 9)` and the
+    element type into `ARRAY<VARCHAR>`), and is exactly what
+    `SimpleDataset.schema()` runs to produce the `SchemaColumn.type` string this
+    endpoint used to read. Reusing it rather than re-deriving the display form
+    is what keeps a type meaning the same thing whichever endpoint reports it.
+    """
+    columns = []
+    for column in stored_columns or []:
+        if not isinstance(column, dict):
+            continue
+        name = column.get("name")
+        if not name:
+            continue
+        columns.append(
+            edm_property(
+                name,
+                _stored_type_display(column),
+                column.get("element-type") or column.get("element_type"),
+            )
+        )
+    return columns
+
+
+def _facts_for(db, datasets: list[DatasetInfo]) -> dict[str, _DatasetFacts]:
+    """Resolve every dataset's columns and last-modified time, keyed by resource.
+
+    The listing query that produced `datasets` has already read each catalog
+    document in full, so the timestamp needs no further lookup and neither do
+    the columns of anything carrying its schema inline (a view always does).
+    What is left is one `schemas/{current-schema-id}` document per remaining
+    dataset -- immutable, addressable, and independent of one another, so they
+    are fetched with Firestore's batched read rather than one at a time.
+
+    This is why the endpoint no longer opens an OpteryxCatalog: `load_dataset`
+    would re-read the very document the listing just streamed, behind a handle
+    whose construction is itself a Firestore client plus a `$properties` read.
+    """
+    facts: dict[str, _DatasetFacts] = {}
+    wanted: dict[str, Any] = {}  # schema doc path -> its Firestore reference
+    pending: list[tuple[DatasetInfo, str]] = []  # datasets awaiting a batch read
+
+    for dataset in datasets:
+        if is_virtual_information_schema(dataset.collection, dataset.name):
+            # Not backed by a catalog entry: fixed schema, and nothing to be
+            # last-modified.
+            facts[dataset.resource] = _DatasetFacts(
+                columns=VIRTUAL_INFORMATION_SCHEMA_TABLES[dataset.name],
+                last_modified_ms=None,
+            )
+            continue
+
+        # `current-schema-id` wins over an inline `schema` when both are
+        # present, matching SimpleDataset.schema(): it resolves the current
+        # schema id first and only falls back to the inline copy when there
+        # isn't one. Preferring the inline copy would serve a stale schema to
+        # any dataset that still carries one from before it had schema
+        # documents.
+        if dataset.schema_id and dataset.doc_ref is not None:
+            try:
+                ref = dataset.doc_ref.collection("schemas").document(str(dataset.schema_id))
+            except Exception as exc:
+                logger.warning(f"Cannot address schema of {dataset.resource}: {exc}")
+                facts[dataset.resource] = _NO_FACTS
+                continue
+            wanted[ref.path] = ref
+            pending.append((dataset, ref.path))
+            continue
+
+        # Otherwise the columns are already in hand, or there are none to
+        # declare -- in which case the caller's `if not columns` drops the
+        # dataset from the document.
+        facts[dataset.resource] = _DatasetFacts(
+            columns=_columns_from_stored(dataset.inline_schema),
+            last_modified_ms=dataset.last_modified_ms,
         )
 
-        # Load dataset from catalog (namespace.table_name format)
-        dataset_path = f"{dataset_info.collection}.{dataset_info.name}"
-        dataset = catalog.load_dataset(dataset_path)
+    columns_by_path = _read_schema_documents(db, list(wanted.values()))
+    for dataset, path in pending:
+        facts[dataset.resource] = _DatasetFacts(
+            columns=columns_by_path.get(path, []),
+            last_modified_ms=dataset.last_modified_ms,
+        )
+    return facts
 
-        # Get schema from catalog
-        schema = dataset.schema()
 
-        columns = []
-        for column in schema.columns:
-            col_name = column.name
-            # Map Opteryx type to EDM type
-            columns.append(
-                edm_property(col_name, column.type, getattr(column, "element_type", None))
-            )
+def _read_schema_documents(db, refs: list) -> dict[str, list]:
+    """Batch-read schema documents, returning path -> column definitions."""
+    if not refs:
+        return {}
 
-        return columns
+    chunks = [refs[i : i + _SCHEMA_BATCH_SIZE] for i in range(0, len(refs), _SCHEMA_BATCH_SIZE)]
 
-    except Exception as exc:
-        logger.warning(f"Failed to get schema from catalog for {dataset_info.resource}: {exc}")
-        return []
+    def _read(chunk) -> dict[str, list]:
+        found: dict[str, list] = {}
+        try:
+            for doc in db.get_all(chunk):
+                ref = getattr(doc, "reference", None)
+                if ref is None or not getattr(doc, "exists", False):
+                    continue
+                found[ref.path] = _columns_from_stored((doc.to_dict() or {}).get("columns"))
+        except Exception as exc:
+            # A failed batch costs those datasets their columns, which drops
+            # them from the document -- the same outcome an unreadable schema
+            # had before, and not a reason to fail the whole request.
+            logger.warning(f"Batched schema read failed for {len(chunk)} datasets: {exc}")
+        return found
+
+    if len(chunks) == 1:
+        return _read(chunks[0])
+
+    columns_by_path: dict[str, list] = {}
+    with ThreadPoolExecutor(max_workers=min(len(chunks), _metadata_workers())) as pool:
+        for found in pool.map(_read, chunks):
+            columns_by_path.update(found)
+    return columns_by_path
+
+
+def _caller_fingerprint(claims: dict) -> str:
+    """Stable digest of everything about the caller that changes the document.
+
+    The document lists exactly the datasets this caller may see, so two callers
+    may only share a cache entry when their identity and their policies match.
+    """
+    payload = [claims.get("identity"), claims.get("policies") or []]
+    try:
+        encoded = json.dumps(payload, sort_keys=True, default=str)
+    except Exception:
+        encoded = repr(payload)
+    return hashlib.blake2b(encoded.encode("utf-8"), digest_size=16).hexdigest()
+
+
+def _ordered_datasets(datasets: list[DatasetInfo]) -> list[DatasetInfo]:
+    """Deduplicate by resource name and put the result in a deterministic order.
+
+    Both halves matter. Duplicates cost a catalog round trip each and used to
+    emit a repeated EntitySet for the same EntityType. The ordering is what
+    makes the ETag usable at all: Firestore stream order and set iteration order
+    are neither stable across processes nor guaranteed stable within one, so
+    without this the same datasets would render different bytes -- and so a
+    different validator -- on each replica the client happened to reach.
+    """
+    unique: dict[str, DatasetInfo] = {}
+    for dataset in datasets:
+        unique.setdefault(dataset.resource, dataset)
+    return [unique[resource] for resource in sorted(unique)]
 
 
 @router.get(
@@ -350,10 +556,7 @@ def _get_dataset_schema(dataset_info: DatasetInfo) -> list[EdmProperty]:
     },
     dependencies=[Depends(require_authentication)],
 )
-def get_edmx_metadata(
-    request: Request,
-    response: Response,
-) -> Any:
+def get_edmx_metadata(request: Request) -> Any:
     """
     Return service-wide OData v4 EDMX metadata document.
 
@@ -386,18 +589,31 @@ def get_edmx_metadata(
     Access control: Filtered by authenticated user's permissions. Personal/public
     workspaces handled automatically. Returns 504 if catalog service unavailable.
 
+    Caching: the response carries an ETag, and a conditional request whose
+    If-None-Match matches gets a 304 -- the document is still rebuilt (a dataset
+    may have been created or dropped since), but an unchanged one costs no
+    transfer and no client-side parse. Setting ODATA_METADATA_CACHE_TTL also
+    skips the rebuild for that many seconds; see app.routes.v4.metadata_cache
+    for why that half is opt-in.
+
     Example: GET /api/v4/$metadata
 
     Content-Type: application/xml
 
     Requires authentication via bearer token or basic auth.
     """
-    # Set OData-Version header and XML content type
-    response.headers["OData-Version"] = "4.0"
-
     # Get claims from request state (set by require_authentication dependency)
     claims = request.state.claims
     identity = claims.get("identity")
+
+    # Nothing about the document depends on anything read below, so a cached
+    # rendering can be served before a single catalog round trip is made.
+    if_none_match = request.headers.get("if-none-match")
+    cache_key = ("service", _caller_fingerprint(claims))
+    cached = metadata_cache_get(cache_key)
+    if cached is not None:
+        cached_etag, cached_xml, cached_headers = cached
+        return metadata_response(cached_xml, cached_etag, cached_headers, if_none_match)
 
     from app.auth.permissions import ANONYMOUS_EXEMPT_PAIRS, ANONYMOUS_EXEMPT_WORKSTREAM
 
@@ -433,10 +649,14 @@ def get_edmx_metadata(
         # workspace -- so every dataset it returns is authorized individually below.
         workspace_ids = accessible_workstreams(access_policies_list) | {"public"}
 
-        # Collect all datasets
-        all_datasets: list[DatasetInfo] = []
-        all_datasets.extend(_get_personal_datasets(db, identity))
-        all_datasets.extend(_get_workspace_datasets(db, workspace_ids))
+        # Collect all datasets. The personal collection and the workspace
+        # collection groups are unrelated Firestore queries, so overlap them.
+        with ThreadPoolExecutor(max_workers=2) as discovery:
+            personal = discovery.submit(_get_personal_datasets, db, identity)
+            workspace = discovery.submit(_get_workspace_datasets, db, workspace_ids)
+            all_datasets: list[DatasetInfo] = list(personal.result())
+            # Raises through, as it did serially, when Firestore is unreachable.
+            all_datasets.extend(workspace.result())
 
         # Filter datasets by read permission
         filtered_datasets: list[DatasetInfo] = []
@@ -480,6 +700,13 @@ def get_edmx_metadata(
                     )
                 )
 
+    # One entry per distinct resource, in a fixed order, so the bytes below --
+    # and therefore the ETag -- are a function of the content alone.
+    filtered_datasets = _ordered_datasets(filtered_datasets)
+
+    # Everything the document still needs from Firestore, in one batched read.
+    facts_by_resource = _facts_for(db, filtered_datasets)
+
     # Build EDMX XML document
     # Namespaces
     NS_EDMX = "http://docs.oasis-open.org/odata/ns/edmx"
@@ -508,7 +735,7 @@ def get_edmx_metadata(
             continue
 
         # Get schema for this dataset
-        columns = _get_dataset_schema(dataset)
+        columns = facts_by_resource.get(dataset.resource, _NO_FACTS).columns
 
         if not columns:
             # Skip datasets with no accessible schema
@@ -576,33 +803,17 @@ def get_edmx_metadata(
             attrib={"Term": "Custom.SourceType", "String": dataset.source},
         )
 
-        # Add last-modified annotation if available (try catalog first, then Firestore doc timestamp)
-        try:
-            # Try to get last modified from catalog snapshot
-            catalog = OpteryxCatalog(
-                dataset.workspace,
-                firestore_project=GCP_PROJECT_ID,
-                firestore_database=_firestore_database(),
-                gcs_bucket=_bucket_name(),
-            )
-            ds_obj = catalog.load_dataset(f"{dataset.collection}.{dataset.name}")
-            snapshot = ds_obj.snapshot()
-            ts = getattr(snapshot, "timestamp_ms", None)
-        except Exception:
-            ts = None
-
-        # Fallback to dataset.last_modified_ms (from Firestore doc)
+        # Add last-modified annotation if available: the catalog snapshot read
+        # alongside the schema above, falling back to the Firestore doc timestamp
+        # picked up while enumerating.
+        ts = facts_by_resource.get(dataset.resource, _NO_FACTS).last_modified_ms
         if ts is None:
             ts = getattr(dataset, "last_modified_ms", None)
 
         if ts:
             try:
-                import datetime as _dt
-
                 # Convert milliseconds to ISO 8601 UTC string
-                iso = (
-                    _dt.datetime.fromtimestamp(ts / 1000.0, tz=_dt.UTC).isoformat()
-                )
+                iso = _dt.datetime.fromtimestamp(ts / 1000.0, tz=_dt.UTC).isoformat()
                 ET.SubElement(
                     entity_set,
                     "{" + NS_EDM + "}Annotation",
@@ -619,7 +830,13 @@ def get_edmx_metadata(
     xml_declaration = '<?xml version="1.0" encoding="UTF-8"?>\n'
     xml_content = xml_declaration + xml_str
 
-    return Response(content=xml_content, media_type="application/xml")
+    # Returning a Response directly bypasses the injected `response`, whose
+    # headers FastAPI does not merge in that case -- so OData-Version has to be
+    # carried explicitly here rather than set on it.
+    headers = {"OData-Version": "4.0"}
+    etag = etag_for(xml_content)
+    metadata_cache_put(cache_key, etag, xml_content, headers)
+    return metadata_response(xml_content, etag, headers, if_none_match)
 
 
-__all__ = ["router"]
+__all__ = ["clear_metadata_cache", "router"]
