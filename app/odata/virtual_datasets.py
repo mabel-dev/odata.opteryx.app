@@ -46,6 +46,18 @@ VIRTUAL_INFORMATION_SCHEMA_TABLES: dict[str, list[EdmProperty]] = {
         _col("view_owner", "VARCHAR"),
         _col("view_updated_at", "TIMESTAMP"),
     ],
+    "triggers": [
+        _col("trigger_catalog", "VARCHAR"),
+        _col("trigger_collection", "VARCHAR"),
+        _col("trigger_name", "VARCHAR"),
+        _col("event_object_table", "VARCHAR"),
+        _col("action_kind", "VARCHAR"),
+        _col("target_view", "VARCHAR"),
+        _col("created_by", "VARCHAR"),
+        _col("created_at", "TIMESTAMP"),
+        _col("last_fired_at", "TIMESTAMP"),
+        _col("last_fired_status", "VARCHAR"),
+    ],
     "schemata": [
         _col("catalog_name", "VARCHAR"),
         _col("schema_name", "VARCHAR"),
@@ -58,6 +70,7 @@ VIRTUAL_INFORMATION_SCHEMA_DESCRIPTIONS: dict[str, str] = {
     "tables": "System view listing the tables and views visible in this workspace.",
     "columns": "System view listing the columns of the tables and views visible in this workspace.",
     "views": "System view listing the views visible in this workspace, including their SQL definition.",
+    "triggers": "System view listing the triggers defined on the tables visible in this workspace, including the view each one refreshes.",
     "schemata": "System view listing the schemas (collections) visible in this workspace.",
 }
 
