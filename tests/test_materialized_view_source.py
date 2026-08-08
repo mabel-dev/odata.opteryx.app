@@ -353,6 +353,66 @@ def test_materialized_view_exposes_refresh_annotations(monkeypatch):
     assert 'Term="Custom.MaterializedView.SourceTables" String="examples.base"' in content
     assert "Custom.MaterializedView.LastRefreshed" in content
     assert 'Term="Custom.MaterializedView.LastRefreshStatus" String="success"' in content
+    assert 'Term="Custom.MaterializedView.Materialized" Bool="true"' in content
+
+
+class FakeUnrefreshedMaterializedView(FakeMaterializedView):
+    """A registered but never-refreshed MV, as CREATE MATERIALIZED VIEW leaves it.
+
+    Matches the shape observed in the live catalog (opteryx.tests_temp.
+    mv_e2e_target): the dataset document exists and carries the SQL, sources and
+    trigger, but the refresh that would produce a schema and a first snapshot has
+    not run. describe() raises rather than returning None -- there is no manifest
+    to describe.
+    """
+
+    def schema(self):
+        return None
+
+    def describe(self):
+        raise ValueError("No manifest available for this dataset/snapshot")
+
+    def snapshot(self):
+        return None
+
+
+class FakeUnrefreshedMVCatalog(FakeMVCatalog):
+    def load_dataset(self, path):
+        return FakeUnrefreshedMaterializedView()
+
+    def get_materialized_view(self, identifier):
+        return {
+            "sql": "SELECT id FROM public.examples.base",
+            "source-tables": ["examples.base"],
+            "last-refreshed-at-ms": None,
+            "last-refresh-status": None,
+        }
+
+
+def test_never_refreshed_materialized_view_still_has_metadata(monkeypatch):
+    """A schema-less MV must not 404 -- that hid the details of every MV for the
+    whole window between creation and its first refresh."""
+    monkeypatch.setattr(interface, "OpteryxCatalog", FakeUnrefreshedMVCatalog)
+    req = DummyRequest()
+    req.state.claims = {"identity": "test-user"}
+    resp = Response()
+
+    res = interface.dataset_metadata(
+        req, resp, workstream="public", collection="examples", dataset="mv_unrefreshed"
+    )
+    content = res.content.decode() if hasattr(res, "content") else res.body.decode()
+
+    # It is still identifiably a materialized view, and still says what it is
+    # derived from and how -- which is all a details page needs.
+    assert 'Term="Custom.SourceType" String="MaterializedView"' in content
+    assert "Custom.Definition" in content
+    assert 'Term="Custom.MaterializedView.SourceTables" String="examples.base"' in content
+    # The one fact that separates this from an MV really holding a single
+    # nullable string column: the Property list is a placeholder, not a schema.
+    assert 'Term="Custom.MaterializedView.Materialized" Bool="false"' in content
+    # No refresh has happened, so neither refresh annotation is emitted.
+    assert "Custom.MaterializedView.LastRefreshed" not in content
+    assert "Custom.MaterializedView.LastRefreshStatus" not in content
 
 
 class FakePlainDataset(FakeMaterializedView):

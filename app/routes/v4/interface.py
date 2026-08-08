@@ -1099,6 +1099,10 @@ def dataset_metadata(
     col_types = []
     col_metadata = {}  # Maps col_name -> {type, min, max, cardinality, description}
     col_id_to_name = {}  # Maps catalog column id -> name, for resolving sort_orders
+    # Whether a materialized view has actually been built yet. False between
+    # CREATE MATERIALIZED VIEW and the first refresh, when the catalog record
+    # exists but there is no schema and no snapshot behind it.
+    mv_materialized = False
 
     if is_virtual_info_schema:
         # No catalog entry backs this dataset -- its schema is fixed.
@@ -1184,6 +1188,7 @@ def dataset_metadata(
                 snapshot = snapshot_future.result()
 
             if schema and hasattr(schema, "columns"):
+                mv_materialized = True
                 for field in schema.columns:
                     col_name = field.name
                     col_names.append(col_name)
@@ -1202,12 +1207,20 @@ def dataset_metadata(
                         "nullable": field.nullable,
                     }
             else:
-                # If this is a view and the catalog object does not provide a schema,
-                # emit a minimal placeholder so the metadata document remains valid.
-                # Materialized views deliberately do *not* take this branch: they
-                # are physical tables and always have a schema, so its absence is
-                # the same invalid catalog state it is for any other table.
-                if source_type == "View":
+                # Two kinds legitimately have no schema, and neither is an error.
+                # A view's catalog object may simply not carry one. A materialized
+                # view has none until its first refresh runs: CREATE MATERIALIZED
+                # VIEW registers the dataset, its SQL, its sources and its trigger,
+                # and the refresh is what produces the schema and first snapshot --
+                # so a freshly created MV sits in exactly this state, and 404ing it
+                # made its details page unreachable for the whole window between
+                # creation and first refresh.
+                #
+                # Both get a single-column placeholder so the EDMX stays
+                # structurally valid (an EntitySet's EntityType needs a key).
+                # Custom.MaterializedView.Materialized, emitted below, is what tells
+                # a client those columns are a placeholder and not the real schema.
+                if source_type in (MATERIALIZED_VIEW_SOURCE, "View"):
                     # Single string key placeholder
                     col_names = ["id"]
                     col_metadata = {"id": {"type": "Edm.String", "nullable": True}}
@@ -1594,6 +1607,19 @@ def dataset_metadata(
     # effort only -- older catalog wheels have no get_materialized_view(), and a
     # missing record must not break an otherwise valid metadata document.
     if source_type == MATERIALIZED_VIEW_SOURCE:
+        # Has this MV ever been built? False means the Property list above is the
+        # placeholder, not a schema, and there is no snapshot behind it -- a state
+        # a client cannot otherwise tell apart from an MV that really does hold one
+        # nullable string column. Emitted unconditionally so its absence means
+        # "older service", never "not yet materialized".
+        ET.SubElement(
+            entity_set,
+            f"{{{NS_EDM}}}Annotation",
+            attrib={
+                "Term": "Custom.MaterializedView.Materialized",
+                "Bool": str(mv_materialized).lower(),
+            },
+        )
         try:
             mv = workspace.get_materialized_view(f"{collection}.{dataset}")
             # Custom.Definition is the term views already use for defining SQL.
