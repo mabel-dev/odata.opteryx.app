@@ -74,8 +74,21 @@ def _bucket_name() -> str:
     return get_config("GCS_BUCKET")
 
 
-DEFAULT_TOP = int(os.environ.get("ODATA_DEFAULT_TOP", "100"))
-MAX_TOP = int(os.environ.get("ODATA_MAX_TOP", "25000"))
+def _default_top() -> int:
+    return int(get_config("ODATA_DEFAULT_TOP", "100"))
+
+
+def _max_top() -> int:
+    return int(get_config("ODATA_MAX_TOP", "25000"))
+
+
+# The two values below feed OpenAPI descriptions built inside route decorators,
+# which Python evaluates once at import -- there is no per-request hook to hang
+# them off. They are therefore snapshots, and a config change reaches the docs
+# only on redeploy. Request handling calls `_default_top()`/`_max_top()` and
+# does pick up changes; only the prose is frozen.
+_DOC_DEFAULT_TOP = _default_top()
+_DOC_MAX_TOP = _max_top()
 
 # A materialized view is a real dataset -- it has a schema, snapshots and a sort
 # order like any table -- that the catalog tags with `dataset-type`
@@ -133,7 +146,7 @@ _metadata_cache: "OrderedDict[tuple, Tuple[float, str, str, dict]]" = OrderedDic
 
 def _metadata_cache_ttl() -> float:
     try:
-        return float(os.environ.get("ODATA_METADATA_CACHE_TTL", "0"))
+        return float(get_config("ODATA_METADATA_CACHE_TTL", "0"))
     except ValueError:
         return 0.0
 
@@ -503,7 +516,7 @@ def execute_odata_query(
         filter_expr: OData $filter expression
         orderby_expr: OData $orderby expression
         select_cols: OData $select columns
-        top: $top limit (1-MAX_TOP, default: DEFAULT_TOP)
+        top: $top limit (1-`_max_top()`, default: `_default_top()`)
         skip: $skip offset
         count_requested: Whether to include total count
         apply_expr: OData $apply expression
@@ -529,7 +542,7 @@ def execute_odata_query(
     # Step 1: Set defaults
     original_top = top
     if top is None:
-        top = DEFAULT_TOP
+        top = _default_top()
 
     # Step 2: Build logical plan from OData parameters
     # This parses each OData expression ($filter, $orderby, etc.) and builds
@@ -697,7 +710,7 @@ router = APIRouter(
     description="Retrieve data from a dataset with OData v4 query parameters ($filter, $select, $orderby, $top, $skip, $apply, $count). Returns paginated results with total count and nextLink for server-driven paging.",
     responses={
         200: {"description": "Query succeeded; returns rows and pagination metadata"},
-        400: {"description": f"Invalid query: malformed $filter, unsupported $top value (not 0-{MAX_TOP}), invalid $count value, or invalid $apply expression"},
+        400: {"description": f"Invalid query: malformed $filter, unsupported $top value (not 0-{_DOC_MAX_TOP}), invalid $count value, or invalid $apply expression"},
         401: {"description": "Missing or invalid authentication (no bearer token or basic auth)"},
         403: {"description": "Forbidden: authenticated but no permission for dataset"},
         501: {"description": "Unsupported query feature: $search or $expand not implemented"},
@@ -717,7 +730,7 @@ def read_dataset(
     top: Optional[int] = Query(
         None,
         alias="$top",
-        description=f"Limit result rows (0-{MAX_TOP}, default {DEFAULT_TOP}). Value 0 with $count=true returns count only. Returns @odata.nextLink if result is truncated."
+        description=f"Limit result rows (0-{_DOC_MAX_TOP}, default {_DOC_DEFAULT_TOP}). Value 0 with $count=true returns count only. Returns @odata.nextLink if result is truncated."
     ),
     skip: Optional[int] = Query(
         None,
@@ -810,15 +823,16 @@ def read_dataset(
         )
 
     if top is None:
-        top = DEFAULT_TOP
+        top = _default_top()
     else:
         top = int(top)  # Will raise ValueError if not a valid integer
 
     # Validate $top range (allow 0 unconditionally per OData spec)
-    if not (0 <= top <= MAX_TOP):
+    max_top = _max_top()
+    if not (0 <= top <= max_top):
         raise HTTPException(
             status_code=400,
-            detail=f"$top must be between 0 and {MAX_TOP}",
+            detail=f"$top must be between 0 and {max_top}",
         )
 
     # Parse count parameter (only accept "true" or "false" per OData spec)

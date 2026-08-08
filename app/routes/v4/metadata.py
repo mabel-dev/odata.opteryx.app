@@ -401,7 +401,7 @@ def get_edmx_metadata(
 
     from app.auth.permissions import ANONYMOUS_EXEMPT_PAIRS, ANONYMOUS_EXEMPT_WORKSTREAM
 
-    db = _get_firestore_client(database="catalogs")
+    db = _get_firestore_client(database=_firestore_database())
     if db is None:
         raise HTTPException(
             status_code=status.HTTP_504_GATEWAY_TIMEOUT,

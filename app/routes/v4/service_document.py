@@ -10,12 +10,20 @@ from google.cloud.firestore_v1.base_query import FieldFilter
 from app.logging import get_logger
 
 from app.auth.deps import require_authentication
+from app.config_client import get_config
 from app.core import _get_firestore_client
 from app.odata.virtual_datasets import VIRTUAL_INFORMATION_SCHEMA_TABLES
 from opteryx_catalog.catalog.compaction import normalize_sort_order
 
 logger = get_logger()
 router = APIRouter(prefix="/api/v4")
+
+
+# Resolved per use, not at import. A module-level constant is evaluated once
+# at startup and then frozen for the life of the process, so config changes
+# would never reach it without a redeploy.
+def _firestore_database() -> str:
+    return get_config("FIRESTORE_DATABASE")
 
 # A materialized view is a real dataset -- it lives in the `datasets`
 # subcollection and has snapshots, a schema and a sort order -- that the catalog
@@ -405,7 +413,7 @@ def get_service_document(
 
     from app.auth.permissions import ANONYMOUS_EXEMPT_PAIRS, ANONYMOUS_EXEMPT_WORKSTREAM
 
-    db = _get_firestore_client(database="catalogs")
+    db = _get_firestore_client(database=_firestore_database())
     if db is None:
         raise HTTPException(
             status_code=status.HTTP_504_GATEWAY_TIMEOUT,

@@ -6,7 +6,6 @@ This module handles communication with the external authentication service
 
 import copy
 import hashlib
-import os
 import secrets
 import threading
 import time
@@ -134,7 +133,7 @@ def _request_token_claims(auth_url: str, username: str, password: str) -> Dict[s
     see that function for the contract.
     """
     token_endpoint = f"{auth_url.rstrip('/')}/token"
-    timeout = float(os.environ.get("AUTH_SERVICE_TIMEOUT", "10"))
+    timeout = float(get_config("AUTH_SERVICE_TIMEOUT", "10"))
 
     # Prepare request data for OAuth2 client_credentials grant
     data = {
