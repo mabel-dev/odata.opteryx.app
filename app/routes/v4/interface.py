@@ -627,7 +627,7 @@ router = APIRouter(
     description="Retrieve data from a dataset with OData v4 query parameters ($filter, $select, $orderby, $top, $skip, $apply, $count). Returns paginated results with total count and nextLink for server-driven paging.",
     responses={
         200: {"description": "Query succeeded; returns rows and pagination metadata"},
-        400: {"description": f"Invalid query: malformed $filter, unsupported $top value (not 0-{_DOC_MAX_TOP}), invalid $count value, or invalid $apply expression"},
+        400: {"description": f"Invalid query: malformed $filter, unsupported $top value (not 0-{_DOC_MAX_TOP}), negative $skip, $skip without $orderby, invalid $count value, or invalid $apply expression"},
         401: {"description": "Missing or invalid authentication (no bearer token or basic auth)"},
         403: {"description": "Forbidden: authenticated but no permission for dataset"},
         501: {"description": "Unsupported query feature: $search or $expand not implemented"},
@@ -652,7 +652,7 @@ def read_dataset(
     skip: Optional[int] = Query(
         None,
         alias="$skip",
-        description="Skip N rows for pagination (server-driven). Example: &$skip=100 to fetch rows 101+. Combine with $top for paging."
+        description="Skip N rows for pagination (server-driven). Requires $orderby: without a deterministic row order, paging duplicates some rows and drops others. Example: &$orderby=id asc&$skip=100 to fetch rows 101+. Combine with $top for paging."
     ),
     orderby: Optional[str] = Query(
         None,
@@ -750,6 +750,35 @@ def read_dataset(
         raise HTTPException(
             status_code=400,
             detail=f"$top must be between 0 and {max_top}",
+        )
+
+    # Validate $skip. A negative offset is not a valid OData value, and the
+    # engine clamps it to zero rather than erroring -- silently answering a
+    # different query than the caller asked for.
+    if skip is not None:
+        skip = int(skip)  # Will raise ValueError if not a valid integer
+        if skip < 0:
+            raise HTTPException(
+                status_code=400,
+                detail="$skip must be zero or greater",
+            )
+
+    # $skip is only well-defined over a deterministic row order, and this
+    # service cannot provide one on its own: a dataset's files are scanned in
+    # parallel, so morsel arrival order -- and therefore which rows a given
+    # OFFSET lands on -- varies between executions of the same query. Paging
+    # without $orderby returns some rows on more than one page and never
+    # returns others: walking a 5000-row dataset in five pages of 1000
+    # measures 5000 rows delivered but as few as 2999 of them distinct, and
+    # the shortfall differs run to run. Reject it rather than serve a result
+    # that looks complete and is not.
+    if skip and not (orderby and orderby.strip()):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "$skip requires $orderby: paging is only well-defined over a deterministic "
+                "row order. Add $orderby on a column (or columns) that uniquely identify a row."
+            ),
         )
 
     # Parse count parameter (only accept "true" or "false" per OData spec)
@@ -857,7 +886,14 @@ def read_dataset(
     if total_count is not None:
         body_parts.append(b',"@odata.count":' + str(int(total_count)).encode("ascii"))
 
-    # Build @odata.nextLink if result was truncated
+    # Build @odata.nextLink if result was truncated.
+    #
+    # This is emitted even when the caller gave no $orderby, in which case
+    # following it earns the "$skip requires $orderby" 400 raised above. That
+    # is deliberate: the alternative -- withholding the link -- makes a
+    # truncated page indistinguishable from the end of the data, which is the
+    # silent undercount this rule exists to eliminate. A 400 naming the missing
+    # parameter is the louder, more fixable failure.
     if has_more_rows:
         from urllib.parse import urlencode
 

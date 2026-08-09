@@ -261,3 +261,39 @@ class TestRegressions:
             "/api/v4/public/demo/users?$filter=id gt 0&$select=id,name&$orderby=name asc&$top=10&$skip=5&$count=true"
         )
         assert response.status_code != 400
+
+
+class TestSkipRequiresOrderby:
+    """Test $skip validation: non-negative, and only alongside $orderby.
+
+    Files within a dataset are scanned in parallel, so the row order an OFFSET
+    is applied to is not stable between executions of the same query. Paging
+    without $orderby therefore repeats some rows across pages and omits others
+    entirely, which the caller cannot detect from the response.
+    """
+
+    def test_skip_without_orderby_rejected(self, client):
+        """$skip>0 without $orderby should return 400."""
+        response = client.get("/api/v4/public/demo/users?$skip=10&$top=10")
+        assert response.status_code == 400
+        data = response.json()
+        assert "error" in data
+        assert "$orderby" in data["error"]["message"]
+
+    def test_skip_with_orderby_allowed(self, client):
+        """$skip>0 with $orderby should pass validation."""
+        response = client.get("/api/v4/public/demo/users?$orderby=id asc&$skip=10&$top=10")
+        assert response.status_code != 400
+
+    def test_skip_zero_without_orderby_allowed(self, client):
+        """$skip=0 skips nothing, so it needs no ordering guarantee."""
+        response = client.get("/api/v4/public/demo/users?$skip=0&$top=10")
+        assert response.status_code != 400
+
+    def test_negative_skip_rejected(self, client):
+        """$skip=-1 should be rejected rather than silently clamped to 0."""
+        response = client.get("/api/v4/public/demo/users?$skip=-1&$top=10")
+        assert response.status_code == 400
+        data = response.json()
+        assert "error" in data
+        assert "$skip" in data["error"]["message"]
