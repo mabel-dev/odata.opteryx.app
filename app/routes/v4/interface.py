@@ -47,6 +47,10 @@ from app.auth.deps import require_authentication
 from app.config_client import get_config
 from app.odata.odata_to_logical_plan import ODataLogicalPlanBuilder
 from app.odata.plan_optimizer import ODataLogicalPlanOptimizer
+from app.odata.column_stats import ipv4_address
+from app.odata.column_stats import ipv4_enclosing_cidr
+from app.odata.column_stats import is_ipv4_source
+from app.odata.column_stats import usable_bound
 from app.odata.edm_types import EDM_UNKNOWN
 from app.odata.edm_types import ORIGINAL_TYPE_TERM
 from app.odata.edm_types import edm_property
@@ -1218,6 +1222,13 @@ def dataset_metadata(
                         # Add stats to metadata and normalize naming
                         meta = col_metadata[col_name]
                         meta.update(stats)
+                        # A column the manifest computed no bounds for carries
+                        # the int64 sentinel, not a null, and describe() passes
+                        # it straight through -- drop it here, at the single
+                        # point stats enter, so nothing downstream mistakes
+                        # -9223372036854775808 for a real bound.
+                        meta["min"] = usable_bound(meta.get("min"))
+                        meta["max"] = usable_bound(meta.get("max"))
 
             # Get snapshot for last modified info only for tables (views typically don't expose snapshot)
             last_ts_ms = None
@@ -1311,12 +1322,26 @@ def dataset_metadata(
 
         prop = ET.SubElement(entity_type, f"{{{NS_EDM}}}Property", attrib=prop_attrib)
 
+        # Bounds are rendered in the property's own terms. An IPv4 column is
+        # physically a UINT32 and its bounds arrive as the raw address
+        # integers; emitting those verbatim would contradict the dotted-decimal
+        # rows this same property serves, so they become addresses, plus the
+        # smallest CIDR block enclosing the range -- the form an address range
+        # is actually read in.
+        stat_min = meta.get("min")
+        stat_max = meta.get("max")
+        range_cidr = None
+        if is_ipv4_source(meta.get("source_type")):
+            range_cidr = ipv4_enclosing_cidr(stat_min, stat_max)
+            stat_min = ipv4_address(stat_min) or stat_min
+            stat_max = ipv4_address(stat_max) or stat_max
+
         # Add annotations if we have statistics
-        if "min" in meta and meta["min"] is not None:
+        if stat_min is not None:
             ET.SubElement(
                 prop,
                 f"{{{NS_EDM}}}Annotation",
-                attrib={"Term": "Custom.Statistics.Min", "String": str(meta["min"])},
+                attrib={"Term": "Custom.Statistics.Min", "String": str(stat_min)},
             )
 
         # The platform type OData cannot express (unsigned width, IPv4 vs blob
@@ -1329,11 +1354,21 @@ def dataset_metadata(
                 attrib={"Term": ORIGINAL_TYPE_TERM, "String": str(meta["source_type"])},
             )
 
-        if "max" in meta and meta["max"] is not None:
+        if stat_max is not None:
             ET.SubElement(
                 prop,
                 f"{{{NS_EDM}}}Annotation",
-                attrib={"Term": "Custom.Statistics.Max", "String": str(meta["max"])},
+                attrib={"Term": "Custom.Statistics.Max", "String": str(stat_max)},
+            )
+
+        # Only for address columns, and only when both bounds are real: a
+        # block computed from one bound would claim a range the data does not
+        # have.
+        if range_cidr is not None:
+            ET.SubElement(
+                prop,
+                f"{{{NS_EDM}}}Annotation",
+                attrib={"Term": "Custom.Statistics.CIDR", "String": range_cidr},
             )
 
         if "cardinality" in meta and meta["cardinality"] is not None and meta["cardinality"] > 0:
