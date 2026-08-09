@@ -1428,6 +1428,28 @@ def dataset_metadata(
                 },
             )
 
+        # ARRAY columns only: how many distinct ELEMENTS the column holds,
+        # pooled across every row's list. A different question from the count
+        # above, which for an array column counts distinct LISTS -- and the one
+        # a reader of a tag column actually has. Exactness is carried the same
+        # way, in the term name, because it comes from the same kind of sketch.
+        #
+        # Not capped at total_records: a column of 58M rows can easily hold
+        # more distinct elements than rows, since each row contributes a list.
+        element_cardinality = meta.get("element_cardinality")
+        if element_cardinality:
+            element_key = "ElementDistinctValueCount"
+            if not meta.get("element_cardinality_is_exact", False):
+                element_key += "Estimate"
+            ET.SubElement(
+                prop,
+                f"{{{NS_EDM}}}Annotation",
+                attrib={
+                    "Term": f"Custom.Statistics.{element_key}",
+                    "Int": str(element_cardinality),
+                },
+            )
+
         if "null_count" in meta and meta["null_count"] is not None:
             ET.SubElement(
                 prop,
