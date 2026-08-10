@@ -1703,8 +1703,55 @@ def dataset_metadata(
                         "String": str(refresh_status),
                     },
                 )
-        except Exception:
-            pass
+            # The identity a refresh runs as. Pinned at creation and moved only
+            # by ALTER MATERIALIZED VIEW ... OWNER TO, so it answers "whose
+            # grants keep this view fresh" - a different question from who last
+            # changed its definition, immediately below.
+            runs_as = mv.get("runs-as")
+            if runs_as:
+                ET.SubElement(
+                    entity_set,
+                    f"{{{NS_EDM}}}Annotation",
+                    attrib={
+                        "Term": "Custom.MaterializedView.RunsAs",
+                        "String": str(runs_as),
+                    },
+                )
+            updated_by = mv.get("last-updated-by")
+            if updated_by:
+                ET.SubElement(
+                    entity_set,
+                    f"{{{NS_EDM}}}Annotation",
+                    attrib={
+                        "Term": "Custom.MaterializedView.LastUpdatedBy",
+                        "String": str(updated_by),
+                    },
+                )
+            updated_at = mv.get("last-updated-at-ms")
+            if updated_at:
+                ET.SubElement(
+                    entity_set,
+                    f"{{{NS_EDM}}}Annotation",
+                    attrib={
+                        "Term": "Custom.MaterializedView.LastUpdatedAt",
+                        "Int": str(int(updated_at)),
+                    },
+                )
+        except Exception as mv_exc:  # noqa: BLE001 - catalog boundary
+            # A lookup that FAILED is not the same as one that found nothing.
+            # Swallowing both silently means a broken view renders as merely
+            # empty - no owner, no refresh state - which is exactly the failure
+            # this metadata exists to surface. "Not a materialized view" stays
+            # quiet (the Materialized annotation above already said so);
+            # anything else is logged.
+            if type(mv_exc).__name__ not in ("DatasetNotFound", "MaterializedViewError"):
+                logger.warning(
+                    "materialized view metadata unavailable for %s.%s: %s: %s",
+                    collection,
+                    dataset,
+                    type(mv_exc).__name__,
+                    mv_exc,
+                )
 
     # Add LastModified annotation if we have a timestamp
     if last_ts_ms:
