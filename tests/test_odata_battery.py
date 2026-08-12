@@ -142,6 +142,13 @@ def run_test_case(
             skip=parsed_params.get("skip"),
             apply_expr=parsed_params.get("apply_expr"),
             count_requested=parsed_params.get("count_requested", False),
+            # An explicit grant, because the battery exercises OData semantics
+            # and not authorization. Omitting it used to read as "no policies",
+            # which the route turned into owner-on-everything -- these cases
+            # passed on an escalation rather than on a grant. See the
+            # `access_policies or []` note in app/routes/v4/interface.py.
+            identity="battery",
+            access_policies=[{"pattern": "testdata.*", "role": "reader"}],
         )
 
         # execute_odata_query() returns the rows already serialised as

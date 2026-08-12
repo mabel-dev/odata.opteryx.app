@@ -57,7 +57,15 @@ def _build_stubs():
 
     opteryx_mod = _package("opteryx")
     opteryx_mod.set_default_connector = lambda *args, **kwargs: None
+    # Installed at import by app.routes.v4.interface. A no-op here: these stubs
+    # exist to load that module without the engine, and there is no engine for a
+    # capability to decide anything for.
+    opteryx_mod.register_permissions_capability = lambda *args, **kwargs: None
     stubs["opteryx"] = opteryx_mod
+
+    access_mod = _package("opteryx_access")
+    access_mod.capability = lambda: object()
+    stubs["opteryx_access"] = access_mod
 
     connectors = types.ModuleType("opteryx.connectors")
     connectors.OpteryxConnector = type("OpteryxConnector", (), {})
