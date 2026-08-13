@@ -147,10 +147,14 @@ BILLING_RELATIONS = (BILLING_RELATION, *BILLING_ROLLUP_RELATIONS)
 # to and so must get nothing — see visibility_filters_from_claims, which denies rather
 # than allows when the account is unknown.
 #
-# The rollups are listed alongside the base table because table-level permission is
-# checked against the relation named in the plan, which is the rollup when one is
-# queried.
-AUTHENTICATED_READ_RELATIONS = BILLING_RELATIONS
+# Deliberately the rollups only, not BILLING_RELATION itself: a caller needs their
+# account's aggregated usage/cost, never the raw per-query-event table. Reading the
+# raw table still requires an explicit reader policy in the caller's own token (or the
+# data_admin exemption) — this blanket grant does not extend to it. It still gets a
+# row-level filter below regardless (see visibility_filters_from_claims), since that
+# path is keyed off BILLING_RELATIONS independently and must stay fail-safe for
+# whoever *does* hold an explicit grant on it.
+AUTHENTICATED_READ_RELATIONS = BILLING_ROLLUP_RELATIONS
 
 
 def access_policies_for_query(claims: Dict[str, Any]) -> List[Dict[str, str]]:

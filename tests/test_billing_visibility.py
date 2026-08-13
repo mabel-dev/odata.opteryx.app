@@ -45,11 +45,16 @@ def test_every_readable_billing_relation_is_filtered():
 
 def test_reader_grants_and_row_filters_cover_the_same_relations():
     """A relation readable but unfiltered leaks every tenant; filtered but unreadable
-    is merely broken. Deriving both from BILLING_RELATIONS makes the pair impossible to
-    get out of step, and this asserts that derivation stays in place."""
+    is merely broken. Every relation the blanket grant covers must also be filtered —
+    but the reverse need not hold, since BILLING_RELATION is filtered defensively for
+    whoever holds an explicit reader policy on it without being in the blanket grant."""
     filters = visibility_filters_from_claims({"identity": "u", "billing_account": "acme"})
 
-    assert set(AUTHENTICATED_READ_RELATIONS) == set(BILLING_RELATIONS)
+    assert set(AUTHENTICATED_READ_RELATIONS) == set(BILLING_ROLLUP_RELATIONS)
+    assert BILLING_RELATION not in AUTHENTICATED_READ_RELATIONS, (
+        "the raw event table must not be blanket-readable by every authenticated caller"
+    )
+    assert set(AUTHENTICATED_READ_RELATIONS) <= set(filters)
     assert set(filters) == set(BILLING_RELATIONS)
 
 
