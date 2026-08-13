@@ -170,9 +170,10 @@ def run_clickbench(
         # `data_admin` is the highest privilege tier this service has; a caller
         # who already cleared that gate is trusted with read access to the
         # benchmark dataset without also needing a separate token policy for it.
-        # Opteryx's own can_perform_action() only recognizes reader/writer/owner
-        # for READ (see opteryx.managers.permissions.ACTION_MAP) -- "admin" is
-        # not a role it understands, only the data_admin *entitlement* above.
+        # Spelled as a `reader` grant because that is a DATA role: the roles are
+        # owner/writer/reader and nothing else (see opteryx_access.roles), and
+        # `data_admin` is an entitlement, which is a separate vocabulary the
+        # permissions capability knows nothing about.
         access_policies=[{"pattern": "benchmarks.*", "role": "reader"}],
         billing_account=claims.get("billing_account"),
     )

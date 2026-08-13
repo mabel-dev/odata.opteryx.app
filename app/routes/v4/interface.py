@@ -12,6 +12,9 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../.
 sys.path.insert(
     0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../opteryx-catalog"))
 )
+sys.path.insert(
+    0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../opteryx-access"))
+)
 
 import base64
 import datetime as dt
@@ -26,6 +29,7 @@ from typing import List
 from typing import Optional
 
 import opteryx
+import opteryx_access
 from fastapi import APIRouter
 from fastapi import Depends
 from fastapi import HTTPException
@@ -153,6 +157,16 @@ def register_default_connector() -> None:
 
 
 register_default_connector()
+
+# opteryx-core permits everything on its own -- access control belongs to a
+# deployment, not to the engine. This is the deployment, so it installs the
+# capability that reads the `access_policies` each session is handed.
+#
+# At import, ONCE, and deliberately not inside `register_default_connector`:
+# that runs again per query, and a capability may not be installed after a
+# permission check has been answered. Unguarded on purpose -- a service that
+# cannot enforce policy must fail to start rather than serve permissively.
+opteryx.register_permissions_capability(opteryx_access.capability())
 
 
 class _MaterializedResult:
@@ -497,7 +511,14 @@ def execute_odata_query(
         register_default_connector()
         return opteryx.session(
             user=identity,
-            access_policies=access_policies or None,
+            # An empty list, NEVER None. `access_policies=None` means "owner on
+            # everything" to opteryx (see Session.__init__), which is the exact
+            # opposite of the deny-all fallback described above -- a caller whose
+            # policies came to nothing would be handed the whole catalog. Reachable
+            # for an anonymous caller, whose claims carry no policies and for whom
+            # `access_policies_for_query` appends none. jobs.opteryx guards the same
+            # way, and pins it with a test.
+            access_policies=access_policies or [],
             billing_account=billing_account,
         )
 
@@ -1703,8 +1724,55 @@ def dataset_metadata(
                         "String": str(refresh_status),
                     },
                 )
-        except Exception:
-            pass
+            # The identity a refresh runs as. Pinned at creation and moved only
+            # by ALTER MATERIALIZED VIEW ... OWNER TO, so it answers "whose
+            # grants keep this view fresh" - a different question from who last
+            # changed its definition, immediately below.
+            runs_as = mv.get("runs-as")
+            if runs_as:
+                ET.SubElement(
+                    entity_set,
+                    f"{{{NS_EDM}}}Annotation",
+                    attrib={
+                        "Term": "Custom.MaterializedView.RunsAs",
+                        "String": str(runs_as),
+                    },
+                )
+            updated_by = mv.get("last-updated-by")
+            if updated_by:
+                ET.SubElement(
+                    entity_set,
+                    f"{{{NS_EDM}}}Annotation",
+                    attrib={
+                        "Term": "Custom.MaterializedView.LastUpdatedBy",
+                        "String": str(updated_by),
+                    },
+                )
+            updated_at = mv.get("last-updated-at-ms")
+            if updated_at:
+                ET.SubElement(
+                    entity_set,
+                    f"{{{NS_EDM}}}Annotation",
+                    attrib={
+                        "Term": "Custom.MaterializedView.LastUpdatedAt",
+                        "Int": str(int(updated_at)),
+                    },
+                )
+        except Exception as mv_exc:  # noqa: BLE001 - catalog boundary
+            # A lookup that FAILED is not the same as one that found nothing.
+            # Swallowing both silently means a broken view renders as merely
+            # empty - no owner, no refresh state - which is exactly the failure
+            # this metadata exists to surface. "Not a materialized view" stays
+            # quiet (the Materialized annotation above already said so);
+            # anything else is logged.
+            if type(mv_exc).__name__ not in ("DatasetNotFound", "MaterializedViewError"):
+                logger.warning(
+                    "materialized view metadata unavailable for %s.%s: %s: %s",
+                    collection,
+                    dataset,
+                    type(mv_exc).__name__,
+                    mv_exc,
+                )
 
     # Add LastModified annotation if we have a timestamp
     if last_ts_ms:

@@ -10,6 +10,8 @@ that a filter is present and that it is keyed correctly.
 from app.auth.permissions import (
     AUTHENTICATED_READ_RELATIONS,
     BILLING_RELATION,
+    BILLING_RELATIONS,
+    BILLING_ROLLUP_RELATIONS,
     DATA_ADMIN_ENTITLEMENT,
     billing_account_from_claims,
     entitlements_from_claims,
@@ -21,24 +23,39 @@ def _predicate(claims):
     return visibility_filters_from_claims(claims).get(BILLING_RELATION)
 
 
-def test_filter_is_keyed_on_the_base_table_not_the_views():
-    """Opteryx expands views before applying filters, so a filter keyed on a view name
-    matches no scan and silently returns everything.
+def test_every_readable_billing_relation_is_filtered():
+    """The rollups are materialized: a query against one scans the rollup and never
+    touches the base table, so a filter on the base table alone reaches nothing.
 
     Derived from AUTHENTICATED_READ_RELATIONS rather than a hand-written list, so a
-    view added to the allowlist is covered here without anyone remembering to add it —
+    rollup added to the allowlist is covered here without anyone remembering to add it —
     the failure mode being guarded (unlisted relation => unfiltered => every tenant's
     rows) is silent, so it must not depend on that memory.
     """
     filters = visibility_filters_from_claims({"identity": "u", "billing_account": "acme"})
 
-    assert BILLING_RELATION in filters
     assert BILLING_RELATION == "opteryx.ops.billing"
+    assert BILLING_ROLLUP_RELATIONS, "expected at least one rollup over the billing table"
 
-    views = [r for r in AUTHENTICATED_READ_RELATIONS if r != BILLING_RELATION]
-    assert views, "expected at least one view over the billing table"
-    for view in views:
-        assert view not in filters
+    for relation in AUTHENTICATED_READ_RELATIONS:
+        assert filters.get(relation) == [("billing_account", "Eq", "acme")], (
+            f"{relation} is readable by any authenticated caller but not row-filtered"
+        )
+
+
+def test_reader_grants_and_row_filters_cover_the_same_relations():
+    """A relation readable but unfiltered leaks every tenant; filtered but unreadable
+    is merely broken. Every relation the blanket grant covers must also be filtered —
+    but the reverse need not hold, since BILLING_RELATION is filtered defensively for
+    whoever holds an explicit reader policy on it without being in the blanket grant."""
+    filters = visibility_filters_from_claims({"identity": "u", "billing_account": "acme"})
+
+    assert set(AUTHENTICATED_READ_RELATIONS) == set(BILLING_ROLLUP_RELATIONS)
+    assert BILLING_RELATION not in AUTHENTICATED_READ_RELATIONS, (
+        "the raw event table must not be blanket-readable by every authenticated caller"
+    )
+    assert set(AUTHENTICATED_READ_RELATIONS) <= set(filters)
+    assert set(filters) == set(BILLING_RELATIONS)
 
 
 def test_account_is_scoped_to_the_callers_own_account():
