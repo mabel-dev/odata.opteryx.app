@@ -9,15 +9,27 @@ ODataLogicalPlanBuilder can use.
 import sys
 import threading
 from pathlib import Path
+from typing import TYPE_CHECKING
 from typing import List
 from typing import Optional
 from typing import Tuple
 
+if TYPE_CHECKING:
+    from opteryx.models import Node
+
 # CRITICAL: Set up vendored path BEFORE importing odata_query
 # ruff: noqa: E402
 _vendored_path = str(Path(__file__).parent.parent / "vendored" / "odata-query")
-if _vendored_path not in sys.path:
-    sys.path.insert(0, _vendored_path)
+
+# Thread-safe guard for sys.path modification to prevent race conditions
+# where multiple threads could pass the check simultaneously and both insert.
+_added_paths_lock = threading.Lock()
+_added_paths = set()
+
+with _added_paths_lock:
+    if _vendored_path not in _added_paths:
+        sys.path.insert(0, _vendored_path)
+        _added_paths.add(_vendored_path)
 
 from odata_query.grammar import ODataLexer
 from odata_query.grammar import ODataParser

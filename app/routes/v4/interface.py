@@ -6,6 +6,7 @@ This module provides OData protocol endpoints for querying Opteryx data.
 from __future__ import annotations
 
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../opteryx-core")))
@@ -54,6 +55,14 @@ BUCKET_NAME = os.environ.get("GCS_BUCKET")
 GCP_PROJECT_ID = os.environ.get("GCP_PROJECT_ID")
 DEFAULT_TOP = int(os.environ.get("ODATA_DEFAULT_TOP", "100"))
 MAX_TOP = int(os.environ.get("ODATA_MAX_TOP", "25000"))
+
+# Pre-compute static JSON fragments for response body construction to avoid
+# repeated encoding on every request (performance optimization)
+_ODATA_CONTEXT_PREFIX = b'{"@odata.context":'
+_ODATA_VALUE_SEP = b',"value":'
+_ODATA_COUNT_SEP = b',"@odata.count":'
+_ODATA_NEXTLINK_SEP = b',"@odata.nextLink":'
+_ODATA_CLOSE_BRACE = b"}"
 
 opteryx.set_default_connector(
     OpteryxConnector,
@@ -421,13 +430,13 @@ def execute_odata_query(
                 raise ValueError(f"Count query returned empty data for {table_name}")
             first_col = next(iter(data))
             vals = data.get(first_col)
-            if vals is None or len(vals) == 0:
+            if vals is None or len(vals) < 1:
                 raise ValueError(
                     f"Count query returned no values for column '{first_col}' for {table_name}"
                 )
             try:
                 total_count = int(vals[0])
-            except Exception as e:
+            except (IndexError, TypeError, ValueError) as e:
                 # Include original data for debugging
                 raise ValueError(
                     f"Count query returned non-integer value: {vals[0]} (col={first_col}) for {table_name}"
@@ -480,13 +489,13 @@ def execute_odata_query(
                     raise ValueError(f"Count query returned empty data for {table_name}")
                 first_col = next(iter(data))
                 vals = data.get(first_col)
-                if vals is None or len(vals) == 0:
+                if vals is None or len(vals) < 1:
                     raise ValueError(
                         f"Count query returned no values for column '{first_col}' for {table_name}"
                     )
                 try:
                     total_count = int(vals[0])
-                except Exception as e:
+                except (IndexError, TypeError, ValueError) as e:
                     raise ValueError(
                         f"Count query returned non-integer value: {vals[0]} (col={first_col}) for {table_name}"
                     ) from e
@@ -607,6 +616,16 @@ def read_dataset(
     # Set OData-Version header
     response.headers["OData-Version"] = "4.0"
 
+    # Validate table name components to prevent SQL injection via special characters
+    _table_name_pattern = re.compile(r'^[a-zA-Z0-9_]+$')
+    if not (_table_name_pattern.match(workstream) and 
+            _table_name_pattern.match(collection) and 
+            _table_name_pattern.match(dataset)):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid table name components: only alphanumeric characters and underscores are allowed"
+        )
+    
     table_name = f"{workstream}.{collection}.{dataset}"
 
     # Parse and validate $top parameter
@@ -743,14 +762,14 @@ def read_dataset(
     context_value = f"/api/v4/$metadata#{full_resource_fragment}"
 
     body_parts = [
-        b'{"@odata.context":',
+        _ODATA_CONTEXT_PREFIX,
         json.dumps(context_value).encode("utf-8"),
-        b',"value":',
+        _ODATA_VALUE_SEP,
         value_bytes,
     ]
 
     if total_count is not None:
-        body_parts.append(b',"@odata.count":' + str(int(total_count)).encode("ascii"))
+        body_parts.append(_ODATA_COUNT_SEP + str(int(total_count)).encode("ascii"))
 
     # Build @odata.nextLink if result was truncated
     if has_more_rows:
@@ -776,9 +795,9 @@ def read_dataset(
         # Build the nextLink URL (relative URL in the OData spec)
         next_query = urlencode(query_items)
         next_link = f"/api/v4/{workstream}/{collection}/{dataset}?{next_query}"
-        body_parts.append(b',"@odata.nextLink":' + json.dumps(next_link).encode("utf-8"))
+        body_parts.append(_ODATA_NEXTLINK_SEP + json.dumps(next_link).encode("utf-8"))
 
-    body_parts.append(b"}")
+    body_parts.append(_ODATA_CLOSE_BRACE)
 
     return Response(
         content=b"".join(body_parts),
