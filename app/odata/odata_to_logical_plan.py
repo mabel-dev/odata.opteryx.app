@@ -209,12 +209,15 @@ class ODataLogicalPlanBuilder:
 
         Returns:
             Step ID of the last join node
+        
+        Raises:
+            NotImplementedError: $expand is not currently supported by this service
         """
         # $expand syntax: expand=Orders($filter=Amount gt 100)&expand=Products
         # This maps to SQL JOINs in Opteryx
-        # Implementation to follow
-        # For now, pass through without modifications
-        return self.current_step_id
+        raise NotImplementedError(
+            "$expand (navigation property expansion) is not supported by this service"
+        )
 
     def _add_apply_nodes(self, apply_expr: str) -> str:
         """Add AggregateAndGroup nodes for OData $apply (data aggregation).
