@@ -330,11 +330,60 @@ def _get_personal_datasets(db, identity: str) -> list[DatasetInfo]:
     return results
 
 
+def _drop_soft_deleted_workspaces(db, workspace_ids: set[str]) -> set[str]:
+    """Filter out workspaces that are soft-deleted, so their datasets never
+    reach the collection-group query below in the first place.
+
+    `$properties` is the same doc opteryx_catalog.OpteryxCatalog's constructor
+    gates construction on (raising WorkspaceDeleted unless include_deleted=True)
+    -- this reads it directly rather than constructing a catalog handle per
+    workspace, since that handle also stands up its own Firestore/GCS clients
+    and this call site only needs one field off one document. One batched
+    get_all() covers every workspace_id in a single round trip, the same
+    batching shape _resolve_pending_sort_orders uses below.
+
+    A workspace with no `$properties` doc at all (public/personal, which
+    aren't provisioned through the normal create flow) is not "deleted" --
+    it's just not gated -- so it stays in the result, matching the
+    constructor's own not-yet-existing-vs-deleted distinction.
+    """
+    if not workspace_ids:
+        return workspace_ids
+
+    refs = [db.collection(ws).document("$properties") for ws in workspace_ids]
+    try:
+        docs = db.get_all(refs)
+    except Exception as exc:
+        # Fail open: a Firestore hiccup here must not take the whole listing
+        # down, and the alternative (treating every workspace as deleted)
+        # would empty every caller's dataset list on a transient error.
+        logger.warning(f"Failed to read workspace properties for deletion check: {exc}")
+        return workspace_ids
+
+    deleted = set()
+    for doc in docs:
+        try:
+            if doc.exists and (doc.to_dict() or {}).get("deleted-at-ms") is not None:
+                deleted.add(doc.reference.parent.id)
+        except Exception:
+            continue
+
+    return workspace_ids - deleted
+
+
 def _get_workspace_datasets(db, workspace_ids: set[str]) -> list[DatasetInfo]:
-    """Retrieve all datasets from the given workspace IDs."""
+    """Retrieve all datasets from the given workspace IDs.
+
+    Soft-deleted workspaces are excluded before the collection-group query
+    runs, not filtered out of its results afterward -- a deleted workspace's
+    datasets are still real Firestore documents (that's what makes the
+    restore grace period possible) and would otherwise come back from this
+    query exactly like any live workspace's do.
+    """
     results = []
 
     try:
+        workspace_ids = _drop_soft_deleted_workspaces(db, workspace_ids)
         for workspace_id in workspace_ids:
             # Query both datasets and views collection groups
             for coll in ("datasets", "views"):
