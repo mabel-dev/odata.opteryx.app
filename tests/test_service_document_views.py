@@ -38,6 +38,10 @@ def test_service_document_includes_views(monkeypatch):
     # Patch retrieval functions
     monkeypatch.setattr(sd, "_get_personal_datasets", lambda db, identity: [])
     monkeypatch.setattr(sd, "_get_workspace_datasets", lambda db, ids: [table, view])
+    # get_service_document calls this directly now (not just inside the
+    # mocked _get_workspace_datasets above), so it needs a stub too or it
+    # hits the real Firestore batched read against the placeholder client.
+    monkeypatch.setattr(sd, "_drop_soft_deleted_workspaces", lambda db, ids: ids)
 
     # Prepare request and claims
     req = DummyRequest()

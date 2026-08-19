@@ -331,21 +331,30 @@ def _get_personal_datasets(db, identity: str) -> list[DatasetInfo]:
 
 
 def _drop_soft_deleted_workspaces(db, workspace_ids: set[str]) -> set[str]:
-    """Filter out workspaces that are soft-deleted, so their datasets never
-    reach the collection-group query below in the first place.
+    """Filter out workspaces that no longer really exist, so their datasets
+    never reach the collection-group query below in the first place.
 
-    `$properties` is the same doc opteryx_catalog.OpteryxCatalog's constructor
-    gates construction on (raising WorkspaceDeleted unless include_deleted=True)
-    -- this reads it directly rather than constructing a catalog handle per
-    workspace, since that handle also stands up its own Firestore/GCS clients
-    and this call site only needs one field off one document. One batched
-    get_all() covers every workspace_id in a single round trip, the same
-    batching shape _resolve_pending_sort_orders uses below.
+    Reads each workspace's `$properties` doc directly rather than
+    constructing a catalog handle per workspace, since that handle also
+    stands up its own Firestore/GCS clients and this call site only needs
+    to know whether the doc is there. One batched get_all() covers every
+    workspace_id in a single round trip, the same batching shape
+    _resolve_pending_sort_orders uses below.
 
-    A workspace with no `$properties` doc at all (public/personal, which
-    aren't provisioned through the normal create flow) is not "deleted" --
-    it's just not gated -- so it stays in the result, matching the
-    constructor's own not-yet-existing-vs-deleted distinction.
+    A missing `$properties` doc now means "gone" (excluded) for anything
+    except `public`/`personal`, which are special-cased because they are
+    never provisioned through the normal create flow and so never had a
+    doc to begin with. DROP WORKSPACE (opteryx_catalog.OpteryxCatalog.
+    drop_workspace) deletes the doc outright rather than flagging it, so a
+    workspace that was dropped is now indistinguishable, at the Firestore
+    level, from one that never existed -- both read as "doc missing", and
+    both belong out of the result for the same reason: there is nothing
+    real behind the name. A `deleted-at-ms` flag on a doc that DOES still
+    exist is checked too, for a workspace stuck with that legacy marker
+    from before DROP WORKSPACE replaced the soft-delete model it belonged
+    to -- that field is not written by anything anymore, but a workspace
+    already carrying it from before this change is still effectively
+    deleted until something clears the doc outright.
     """
     if not workspace_ids:
         return workspace_ids
@@ -360,25 +369,35 @@ def _drop_soft_deleted_workspaces(db, workspace_ids: set[str]) -> set[str]:
         logger.warning(f"Failed to read workspace properties for deletion check: {exc}")
         return workspace_ids
 
-    deleted = set()
+    gone = set()
     for doc in docs:
         try:
-            if doc.exists and (doc.to_dict() or {}).get("deleted-at-ms") is not None:
-                deleted.add(doc.reference.parent.id)
+            workspace_id = doc.reference.parent.id
+            if not doc.exists:
+                if workspace_id not in ("public", "personal"):
+                    gone.add(workspace_id)
+                continue
+            if (doc.to_dict() or {}).get("deleted-at-ms") is not None:
+                gone.add(workspace_id)
         except Exception:
             continue
 
-    return workspace_ids - deleted
+    return workspace_ids - gone
 
 
 def _get_workspace_datasets(db, workspace_ids: set[str]) -> list[DatasetInfo]:
     """Retrieve all datasets from the given workspace IDs.
 
     Soft-deleted workspaces are excluded before the collection-group query
-    runs, not filtered out of its results afterward -- a deleted workspace's
-    datasets are still real Firestore documents (that's what makes the
-    restore grace period possible) and would otherwise come back from this
-    query exactly like any live workspace's do.
+    runs, not filtered out of its results afterward -- a dropped workspace's
+    datasets can still be real Firestore documents momentarily (drop_workspace
+    tombstones each one for reclamation rather than deleting synchronously)
+    and would otherwise come back from this query exactly like any live
+    workspace's do. Re-filters even when the caller already filtered
+    `workspace_ids` (get_service_document does, for the information_schema
+    loop's sake) -- redundant in that case, not incorrect, and this is the
+    only thing standing between the anonymous caller's fixed workstream and
+    the same leak if it's ever soft-deleted.
     """
     results = []
 
@@ -491,7 +510,17 @@ def get_service_document(
         # Which workspaces to *fetch* from the catalog. This is a superset of what the
         # caller may see -- a policy on "opteryx.ops.findings" reaches the "opteryx"
         # workspace -- so every dataset it returns is authorized individually below.
-        workspace_ids = accessible_workstreams(access_policies_list) | {"public"}
+        #
+        # Filtered for soft-deleted workspaces here, once, rather than only
+        # inside _get_workspace_datasets below: the virtual
+        # information_schema loop further down used to reuse this same
+        # (unfiltered) set directly, which meant a deleted workspace's real
+        # datasets disappeared but `<workspace>.information_schema.*` kept
+        # showing up regardless - an empty-looking but still-present
+        # workspace folder in the tree UI.
+        workspace_ids = _drop_soft_deleted_workspaces(
+            db, accessible_workstreams(access_policies_list) | {"public"}
+        )
 
         # Collect all datasets
         all_datasets: list[DatasetInfo] = []

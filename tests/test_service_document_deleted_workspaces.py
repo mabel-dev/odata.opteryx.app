@@ -61,12 +61,24 @@ def test_drops_workspace_with_deleted_at_ms_set():
     assert result == {"opteryx"}
 
 
-def test_keeps_workspace_with_no_properties_doc():
+def test_keeps_public_and_personal_with_no_properties_doc():
     # public/personal aren't provisioned through the normal create flow and
-    # may have no $properties doc at all -- absence must not read as deleted.
-    db = FakeDb({"public": None})
-    result = sd._drop_soft_deleted_workspaces(db, {"public"})
-    assert result == {"public"}
+    # may have no $properties doc at all -- absence must not read as gone
+    # for these two specifically.
+    db = FakeDb({"public": None, "personal": None})
+    result = sd._drop_soft_deleted_workspaces(db, {"public", "personal"})
+    assert result == {"public", "personal"}
+
+
+def test_drops_a_real_workspace_with_no_properties_doc():
+    # A workspace that isn't public/personal and has no $properties doc is
+    # gone, not merely ungated -- DROP WORKSPACE deletes that doc outright,
+    # so this is what a fully-dropped workspace (e.g. `mitre`, once actually
+    # dropped) looks like: indistinguishable at the Firestore level from a
+    # name that never existed, and excluded here for the same reason.
+    db = FakeDb({"mitre": None, "opteryx": {"deleted-at-ms": None}})
+    result = sd._drop_soft_deleted_workspaces(db, {"mitre", "opteryx"})
+    assert result == {"opteryx"}
 
 
 def test_keeps_workspace_with_deleted_at_ms_none():
