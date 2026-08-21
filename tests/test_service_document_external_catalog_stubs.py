@@ -7,8 +7,8 @@ Firestore as *stub* docs carrying only `workspace`/`collection`/`name`/
 section 5). odata.opteryx needs no code change for this - which is precisely
 the claim worth pinning down: a stub has no `dataset-type`, no `sort-orders`
 and no `current-schema-id`, so it must fall through every optional branch and
-come out as a plain `Table`, with no extra Firestore round trip and nothing
-logged as a warning.
+come out as an `ExternalTable` -- with no extra Firestore round trip and
+nothing logged as a warning.
 
 `_query_collection_group` swallows per-document errors with `continue`, so
 every assertion here starts from "the stub actually came back" - a silently
@@ -93,7 +93,7 @@ def _query(docs, schema_lookups):
     return sd._query_collection_group(db, "datasets", workspace_filter="tarchia")
 
 
-def test_stub_renders_as_a_plain_table(caplog):
+def test_stub_renders_as_an_external_table(caplog):
     schema_lookups = []
     with caplog.at_level(logging.WARNING):
         results = _query([("people", STUB)], schema_lookups)
@@ -103,8 +103,11 @@ def test_stub_renders_as_a_plain_table(caplog):
     assert entry.resource == "tarchia.interop.people"
     assert entry.workspace == "tarchia"
     assert entry.collection == "interop"
+    # NOT "Table": a projection of someone else's catalog is a different
+    # thing to a client from a table Opteryx stores, and the Studio draws it a
+    # distinct glyph off this token
+    assert entry.source == "ExternalTable"
     assert entry.name == "people"
-    assert entry.source == "Table"
 
     # Nothing optional was inferred, and nothing complained about the gaps.
     assert entry.ordered is False
@@ -137,7 +140,8 @@ def test_stubs_and_real_datasets_list_side_by_side(caplog):
 
     by_name = {entry.name: entry for entry in results}
     assert set(by_name) == {"people", "orders"}
-    assert by_name["people"].source == "Table"
+    # the marker is the only thing that separates them, and it does
+    assert by_name["people"].source == "ExternalTable"
     assert by_name["orders"].source == "Table"
     assert caplog.text == ""
 
@@ -282,7 +286,7 @@ def test_the_projected_extras_do_not_disturb_the_listing(caplog):
 
     with caplog.at_level(logging.WARNING):
         results = _query([("people", SORTED_STUB)], [])
-    assert results[0].source == "Table"
+    assert results[0].source == "ExternalTable"
     assert results[0].resource == "tarchia.interop.people"
     # partition-columns and statistics are fields odata does not read; an
     # unknown field must not make a document unreadable or noisy

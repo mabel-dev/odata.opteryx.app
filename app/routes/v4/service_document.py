@@ -35,6 +35,18 @@ MATERIALIZED_VIEW_DATASET_TYPE = "materialized_view"
 MATERIALIZED_VIEW_SOURCE = "MaterializedView"
 
 
+# A dataset document projected from a workspace's own external catalog rather
+# than owned by this one (opteryx-catalog's stub_projection). Reported as its
+# own source type, not as "Table": the two are not the same thing to a client -
+# one is a table Opteryx stores and can describe from its own manifests, the
+# other is a name-and-schema projection whose data lives somewhere else and
+# whose listing is only as fresh as the last refresh. The Studio already
+# expects this token (see sql_ide.js's Custom.SourceType list) and draws it a
+# distinct glyph.
+EXTERNAL_TABLE_SOURCE = "ExternalTable"
+STUB_MARKER = "external-catalog"
+
+
 def _source_type_from_doc(data, collection: str) -> str:
     """Source label for a catalog document: View, MaterializedView or Table.
 
@@ -44,6 +56,8 @@ def _source_type_from_doc(data, collection: str) -> str:
     """
     if collection == "views":
         return "View"
+    if isinstance(data, dict) and data.get(STUB_MARKER):
+        return EXTERNAL_TABLE_SOURCE
     if isinstance(data, dict) and data.get("dataset-type") == MATERIALIZED_VIEW_DATASET_TYPE:
         return MATERIALIZED_VIEW_SOURCE
     return "Table"

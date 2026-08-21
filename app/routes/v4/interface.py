@@ -166,7 +166,11 @@ _DOC_MAX_TOP = _max_top()
 MATERIALIZED_VIEW_DATASET_TYPE = "materialized_view"
 MATERIALIZED_VIEW_SOURCE = "MaterializedView"
 # Source labels backed by a physical table: real schema, snapshots, sort orders.
-TABLE_LIKE_SOURCES = ("Table", MATERIALIZED_VIEW_SOURCE)
+EXTERNAL_TABLE_SOURCE = "ExternalTable"
+# An external table is table-like for every annotation below: it has a row
+# count, a last-modified time and possibly a sort order. Leaving it out of this
+# tuple would silently drop all three from its metadata document.
+TABLE_LIKE_SOURCES = ("Table", EXTERNAL_TABLE_SOURCE, MATERIALIZED_VIEW_SOURCE)
 
 
 def _loaded_dataset_source_type(ds) -> str:
@@ -1183,7 +1187,7 @@ def dataset_metadata(
         # Everything below comes off the one document already read. No catalog
         # handle, no GCS fetch, no external round trip - the projection exists
         # precisely so this endpoint does not need any of them.
-        source_type = "Table"
+        source_type = EXTERNAL_TABLE_SOURCE
         response.headers["X-Dataset-Source"] = source_type
 
         for column in stub.get("schema") or []:

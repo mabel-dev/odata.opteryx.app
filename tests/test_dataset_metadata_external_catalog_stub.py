@@ -150,7 +150,7 @@ def test_stub_columns_are_served_from_the_document(stubbed):
         "name": ("Edm.String", "true"),
         "score": ("Edm.Double", "true"),
     }
-    assert response.headers.get("X-Dataset-Source") == "Table"
+    assert response.headers.get("X-Dataset-Source") == "ExternalTable"
 
 
 def test_stub_statistics_and_last_modified_are_annotated(stubbed):
@@ -159,7 +159,7 @@ def test_stub_statistics_and_last_modified_are_annotated(stubbed):
 
     annotations = _annotations(content)
     assert annotations["Custom.Snapshot.TotalRecords"] == "5"
-    assert annotations["Custom.SourceType"] == "Table"
+    assert annotations["Custom.SourceType"] == "ExternalTable"
     assert response.headers.get("X-Dataset-LastModified") == str(STUB["timestamp-ms"])
 
 
@@ -298,3 +298,9 @@ def test_both_metadata_implementations_agree_on_the_same_stub(stubbed):
 
     assert service_wide == ["id", "name", "score"]
     assert list(_properties(per_dataset)) == service_wide
+
+    # ...and on what KIND of thing it is. Three implementations decide this
+    # from the same marker (service document, service-wide $metadata, this
+    # endpoint); two of them agreeing is not enough.
+    assert md._source_type_from_doc(STUB, "datasets") == "ExternalTable"
+    assert _annotations(per_dataset)["Custom.SourceType"] == "ExternalTable"
