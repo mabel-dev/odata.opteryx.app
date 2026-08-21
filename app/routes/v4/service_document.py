@@ -16,7 +16,7 @@ from app.odata.virtual_datasets import VIRTUAL_INFORMATION_SCHEMA_TABLES
 from opteryx_catalog.catalog.compaction import normalize_sort_order
 
 logger = get_logger()
-router = APIRouter(prefix="/api/v4")
+router = APIRouter(prefix="/api/v4", tags=["OData v4"])
 
 
 # Resolved per use, not at import. A module-level constant is evaluated once

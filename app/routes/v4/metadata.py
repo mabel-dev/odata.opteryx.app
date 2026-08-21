@@ -35,7 +35,7 @@ from app.routes.v4.metadata_cache import (
 )
 
 logger = get_logger()
-router = APIRouter(prefix="/api/v4")
+router = APIRouter(prefix="/api/v4", tags=["OData v4"])
 
 
 # Resolved per use, not at import. A module-level constant is evaluated once
