@@ -48,6 +48,7 @@ from opteryx_catalog import OpteryxCatalog
 from app.logging import get_logger
 
 from app.auth.deps import require_authentication
+from app.core import _get_firestore_client
 from app.config_client import get_config
 from app.odata.odata_to_logical_plan import ODataLogicalPlanBuilder
 from app.odata.plan_optimizer import ODataLogicalPlanOptimizer
@@ -58,6 +59,7 @@ from app.odata.column_stats import usable_bound
 from app.odata.edm_types import EDM_UNKNOWN
 from app.odata.edm_types import ORIGINAL_TYPE_TERM
 from app.odata.edm_types import edm_property
+from opteryx_catalog.catalog.dataset import _stored_type_display
 from app.odata.virtual_datasets import VIRTUAL_INFORMATION_SCHEMA_DESCRIPTIONS
 from app.odata.virtual_datasets import VIRTUAL_INFORMATION_SCHEMA_TABLES
 from app.odata.virtual_datasets import is_virtual_information_schema
@@ -85,6 +87,58 @@ def _firestore_database() -> str:
 def _bucket_name() -> str:
     return get_config("GCS_BUCKET")
 
+
+
+# --- external-catalog stubs -------------------------------------------------
+# A workspace bound to a customer's own Iceberg catalog has no real dataset
+# documents. control.opteryx projects that catalog's listing into Firestore as
+# STUB documents marked `external-catalog: true`, carrying an inline `schema`
+# and a `statistics` block (see opteryx-catalog's stub_projection module).
+#
+# The service-wide `/$metadata` reads those fields already, because it builds
+# its document straight from the catalog documents. THIS endpoint does not: it
+# goes through `OpteryxCatalog.load_dataset(...)` and asks the loaded dataset
+# for its schema, which resolves through `current-schema-id` and a `schemas`
+# subcollection. A stub has neither, so every bound workspace's tables listed
+# fine and then 404ed here with "dataset schema unavailable in catalog" - the
+# tree showed them, the column view had nothing.
+#
+# The stub's schema is a thin facade, deliberately not versioned: the external
+# catalog owns schema evolution, and a projection of one version is all there
+# is to hold. So it is read inline here rather than given a `schemas`
+# subcollection just to satisfy this code path.
+
+
+def _external_catalog_stub(workstream: str, collection: str, dataset: str) -> dict | None:
+    """The stub document for this dataset, or None if it is not one.
+
+    One document read, and the same document `load_dataset` would read a moment
+    later on the native path - so a real dataset pays for one small duplicate
+    get, which is cheap beside the schema document and the GCS `describe()`
+    that path goes on to fetch. Checking first is what keeps the stub branch
+    from doing that pointless work on every request for a bound workspace,
+    where EVERY dataset is a stub.
+
+    Any failure returns None: an unreadable document is not evidence of a stub,
+    and the native path's own error handling is better at explaining it.
+    """
+    try:
+        db = _get_firestore_client(database=_firestore_database())
+        if db is None:
+            return None
+        document = (
+            db.collection(workstream)
+            .document(collection)
+            .collection("datasets")
+            .document(dataset)
+            .get()
+        )
+        if not document.exists:
+            return None
+        data = document.to_dict() or {}
+    except Exception:
+        return None
+    return data if data.get("external-catalog") else None
 
 def _default_top() -> int:
     return int(get_config("ODATA_DEFAULT_TOP", "100"))
@@ -1091,6 +1145,21 @@ def dataset_metadata(
     # CREATE MATERIALIZED VIEW and the first refresh, when the catalog record
     # exists but there is no schema and no snapshot behind it.
     mv_materialized = False
+    # The loaded catalog object, for the branches that have one. Initialised
+    # here because the renderer below reads `ds.metadata` for the description
+    # annotations inside a try/except that swallows anything - so a branch
+    # that never binds it produced a NameError which silently dropped every
+    # annotation after that point, sort order included.
+    ds = None
+
+    # A projection of a customer's own catalog, not a dataset this catalog
+    # owns. Checked before the catalog path because that path cannot answer
+    # for one: see `_external_catalog_stub`.
+    stub = (
+        None
+        if is_virtual_info_schema
+        else _external_catalog_stub(workstream, collection, dataset)
+    )
 
     if is_virtual_info_schema:
         # No catalog entry backs this dataset -- its schema is fixed.
@@ -1110,6 +1179,83 @@ def dataset_metadata(
         sort_order_ascending = True
         last_ts_ms = None
         snapshot_info = {}
+    elif stub is not None:
+        # Everything below comes off the one document already read. No catalog
+        # handle, no GCS fetch, no external round trip - the projection exists
+        # precisely so this endpoint does not need any of them.
+        source_type = "Table"
+        response.headers["X-Dataset-Source"] = source_type
+
+        for column in stub.get("schema") or []:
+            if not isinstance(column, dict) or not column.get("name"):
+                continue
+            col_name = column["name"]
+            col_names.append(col_name)
+            field_id = column.get("id")
+            if field_id is not None:
+                col_id_to_name[field_id] = col_name
+            # `_stored_type_display` is the catalog's own renderer for a
+            # persisted column, so a projected column reports the same EDM type
+            # a native one with the same stored spelling would.
+            col = edm_property(
+                col_name,
+                _stored_type_display(column),
+                column.get("element-type") or column.get("element_type"),
+            )
+            col_types.append(col.type)
+            col_metadata[col_name] = {
+                "type": col.type,
+                "facets": col.facets,
+                "source_type": col.source_type,
+                "nullable": bool(column.get("nullable", True)),
+            }
+
+        if not col_names:
+            # A stub whose table could not be opened when the list was last
+            # refreshed carries a name and nothing else. That is a listing that
+            # needs refreshing, not a dataset that does not exist - and 404 is
+            # the wrong thing to tell a client whose tree just showed it.
+            raise HTTPException(
+                status_code=404,
+                detail="this dataset comes from an external catalog and its columns have "
+                "not been projected yet; refresh the workspace's dataset list",
+            )
+
+        # No per-column min/max: the projection deliberately does not read the
+        # external catalog's manifests, so there are no bounds to annotate.
+        sort_order_column = None
+        sort_order_ascending = True
+        try:
+            from opteryx_catalog.catalog.compaction import normalize_sort_order
+
+            normalized = normalize_sort_order(stub.get("sort-orders"))
+            if normalized:
+                sort_order_ascending = normalized.get("ascending", True)
+                target_name = normalized.get("name")
+                target_fid = normalized.get("field_id")
+                if target_fid is not None:
+                    sort_order_column = col_id_to_name.get(target_fid)
+                if sort_order_column is None and target_name in col_names:
+                    sort_order_column = target_name
+        except Exception:
+            sort_order_column = None
+
+        last_ts_ms = stub.get("timestamp-ms")
+        if last_ts_ms:
+            response.headers["X-Dataset-LastModified"] = str(last_ts_ms)
+
+        snapshot_info = {}
+        statistics = stub.get("statistics") or {}
+        for key, field in (
+            ("row-count", "total_records"),
+            ("total-file-size-bytes", "total_data_size"),
+        ):
+            value = statistics.get(key)
+            if value is not None:
+                try:
+                    snapshot_info[field] = int(value)
+                except (TypeError, ValueError):
+                    pass
     else:
         try:
             workspace = OpteryxCatalog(
