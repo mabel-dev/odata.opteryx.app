@@ -756,7 +756,14 @@ def read_dataset(
     apply: Optional[str] = Query(
         None,
         alias="$apply",
-        description="Data aggregation: groupby((col), aggregate(sum(amount) as Total, $count as Count)). Supports min, max, average, sum, countdistinct."
+        description=(
+            "Data aggregation: groupby((col), aggregate(amount with sum as Total, $count as Count)). "
+            "Aggregates are written as '$count as Alias' or 'col with <method> as Alias', where "
+            "<method> is one of sum, average, min, max -- that list is exhaustive, and function-call "
+            "forms such as sum(amount) are not accepted. Transformations chain with '/', e.g. "
+            "filter(x gt 1)/groupby((col), aggregate($count as Count)); a groupby with no aggregate "
+            "deduplicates, so a distinct count is groupby((a,b))/groupby((a), aggregate($count as N))."
+        )
     ),
 ) -> Any:
     """Read rows from a specified dataset.
@@ -777,7 +784,7 @@ def read_dataset(
     - GET /ws/coll/data?$filter=status eq 'active' - filter rows
     - GET /ws/coll/data?$select=name,price&$top=50 - select columns, limit 50
     - GET /ws/coll/data?$orderby=created desc&$skip=100 - sort and paginate
-    - GET /ws/coll/data?$apply=groupby((vendor),aggregate(sum(amount) as Total))
+    - GET /ws/coll/data?$apply=groupby((vendor),aggregate(amount with sum as Total))
     - GET /ws/coll/data?$count=true&$top=0 - get row count only
 
     Requires authentication via bearer token or basic auth.

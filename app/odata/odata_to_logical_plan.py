@@ -233,27 +233,37 @@ class ODataLogicalPlanBuilder:
             Step ID of the aggregate node
 
         Syntax:
-            groupby((column1, column2), aggregate(sum(price) as total, count(*) as cnt))
+            groupby((column1, column2), aggregate($count as cnt, price with sum as total))
 
-        Supported aggregates:
-            - sum(expr) - SUM aggregate
-            - count(*) or count(expr) - COUNT aggregate
-            - avg(expr) - AVERAGE aggregate
-            - min(expr) - MINIMUM aggregate
-            - max(expr) - MAXIMUM aggregate
+        Supported aggregates (see ApplyParser; the list is exhaustive):
+            - $count as alias - COUNT(*) over the group
+            - expr with sum as alias - SUM aggregate
+            - expr with average as alias - AVERAGE aggregate
+            - expr with min as alias - MINIMUM aggregate
+            - expr with max as alias - MAXIMUM aggregate
+
+        Raises:
+            ValueError: if the expression cannot be parsed. ApplyParseError is
+                translated deliberately -- it derives from Exception, not
+                ValueError, so without this the caller's `except ValueError`
+                would miss it and a malformed $apply would surface as a 500.
         """
         # Delegate parsing + plan construction to ApplyLogicalPlanBuilder, which
         # uses the vendored OData-standard $apply grammar
         # (e.g. ``groupby((country), aggregate(price with sum as total))``).
         # This is the single source of truth for $apply parsing.
+        from odata_query.apply import ApplyParseError
+
         from app.odata.apply_builder import ApplyLogicalPlanBuilder
 
         try:
             apply_builder = ApplyLogicalPlanBuilder()
             return apply_builder.apply_pipeline_to_builder(self, apply_expr)
-        except ValueError as e:
-            # If parsing failed, raise with context
-            raise ValueError(f"Invalid $apply expression: {apply_expr}") from e
+        except (ValueError, ApplyParseError) as e:
+            # If parsing failed, raise with context. The parser's own message
+            # names the offending construct (e.g. an invalid aggregate method),
+            # which is what makes the resulting 400 actionable.
+            raise ValueError(f"Invalid $apply expression: {apply_expr} ({e})") from e
 
     def _add_order_node(self, orderby_expr: str) -> str:
         """Add an Order node for ORDER BY clause.

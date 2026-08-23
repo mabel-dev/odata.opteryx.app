@@ -90,3 +90,57 @@ def test_unknown_transform_raises_error():
     finally:
         # Restore original parse_apply
         apply_builder_module.parse_apply = original_parse
+
+
+@pytest.mark.parametrize(
+    "apply_expr",
+    [
+        # The production failure: $countdistinct is not an aggregate method.
+        "groupby((domain), aggregate($countdistinct(client) as DeviceCount))",
+        # `count` as a `with` method -- rejected by the parser.
+        "groupby((status), aggregate(status with count as StatusCount))",
+        # SQL-style function-call aggregates.
+        "groupby((vendor), aggregate(sum(amount) as Total))",
+        "aggregate(count(*) as Total)",
+    ],
+)
+def test_malformed_apply_raises_valueerror_not_parse_error(apply_expr):
+    """ApplyParseError derives from Exception, not ValueError, so an unconverted
+    one escapes the route's `except ValueError` and becomes a 500. These must
+    surface as ValueError -- the route maps that to a 400 the caller can act on.
+    """
+    builder = ODataLogicalPlanBuilder("public.github.events")
+    builder.current_step_id = builder._add_scan_node()
+
+    with pytest.raises(ValueError) as excinfo:
+        builder._add_apply_nodes(apply_expr)
+
+    # The parser's own message names the offending construct; without it the 400
+    # says only "invalid" and the caller cannot tell what to change.
+    assert apply_expr in str(excinfo.value)
+    assert str(excinfo.value) != f"Invalid $apply expression: {apply_expr}"
+
+
+def test_distinct_count_pipeline_is_supported():
+    """The documented replacement for a distinct count: deduplicate with an
+    aggregate-less groupby, then count that result."""
+    builder = ODataLogicalPlanBuilder("public.github.events")
+    builder.current_step_id = builder._add_scan_node()
+
+    apl_builder = ApplyLogicalPlanBuilder()
+    apl_builder.apply_pipeline_to_builder(
+        builder, "groupby((domain,client))/groupby((domain), aggregate($count as DeviceCount))"
+    )
+
+    grouped = [
+        node
+        for node in builder.plan._nodes.values()
+        if getattr(getattr(node, "node_type", None), "name", None) == "AggregateAndGroup"
+    ]
+    assert len(grouped) == 2
+    dedupe, counted = grouped[0], grouped[1]
+    assert [c.source_column for c in dedupe.groups] == ["domain", "client"]
+    assert dedupe.aggregates == []
+    assert [c.source_column for c in counted.groups] == ["domain"]
+    assert counted.aggregates[0].value == "COUNT"
+    assert counted.aggregates[0].alias == "DeviceCount"

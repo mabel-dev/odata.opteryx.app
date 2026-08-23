@@ -82,3 +82,13 @@ supported and returns 400, as does function-call syntax like
 `aggregate(count(*) as alias)` or `aggregate(min(column) as alias)`.
 
 Example: `$apply=groupby((region), aggregate(revenue with sum as Total, $count as Count, price with average as AvgPrice))`
+
+## Transformation Pipelines
+
+`$apply` transformations chain with `/` and are applied left to right:
+`$apply=filter(status eq 'active')/groupby((region), aggregate($count as Count))`
+
+A `groupby` may omit `aggregate(...)`, which deduplicates on the grouping columns.
+
+There is no distinct-count aggregate. Deduplicate first, then count:
+`$apply=groupby((domain,client))/groupby((domain), aggregate($count as DeviceCount))`
