@@ -73,6 +73,94 @@ async def http_exception_handler(request: Request, exc: HTTPException) -> JSONRe
     )
 
 
+# Opteryx ends every type-mismatch message with SQL remediation -- `CAST(column
+# AS type)`. There is no CAST in an OData $filter expression, so that sentence
+# tells an OData caller to do something the query language cannot express. These
+# two patterns cover both spellings opteryx uses (IncompatibleTypesError's
+# imperative form, IncorrectTypeError's "usually resolves it" form).
+_CAST_ADVICE = (
+    "Cast one side to match the other with `CAST(column AS type)`.",
+    "Casting one side to match the other with `CAST(column AS type)` usually resolves it.",
+)
+
+_TEMPORAL_TYPES = ("DATE", "TIMESTAMP", "TIME")
+_NUMERIC_TYPES = ("INT", "DOUBLE", "FLOAT", "DECIMAL", "NUMERIC")
+_STRING_TYPES = ("VARCHAR", "NVARCHAR", "VARBINARY")
+
+
+def _base_type(type_name) -> str:
+    """`TIMESTAMP[us]` -> `TIMESTAMP`; None -> ``."""
+    return str(type_name or "").split("[", 1)[0].strip().upper()
+
+
+def _property_name(qualified) -> str:
+    """`sales.orders.shipped_date` -> `shipped_date`.
+
+    The exception qualifies each side with its relation, which is right for
+    naming the offending column but wrong inside a worked $filter example: a
+    filter is written against the bare property name.
+    """
+    return str(qualified or "").rsplit(".", 1)[-1]
+
+
+def _literal_quoting_advice(exc):
+    """The OData rule that a string-vs-non-string mismatch usually comes down to.
+
+    The example is built from the caller's own column where the exception names
+    one, because a worked example in their column reads as the fix while a worked
+    example in someone else's reads as documentation.
+
+    Returns None when the pair is some other mismatch (say TIMESTAMP vs INTEGER),
+    where guessing at a cause would be worse than saying nothing.
+    """
+    left = _base_type(getattr(exc, "left_type", None))
+    right = _base_type(getattr(exc, "right_type", None))
+    if left not in _STRING_TYPES and right not in _STRING_TYPES:
+        return None
+    if left in _STRING_TYPES:
+        other, column = right, getattr(exc, "right_column", None)
+    else:
+        other, column = left, getattr(exc, "left_column", None)
+    if other in _TEMPORAL_TYPES:
+        name = _property_name(column) or "shipped_date"
+        return (
+            "Date and time literals are unquoted in OData v4: write "
+            f"`{name} ge 2024-01-01T00:00:00Z`, not `{name} ge '2024-01-01T00:00:00Z'` "
+            "-- a quoted literal is a string."
+        )
+    if any(other.startswith(numeric) for numeric in _NUMERIC_TYPES):
+        name = _property_name(column) or "price"
+        return f"Numeric literals are unquoted: write `{name} gt 100`, not `{name} gt '100'`."
+    return None
+
+
+def describe_type_mismatch(exc) -> str:
+    """Restate an engine type-mismatch error in terms a $filter author can act on.
+
+    The engine's own message names the column, both types and the offending
+    literal, all of which are useful -- it is only the trailing CAST advice that
+    does not survive the trip out to OData, so that sentence is replaced rather
+    than the whole message rewritten.
+    """
+    message = str(exc)
+    stripped = False
+    for advice in _CAST_ADVICE:
+        if advice in message:
+            message = message.replace(advice, "").strip()
+            stripped = True
+    quoting = _literal_quoting_advice(exc)
+    if quoting is None:
+        if not stripped:
+            # Some other type error that never offered SQL advice in the first
+            # place -- leave it exactly as the engine wrote it.
+            return message
+        quoting = (
+            "A $filter expression cannot cast, so the literal has to be written in "
+            "the column's own type."
+        )
+    return f"{message} {quoting}"
+
+
 async def generic_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     """Handle generic exceptions for v4 endpoints."""
     # Log the actual exception so we can debug it
@@ -100,6 +188,7 @@ async def generic_exception_handler(request: Request, exc: Exception) -> JSONRes
 
 __all__ = [
     "ODataError",
+    "describe_type_mismatch",
     "odata_error_handler",
     "http_exception_handler",
     "generic_exception_handler",

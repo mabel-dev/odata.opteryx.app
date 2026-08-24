@@ -4,7 +4,7 @@ Base URL: `GET https://odata.opteryx.app/api/v4/{workspace}/{collection}/{datase
 
 ## Query Parameters
 
-- `$filter` - Filter records: comparison (`eq`, `ne`, `gt`, `ge`, `lt`, `le`), logical (`and`, `or`, `not`), string functions (`contains()`, `startswith()`, `endswith()`)
+- `$filter` - Filter records: comparison (`eq`, `ne`, `gt`, `ge`, `lt`, `le`), logical (`and`, `or`, `not`), string functions (`contains()`, `startswith()`, `endswith()`), network functions (`in_subnet()`)
 - `$select` - Columns to return: `$select=col1,col2,col3`
 - `$orderby` - Sort: `$orderby=col1 asc, col2 desc`
 - `$top` - Optional (default `100`). Limit results (0-25000): `$top=50`. LLMs should include an explicit `$top` to avoid returning excessively large result sets.
@@ -62,6 +62,7 @@ Supported functions you may use directly (in `$filter` expressions):
 - Comparison: `eq`, `ne`, `gt`, `ge`, `lt`, `le`
 - Logical: `and`, `or`, `not`
 - String funcs: `contains()`, `startswith()`, `endswith()`, `tolower()`, `toupper()`, `indexof()`, `substring()`, `length()`
+- Network funcs: `in_subnet(ip_column, 'cidr')` — IPv4 CIDR containment, e.g. `in_subnet(src_addr, '192.168.4.0/24')`. The column must be IPv4-typed. There is NO `<<=` operator: OData does not have one, and using it is a parse error.
 
 (Aggregates are only used in `$apply` expressions, see Aggregation Functions below.)
 

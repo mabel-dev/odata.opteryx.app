@@ -21,7 +21,7 @@ from app.auth.deps import require_authentication
 from app.config_client import get_config
 from app.core import _get_firestore_client
 from app.logging import get_logger
-from app.odata.edm_types import ORIGINAL_TYPE_TERM, EdmProperty, edm_property
+from app.odata.edm_types import ORIGINAL_TYPE_TERM, RESOURCE_TERM, EdmProperty, edm_property
 from app.odata.virtual_datasets import (
     VIRTUAL_INFORMATION_SCHEMA_TABLES,
     is_virtual_information_schema,
@@ -558,6 +558,40 @@ def _ordered_datasets(datasets: list[DatasetInfo]) -> list[DatasetInfo]:
     return [unique[resource] for resource in sorted(unique)]
 
 
+def _entity_names(datasets: list[DatasetInfo]) -> dict[str, str]:
+    """Map each resource to the CSDL identifier its EntityType/EntitySet uses.
+
+    A SimpleIdentifier cannot contain a dot, so the dots become underscores --
+    and that flattening is not injective: "a.b.c_d" and "a.b_c.d" both render
+    as "a_b_c_d". Colliding resources used to be silently dropped from the
+    document, so a client never learned the second one existed. Instead, every
+    member of a colliding group takes a suffix derived from its own full
+    resource name: the disambiguated identifier then depends only on that
+    resource, not on which other datasets the caller can see or on the order
+    they were read in, so it stays stable across requests and replicas.
+
+    The real dotted name is emitted alongside as a RESOURCE_TERM annotation, so
+    clients read it rather than trying to reverse either form.
+    """
+    flattened: dict[str, list[str]] = {}
+    for dataset in datasets:
+        flattened.setdefault(dataset.resource.replace(".", "_"), []).append(dataset.resource)
+
+    names: dict[str, str] = {}
+    for base, resources in flattened.items():
+        if len(resources) == 1:
+            names[resources[0]] = base
+            continue
+        logger.warning(
+            f"Resource names collide as EntityType {base}: {', '.join(sorted(resources))}; "
+            "emitting each with a disambiguating suffix"
+        )
+        for resource in resources:
+            digest = hashlib.sha256(resource.encode("utf-8")).hexdigest()[:8]
+            names[resource] = f"{base}__{digest}"
+    return names
+
+
 @router.get(
     "/$metadata",
     status_code=status.HTTP_200_OK,
@@ -740,9 +774,10 @@ def get_edmx_metadata(request: Request) -> Any:
     )
 
     # Create EntityTypes for each dataset
+    entity_names = _entity_names(filtered_datasets)
     entity_types_created = set()
     for dataset in filtered_datasets:
-        entity_type_name = dataset.resource.replace(".", "_")
+        entity_type_name = entity_names[dataset.resource]
 
         # Skip if already created (duplicate names)
         if entity_type_name in entity_types_created:
@@ -758,6 +793,14 @@ def get_edmx_metadata(request: Request) -> Any:
         # Create EntityType
         entity_type = ET.SubElement(
             schema, "{" + NS_EDM + "}EntityType", attrib={"Name": entity_type_name}
+        )
+
+        # The dotted resource name this identifier stands for. Without it the
+        # underscored form is a dead end: it cannot be split back apart.
+        ET.SubElement(
+            entity_type,
+            "{" + NS_EDM + "}Annotation",
+            attrib={"Term": RESOURCE_TERM, "String": dataset.resource},
         )
 
         # Add Key element (use first column as key - OData requires a key)
@@ -795,19 +838,27 @@ def get_edmx_metadata(request: Request) -> Any:
 
     # Add EntitySets
     for dataset in filtered_datasets:
-        entity_type_name = dataset.resource.replace(".", "_")
+        entity_type_name = entity_names[dataset.resource]
 
         # Skip if EntityType wasn't created (no schema)
         if entity_type_name not in entity_types_created:
             continue
 
         # EntitySet name uses underscores (CSDL SimpleIdentifier compliance)
-        entity_set_name = dataset.resource.replace(".", "_")
+        entity_set_name = entity_type_name
 
         entity_set = ET.SubElement(
             entity_container,
             "{" + NS_EDM + "}EntitySet",
             attrib={"Name": entity_set_name, "EntityType": f"OData.{entity_type_name}"},
+        )
+
+        # The real dotted resource name, repeated here so a client walking the
+        # container alone never has to cross-reference the EntityType.
+        ET.SubElement(
+            entity_set,
+            "{" + NS_EDM + "}Annotation",
+            attrib={"Term": RESOURCE_TERM, "String": dataset.resource},
         )
 
         # Add annotation indicating source type (Table, View, MaterializedView, Virtual)

@@ -662,6 +662,35 @@ class Call(_Node):
 
             return Node(node_type=NodeType.FUNCTION, value="SUBSTRING", parameters=params)
 
+        # in_subnet(ip_column, 'cidr') -> IPv4 CIDR containment.
+        # Opteryx spells this `addr <<= '10.0.0.0/8'`, whose canonical operator name
+        # is IPContainedBy (see opteryx-core operator_catalog). OData has no
+        # containment operator of its own, so this is an Opteryx extension -- without
+        # it callers fall back on startswith() prefix matching, which is only exact
+        # on byte boundaries (/8, /16, /24).
+        #
+        # The left operand must be an IPV4 (or integer) column: the binder keys
+        # IPContainedBy on (INTEGER, VARCHAR), because an IPv4 address is held as its
+        # 32-bit value. A VARCHAR address column is a bind-time type error here, not
+        # something this layer silently casts.
+        if func_name == "in_subnet" and len(arg_nodes) == 2:
+            from opteryx.types.logical_type import VARCHAR
+
+            ip_node, cidr_node = arg_nodes
+            if cidr_node.node_type == NodeType.LITERAL and cidr_node.type != VARCHAR:
+                from .exceptions import ArgumentTypeException
+
+                raise ArgumentTypeException(
+                    "in_subnet",
+                    expected_type="a quoted CIDR string, e.g. '192.168.4.0/24'",
+                )
+            return Node(
+                node_type=NodeType.COMPARISON_OPERATOR,
+                value="IPContainedBy",
+                left=ip_node,
+                right=cidr_node,
+            )
+
         # Helper function to escape LIKE metacharacters
         def escape_like_literal(s: str, escape_char: str = "\\") -> str:
             """Escape SQL LIKE metacharacters in a literal string.

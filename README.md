@@ -164,6 +164,9 @@ $filter=tolower(name) eq tolower('earth')&$top=10
 - `startswith(field, 'prefix')` - case-sensitive prefix match
 - `endswith(field, 'suffix')` - case-sensitive suffix match
 
+**Network Functions:**
+- `in_subnet(field, 'cidr')` - IPv4 CIDR containment, e.g. `in_subnet(src_addr, '192.168.4.0/24')`. `field` must be an IPv4-typed column. This is an Opteryx extension, not part of the OData v4 spec; OData has no containment operator, and PostgreSQL's `<<=` is not valid OData syntax.
+
 ### Aggregation (`$apply`)
 
 The `$apply` parameter supports grouping and aggregation for analytics queries using OData v4 standard syntax:

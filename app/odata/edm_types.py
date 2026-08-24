@@ -163,6 +163,15 @@ _DEFAULT_UNIT_PRECISION = "6"
 #: guess whether its absence means "same as the EDM type" or "we forgot".
 ORIGINAL_TYPE_TERM = "Custom.OriginalType"
 
+#: Term carrying a dataset's real, dotted resource name.
+#:
+#: EntityType and EntitySet names are CSDL SimpleIdentifiers, which cannot
+#: contain a dot, so "a.b.c" is emitted as "a_b_c". That encoding is lossy --
+#: "a.b.c_d" and "a.b_c.d" flatten to the same identifier -- so a client cannot
+#: reverse it by splitting on underscores. This annotation carries the original
+#: name verbatim, so nobody has to infer it.
+RESOURCE_TERM = "Custom.Resource"
+
 
 class EdmProperty(NamedTuple):
     """Everything both $metadata endpoints need to emit one <Property>."""

@@ -70,6 +70,8 @@ ODATA_FUNCTIONS = {
     "geo.distance": 2,
     "geo.length": 1,
     "geo.intersects": 2,
+    # Network functions (Opteryx extension, not part of the OData spec)
+    "in_subnet": 2,
     # Set functions
     "hassubset": 2,
     "hassubsequence": 2,

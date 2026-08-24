@@ -77,6 +77,7 @@ def infer_return_type(node: ast.Call) -> Optional[Type[ast._Node]]:
         "hassubset",
         "hassubsequence",
         "geo.intersects",
+        "in_subnet",
     ):
         return ast.Boolean
 

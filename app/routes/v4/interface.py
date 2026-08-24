@@ -58,11 +58,13 @@ from app.odata.column_stats import is_ipv4_source
 from app.odata.column_stats import usable_bound
 from app.odata.edm_types import EDM_UNKNOWN
 from app.odata.edm_types import ORIGINAL_TYPE_TERM
+from app.odata.edm_types import RESOURCE_TERM
 from app.odata.edm_types import edm_property
 from opteryx_catalog.catalog.dataset import _stored_type_display
 from app.odata.virtual_datasets import VIRTUAL_INFORMATION_SCHEMA_DESCRIPTIONS
 from app.odata.virtual_datasets import VIRTUAL_INFORMATION_SCHEMA_TABLES
 from app.odata.virtual_datasets import is_virtual_information_schema
+from app.routes.v4.errors import describe_type_mismatch
 from app.routes.v4.metadata_cache import clear_describe_cache
 from app.routes.v4.metadata_cache import clear_metadata_cache
 from app.routes.v4.metadata_cache import describe_cache_get
@@ -721,7 +723,7 @@ def read_dataset(
     filter: Optional[str] = Query(
         None,
         alias="$filter",
-        description="OData $filter expression for row filtering. Operators: eq (equal), ne (not equal), lt/le/gt/ge (comparison), and/or/not (logical), contains/startswith/endswith (string). Case-sensitive. Example: vendor eq 'Oracle' and price gt 100. Date/datetime literals must be unquoted per the OData v4 spec, e.g. shipped_date gt 2024-01-01 — a quoted date is compared as a string and raises a type-mismatch error."
+        description="OData $filter expression for row filtering. Operators: eq (equal), ne (not equal), lt/le/gt/ge (comparison), and/or/not (logical), contains/startswith/endswith (string), in_subnet (IPv4 CIDR containment). Case-sensitive. in_subnet(ip_column, 'cidr') is an Opteryx extension for IPv4-typed columns, e.g. in_subnet(src_addr, '192.168.4.0/24'); the PostgreSQL <<= operator is not valid OData syntax. Example: vendor eq 'Oracle' and price gt 100. Date/datetime literals must be unquoted per the OData v4 spec, e.g. shipped_date gt 2024-01-01 — a quoted date is compared as a string and raises a type-mismatch error."
     ),
     top: Optional[int] = Query(
         None,
@@ -935,6 +937,15 @@ def read_dataset(
         # literal, unknown column, unsupported syntax, etc.), not a server fault.
         # IncompatibleTypesError is listed separately because it doesn't actually
         # inherit from SqlError despite opteryx-core's own docs implying it does.
+        #
+        # Type mismatches go through describe_type_mismatch because opteryx's
+        # remediation for them is `CAST(column AS type)`, which no $filter
+        # expression can express — the commonest cause out here is a quoted
+        # date/number, and the message now says so.
+        if isinstance(
+            e, (opteryx.exceptions.IncompatibleTypesError, opteryx.exceptions.IncorrectTypeError)
+        ):
+            raise HTTPException(status_code=400, detail=f"Invalid query: {describe_type_mismatch(e)}")
         raise HTTPException(status_code=400, detail=f"Invalid query: {str(e)}")
     except Exception as e:
         logger.error(f"Error executing OData query for {table_name}: {e}")
@@ -1652,6 +1663,14 @@ def dataset_metadata(
         container,
         f"{{{NS_EDM}}}EntitySet",
         attrib={"Name": entity_set_name, "EntityType": f"{schema_namespace}.{entity_type_name}"},
+    )
+
+    # The dotted resource name behind the underscored identifiers above; the
+    # service-wide document carries the same term for every entity set.
+    ET.SubElement(
+        entity_set,
+        f"{{{NS_EDM}}}Annotation",
+        attrib={"Term": RESOURCE_TERM, "String": f"{workstream}.{collection}.{dataset}"},
     )
 
     # Add source type annotation

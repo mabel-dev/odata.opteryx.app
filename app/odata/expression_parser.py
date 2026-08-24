@@ -19,6 +19,7 @@ _vendored_path = str(Path(__file__).parent.parent / "vendored" / "odata-query")
 if _vendored_path not in sys.path:
     sys.path.insert(0, _vendored_path)
 
+from odata_query.exceptions import FunctionCallException
 from odata_query.grammar import ODataLexer
 from odata_query.grammar import ODataParser
 
@@ -85,6 +86,11 @@ class ODataExpressionParser:
             ast = self.parser.parse(self.lexer.tokenize(filter_expr))
             # Convert AST to Opteryx expression node using the AST node's built-in method
             return ast.to_opteryx_node()
+        except FunctionCallException as e:
+            # Unknown function, wrong argument count, wrong argument type -- these
+            # already carry a precise, user-facing message. Surface it rather than
+            # flattening it into the generic parse failure below.
+            raise ValueError(str(e)) from e
         except NotImplementedError as e:
             # Catch unsupported OData constructs and provide a user-friendly error
             raise ValueError(
@@ -143,6 +149,18 @@ class ODataExpressionParser:
         # Geography literals: geography'...'
         if "geography'" in lower_expr:
             return "Unsupported filter construct: geography literals are not supported"
+
+        # IP containment operators borrowed from PostgreSQL/inet: <<=, >>=, <<, >>.
+        # These are not part of the OData grammar, so the parser fails on the first
+        # predicate and never reaches the rest of the expression -- which made the
+        # generic message actively misleading. Point at the supported spelling.
+        for ip_operator in ("<<=", ">>=", "<<", ">>"):
+            if ip_operator in filter_expr:
+                return (
+                    f"Unsupported filter construct: the IP containment operator "
+                    f"'{ip_operator}' is not supported. Use in_subnet(column, 'cidr') "
+                    f"instead, e.g. in_subnet(src_addr, '192.168.4.0/24')"
+                )
 
         return None
 
