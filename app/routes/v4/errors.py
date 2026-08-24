@@ -161,10 +161,23 @@ def describe_type_mismatch(exc) -> str:
     return f"{message} {quoting}"
 
 
+# What an unhandled exception tells the caller. Deliberately says nothing about
+# the failure itself: every error whose text is safe and useful to a caller is
+# already raised as an ODataError or an HTTPException with a written message,
+# so anything arriving here is by definition a message nobody composed for
+# external eyes. The one that prompted this carried a `gs://` URI -- the bucket
+# name and the internal metadata layout -- straight into the response body.
+_UNEXPECTED_ERROR_MESSAGE = (
+    "An unexpected error occurred. If it persists, quote the time of the request."
+)
+
+
 async def generic_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     """Handle generic exceptions for v4 endpoints."""
-    # Log the actual exception so we can debug it
-    logger.error(f"Unhandled exception in {request.url.path}: {exc}")
+    # The full exception, type included, is logged rather than returned: this is
+    # the only copy of it, and the audit middleware's own record of the request
+    # is what ties it back to the caller who saw the 500.
+    logger.error(f"Unhandled exception in {request.url.path}: {type(exc).__name__}: {exc}")
 
     # Only convert to OData format for /api/v4 requests
     if request.url.path.startswith("/api/v4"):
@@ -173,7 +186,7 @@ async def generic_exception_handler(request: Request, exc: Exception) -> JSONRes
             content={
                 "error": {
                     "code": "InternalServerError",
-                    "message": f"An unexpected error occurred: {str(exc)}",
+                    "message": _UNEXPECTED_ERROR_MESSAGE,
                 }
             },
             headers={"OData-Version": "4.0"},
@@ -182,7 +195,7 @@ async def generic_exception_handler(request: Request, exc: Exception) -> JSONRes
     # For non-v4 endpoints, return standard error
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        content={"detail": f"Internal server error: {str(exc)}"},
+        content={"detail": _UNEXPECTED_ERROR_MESSAGE},
     )
 
 

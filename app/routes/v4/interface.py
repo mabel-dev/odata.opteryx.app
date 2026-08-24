@@ -947,6 +947,20 @@ def read_dataset(
         ):
             raise HTTPException(status_code=400, detail=f"Invalid query: {describe_type_mismatch(e)}")
         raise HTTPException(status_code=400, detail=f"Invalid query: {str(e)}")
+    except opteryx.exceptions.DatasetReadError as e:
+        # The dataset exists in the catalog but its stored metadata could not be
+        # read -- a manifest the storage layer refused or could not return. Not a
+        # 404: the dataset is registered, and answering "not found" sends the
+        # caller looking for a name that is perfectly correct. Not a 400 either;
+        # nothing about the query caused it and no rewriting of it will help.
+        #
+        # The engine's message embeds the storage URI it failed on, which names
+        # the bucket and its internal layout, so it is logged and not returned.
+        logger.error(f"Dataset metadata unreadable for {table_name}: {e}")
+        raise HTTPException(
+            status_code=503,
+            detail="dataset is temporarily unavailable: its stored metadata could not be read",
+        ) from e
     except Exception as e:
         logger.error(f"Error executing OData query for {table_name}: {e}")
         raise
