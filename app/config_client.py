@@ -296,10 +296,23 @@ class ConfigClient:
         from google.cloud import firestore  # type: ignore
 
         project = self.project
+        # `database` is deliberately NOT passed for the default database.
+        # google-cloud-firestore percent-encodes the id into the request path,
+        # so the literal "(default)" arrives as "%28default%29" and Firestore
+        # rejects it with `InvalidArgument: 400 Invalid database id`. Omitting
+        # the argument selects the same database by the library's own default
+        # and skips the encoding entirely.
+        #
+        # This failed CLOSED in the worst way: the config read raised, every
+        # value fell back to its default, `GCS_BUCKET` came back None, and
+        # OpteryxCatalog then installed a storage backend that fetches nothing -
+        # so every dataset reported its manifest missing while the file sat in
+        # the bucket. A named (non-default) database is still passed through.
+        kwargs = {} if DATABASE in (None, "", "(default)") else {"database": DATABASE}
         self._firestore = (
-            firestore.Client(project=project, database=DATABASE)
+            firestore.Client(project=project, **kwargs)
             if project
-            else firestore.Client(database=DATABASE)
+            else firestore.Client(**kwargs)
         )
         return self._firestore
 
