@@ -24,6 +24,13 @@ dependencies = [
     "sly==0.5",
     "uvicorn[standard]==0.38.0",
     "valkey==6.1.1",
+
+    # google-api-core 2.35.0 (released 2026-08-24) percent-encodes values in
+    # path_template.expand, so the (default) database id reaches Firestore as
+    # %28default%29 and every gRPC read fails with INVALID_ARGUMENT
+    # "Invalid database id %28default%29". Named databases are unaffected.
+    # Remove the cap once upstream ships a fixed release.
+    "google-api-core<2.35.0",
 ]
 
 [project.optional-dependencies]
