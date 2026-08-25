@@ -262,7 +262,36 @@ class Duration(_Literal):
         from opteryx.models import Node
         from opteryx.types.logical_type import ARRAY, BOOLEAN, DATE, FLOAT64, INT64, INTERVAL, NULL, TIME, TIMESTAMP, VARCHAR
 
-        return Node(NodeType.LITERAL, type=INTERVAL, value=self.py_val)
+        # INTERVAL literals are a (months, microseconds) pair in Opteryx, not a
+        # timedelta -- the same physical-encoding contract the DATE and TIMESTAMP
+        # literals above follow. A timedelta here reached the expression compiler
+        # and failed there with "interval: element must be a (months, us) tuple",
+        # which made `now() sub duration'P30D'` -- the whole point of having a
+        # clock -- unusable.
+        #
+        # Splitting years/months into the months half rather than approximating
+        # them as 365.25/30.44 days is also what makes `P1Y` mean a calendar year:
+        # month arithmetic is calendar-aware in the engine, day arithmetic is not.
+        return Node(NodeType.LITERAL, type=INTERVAL, value=self.interval_val)
+
+    @property
+    def interval_val(self) -> Tuple[int, int]:
+        """This duration as Opteryx's ``(months, microseconds)`` pair."""
+        sign, years, months, days, hours, minutes, seconds = self.unpack()
+
+        whole_months = int(years or 0) * 12 + int(months or 0)
+        microseconds = round(
+            (
+                float(days or 0) * 86400
+                + float(hours or 0) * 3600
+                + float(minutes or 0) * 60
+                + float(seconds or 0)
+            )
+            * 1_000_000
+        )
+        if sign == "-":
+            return -whole_months, -microseconds
+        return whole_months, microseconds
 
     def unpack(
         self,
@@ -592,6 +621,20 @@ class NamedParam(_Node):
     param: _Node
 
 
+# The OData v4 date component functions that Opteryx answers through EXTRACT.
+# The OData spelling is also the EXTRACT part name, so the mapping is the identity
+# and this stays a set rather than a dict.
+_ODATA_DATE_PARTS = frozenset({"year", "month", "day", "hour", "minute", "second"})
+
+# OData v4 datetime functions this service does not implement, mapped to the
+# nearest thing a caller can write instead. See the refusal in Call.to_opteryx_node.
+_UNSUPPORTED_DATETIME_FUNCTIONS = {
+    "time": "compare the timestamp column directly, or use hour()/minute()/second()",
+    "mindatetime": "write the lower bound as a literal, e.g. 1900-01-01T00:00:00Z",
+    "maxdatetime": "write the upper bound as a literal, e.g. 2999-12-31T23:59:59Z",
+}
+
+
 @dataclass(frozen=True)
 class Call(_Node):
     func: Identifier
@@ -661,6 +704,58 @@ class Call(_Node):
                 params.append(arg_nodes[2])
 
             return Node(node_type=NodeType.FUNCTION, value="SUBSTRING", parameters=params)
+
+        # now() -> the query's wall clock, as Edm.DateTimeOffset (OData v4 §5.1.1.7).
+        # Opteryx spells this NOW(); the planner folds it to a single timestamp per
+        # plan (see opteryx.planner.expression_traits), so every row in a query sees
+        # the same instant rather than the clock drifting mid-scan.
+        #
+        # Without a clock a caller has no way to express a relative window --
+        # "the last 30 days" has to be written as a hardcoded literal range, which
+        # is silently wrong the moment the query is reused on another day.
+        if func_name == "now" and not arg_nodes:
+            return Node(node_type=NodeType.FUNCTION, value="NOW", parameters=[])
+
+        # year/month/day/hour/minute/second(temporal) -> EXTRACT(part, temporal).
+        # Opteryx has no YEAR()/MONTH()/... function of its own: the part name is a
+        # VARCHAR argument to a single EXTRACT function. These were previously mapped
+        # name-for-name onto functions that do not exist, so every one of them reached
+        # the binder and failed there with "FUNCTION 'YEAR' has no function_ref".
+        if func_name in _ODATA_DATE_PARTS and len(arg_nodes) == 1:
+            from opteryx.types.logical_type import VARCHAR
+
+            return Node(
+                node_type=NodeType.FUNCTION,
+                value="EXTRACT",
+                parameters=[
+                    Node(node_type=NodeType.LITERAL, type=VARCHAR, value=func_name),
+                    arg_nodes[0],
+                ],
+            )
+
+        # date(timestamp) -> the date part, as Edm.Date. Opteryx spells this as a
+        # cast rather than a function -- DATE is a type name there, and DATE(x) is
+        # refused outright ("DATE is a type name, not a function").
+        if func_name == "date" and len(arg_nodes) == 1:
+            return Node(node_type=NodeType.CAST, left=arg_nodes[0], value="DATE", parameters=None)
+
+        # The remaining OData v4 datetime functions have no Opteryx equivalent, and
+        # are refused HERE rather than being handed to the binder as a function name
+        # it has never heard of -- that failure surfaces as
+        # "FUNCTION 'TIME' has no function_ref - not bound", which tells a caller
+        # nothing about what to write instead.
+        #
+        #   time(x)         Opteryx cannot narrow a TIMESTAMP to a TIME at all
+        #                   ("CAST TIMESTAMP64 -> TIME is not supported").
+        #   mindatetime()   the extreme values of Edm.DateTimeOffset, whose range is
+        #   maxdatetime()   not the range of Opteryx's TIMESTAMP64, so a literal
+        #                   substitute would quietly mean something else.
+        if func_name in _UNSUPPORTED_DATETIME_FUNCTIONS:
+            from .exceptions import UnsupportedFunctionException
+
+            raise UnsupportedFunctionException(
+                func_name, _UNSUPPORTED_DATETIME_FUNCTIONS[func_name]
+            )
 
         # in_subnet(ip_column, 'cidr') -> IPv4 CIDR containment.
         # Opteryx spells this `addr <<= '10.0.0.0/8'`, whose canonical operator name
@@ -773,12 +868,8 @@ class Call(_Node):
             # substring handled specially above (0-based → 1-based start position)
             "concat": "CONCAT",
             "trim": "TRIM",
-            "year": "YEAR",
-            "month": "MONTH",
-            "day": "DAY",
-            "hour": "HOUR",
-            "minute": "MINUTE",
-            "second": "SECOND",
+            # year/month/day/hour/minute/second handled specially above (EXTRACT),
+            # now() and date() likewise -- Opteryx has no function of those names.
             "round": "ROUND",
             "floor": "FLOOR",
             "ceiling": "CEIL",  # Note: SQL uses CEIL, not CEILING

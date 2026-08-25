@@ -167,6 +167,34 @@ $filter=tolower(name) eq tolower('earth')&$top=10
 **Network Functions:**
 - `in_subnet(field, 'cidr')` - IPv4 CIDR containment, e.g. `in_subnet(src_addr, '192.168.4.0/24')`. `field` must be an IPv4-typed column. This is an Opteryx extension, not part of the OData v4 spec; OData has no containment operator, and PostgreSQL's `<<=` is not valid OData syntax.
 
+**Date and Time Functions:**
+- `now()` - the current UTC instant, as `Edm.DateTimeOffset`. Takes no arguments. Evaluated once per query, so every row is compared against the same instant.
+- `year(field)`, `month(field)`, `day(field)` - date components as integers. Work on `Edm.Date` and `Edm.DateTimeOffset` columns.
+- `hour(field)`, `minute(field)`, `second(field)` - time components as integers. Meaningful only on `Edm.DateTimeOffset` columns.
+- `date(field)` - narrows a timestamp to its date, e.g. `date(published_at) eq 2024-01-15` matches the whole day.
+
+`time()`, `mindatetime()` and `maxdatetime()` are part of the OData v4 grammar
+but are **not** supported, and return 400 naming what to write instead. There is
+no cast from a timestamp to a time in Opteryx, and the extremes of
+`Edm.DateTimeOffset` are outside the range Opteryx timestamps can hold.
+
+**Date and time literals are unquoted:** `shipped_date gt 2024-01-15` or
+`created_at ge 2024-01-15T00:00:00Z`. Quoting one (`shipped_date gt
+'2024-01-15'`) compares it as text and returns a type-mismatch error. Both forms
+work against either a `Edm.Date` or a `Edm.DateTimeOffset` column; the date-only
+form means midnight.
+
+**Relative time windows** combine `now()` with an ISO-8601 duration literal via
+`add`/`sub`, which is how a query stays correct when it is re-run on another day:
+
+```
+$filter=published_at ge now() sub duration'P30D'      # the last 30 days
+$filter=created_at ge now() sub duration'PT12H'       # the last 12 hours
+$filter=due_date le now() add duration'P1Y'           # due within a year
+```
+
+`P1Y` and `P1M` are calendar-aware (a year, a month), not 365.25 and 30.44 days.
+
 ### Aggregation (`$apply`)
 
 The `$apply` parameter supports grouping and aggregation for analytics queries using OData v4 standard syntax:
@@ -341,6 +369,14 @@ When LLMs or automated tools generate OData queries, be aware of these type-coer
    $filter=shipped_date gt '2024-01-01'             # Incorrect — compared as VARCHAR, raises a type-mismatch error
    ```
    This applies to `Edm.Date` (`2024-01-01`) and `Edm.DateTimeOffset` (`2024-01-01T00:00:00Z`) values alike.
+
+7. **Relative dates need `now()`, not a guessed literal:** A generator with no
+   clock has to invent a date bound, which is silently wrong the moment the
+   query is re-used. Express the window instead:
+   ```
+   $filter=created_at ge now() sub duration'P30D'   # Correct: still means "last 30 days" tomorrow
+   $filter=created_at ge 2024-05-01                 # Only correct on one particular day
+   ```
 
 ### Important Notes
 

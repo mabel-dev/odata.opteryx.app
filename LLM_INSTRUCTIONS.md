@@ -4,7 +4,7 @@ Base URL: `GET https://odata.opteryx.app/api/v4/{workspace}/{collection}/{datase
 
 ## Query Parameters
 
-- `$filter` - Filter records: comparison (`eq`, `ne`, `gt`, `ge`, `lt`, `le`), logical (`and`, `or`, `not`), string functions (`contains()`, `startswith()`, `endswith()`), network functions (`in_subnet()`)
+- `$filter` - Filter records: comparison (`eq`, `ne`, `gt`, `ge`, `lt`, `le`), logical (`and`, `or`, `not`), string functions (`contains()`, `startswith()`, `endswith()`), date functions (`now()`, `year()`, `date()`), network functions (`in_subnet()`)
 - `$select` - Columns to return: `$select=col1,col2,col3`
 - `$orderby` - Sort: `$orderby=col1 asc, col2 desc`
 - `$top` - Optional (default `100`). Limit results (0-25000): `$top=50`. LLMs should include an explicit `$top` to avoid returning excessively large result sets.
@@ -17,12 +17,13 @@ Base URL: `GET https://odata.opteryx.app/api/v4/{workspace}/{collection}/{datase
 1. **MANDATORY — `$top` MUST be provided**. Use integer 1–25000. If the user does not supply `$top`, choose a conservative default (e.g., `$top=50`).
 2. **String values are case-sensitive**: `vendor eq 'Oracle'` ≠ `vendor eq 'oracle'`
 3. **Quote strings, not numbers**: `status eq 'active'` and `age gt 21`
-4. **Dates/datetimes are unquoted, not strings**: `shipped_date gt 2024-01-01` or `created_at ge 2024-01-01T00:00:00Z`. Quoting a date (`shipped_date gt '2024-01-01'`) compares it as text and raises a type-mismatch error against a DATE/TIMESTAMP column.
-5. **Use exact column names** from schema
-6. **Use `$orderby` with pagination** for consistent results
-7. **`$expand` MUST NOT be generated**.
-8. **Null filtering requires explicit `or x eq null`**: The `ne` operator excludes nulls (SQL 3VL semantics). Use `(age ne 21) or (age eq null)` to include nulls.
-9. **LIKE patterns are literal**: Functions like `contains()`, `startswith()`, `endswith()` do NOT treat `%` or `_` as wildcards. Example: `contains(sku, 'A_B')` matches the literal string `'A_B'`, not a pattern.
+4. **Dates/datetimes are unquoted, not strings**: `shipped_date gt 2024-01-01` or `created_at ge 2024-01-01T00:00:00Z`. Quoting a date (`shipped_date gt '2024-01-01'`) compares it as text and raises a type-mismatch error against a DATE/TIMESTAMP column. Either form works against either column type; the date-only form means midnight.
+5. **NEVER invent a date bound for a relative question**. "the last 30 days", "since yesterday", "this year" are expressed with `now()` and a duration, NOT with a literal you guessed: `created_at ge now() sub duration'P30D'`. A guessed literal is silently wrong the moment the query is re-run on another day.
+6. **Use exact column names** from schema
+7. **Use `$orderby` with pagination** for consistent results
+8. **`$expand` MUST NOT be generated**.
+9. **Null filtering requires explicit `or x eq null`**: The `ne` operator excludes nulls (SQL 3VL semantics). Use `(age ne 21) or (age eq null)` to include nulls.
+10. **LIKE patterns are literal**: Functions like `contains()`, `startswith()`, `endswith()` do NOT treat `%` or `_` as wildcards. Example: `contains(sku, 'A_B')` matches the literal string `'A_B'`, not a pattern.
 
 ## Common Patterns
 
@@ -62,6 +63,14 @@ Supported functions you may use directly (in `$filter` expressions):
 - Comparison: `eq`, `ne`, `gt`, `ge`, `lt`, `le`
 - Logical: `and`, `or`, `not`
 - String funcs: `contains()`, `startswith()`, `endswith()`, `tolower()`, `toupper()`, `indexof()`, `substring()`, `length()`
+- Date/time funcs:
+  - `now()` — current UTC instant, no arguments. Evaluated once per query.
+  - `now() sub duration'P30D'` / `now() add duration'PT12H'` — relative windows. The duration is an ISO-8601 literal: `P<n>D` days, `P<n>M` months, `P<n>Y` years, `PT<n>H` hours, `PT<n>M` minutes, `PT<n>S` seconds. `P1Y`/`P1M` are calendar-aware, not 365.25/30.44 days.
+  - `year(col)`, `month(col)`, `day(col)` — integer components, on DATE or TIMESTAMP columns.
+  - `hour(col)`, `minute(col)`, `second(col)` — integer components, TIMESTAMP columns only.
+  - `date(col)` — narrows a timestamp to its day: `date(created_at) eq 2024-01-15` matches the whole day.
+  - `time()`, `mindatetime()` and `maxdatetime()` are NOT supported and return 400. Write the bound as a literal instead.
+  - Prefer a range over a component function when both express the question: `created_at ge 2024-01-01 and created_at lt 2025-01-01` can use file statistics to skip data, `year(created_at) eq 2024` cannot.
 - Network funcs: `in_subnet(ip_column, 'cidr')` — IPv4 CIDR containment, e.g. `in_subnet(src_addr, '192.168.4.0/24')`. The column must be IPv4-typed. There is NO `<<=` operator: OData does not have one, and using it is a parse error.
 
 (Aggregates are only used in `$apply` expressions, see Aggregation Functions below.)

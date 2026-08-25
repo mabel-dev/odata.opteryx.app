@@ -86,11 +86,22 @@ class ArgumentCountException(FunctionCallException):
 class UnsupportedFunctionException(FunctionCallException):
     """
     Thrown when a function is used that is not implemented yet.
+
+    `alternative`, when the caller can say what to write instead, is appended to
+    the message. "not implemented yet" on its own leaves a caller guessing; for a
+    function that will never be implemented here it is also misleading.
     """
 
-    def __init__(self, function_name: str):
+    def __init__(self, function_name: str, alternative: Optional[str] = None):
         self.function_name = function_name
-        super().__init__(f"Function '{function_name}' is not implemented yet.")
+        self.alternative = alternative
+        message = f"Function '{function_name}' is not implemented yet."
+        if alternative:
+            message = (
+                f"Function '{function_name}' is not supported by this service. "
+                f"Instead, {alternative}."
+            )
+        super().__init__(message)
 
 
 class ArgumentTypeException(FunctionCallException):
