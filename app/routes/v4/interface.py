@@ -175,6 +175,20 @@ EXTERNAL_TABLE_SOURCE = "ExternalTable"
 TABLE_LIKE_SOURCES = ("Table", EXTERNAL_TABLE_SOURCE, MATERIALIZED_VIEW_SOURCE)
 
 
+def _as_tag_int(value) -> int | None:
+    """A tag's snapshot id as an int, or None if it is not one.
+
+    Catalog documents are not schema-enforced, and a snapshot id that arrived
+    as a string would otherwise render as `Int="1785..."` in one document and
+    `Int="None"` in another. Anything uncoercible drops the PropertyValue
+    rather than the whole tag: the name is still worth sending.
+    """
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _loaded_dataset_source_type(ds) -> str:
     """"Table" or "MaterializedView" for an already-loaded catalog dataset.
 
@@ -1070,8 +1084,9 @@ def dataset_metadata(
       * Custom.Tags.Count: how many snapshot tags the dataset holds, 0 included.
         Present only for catalog-backed table-like datasets -- its absence means
         the dataset cannot hold a tag, not that it holds none.
-      * Custom.Tags: those tags' names, comma-separated, omitted when there are
-        none. Tag names are SQL identifiers, so no name contains a comma.
+      * Custom.Tags: a Collection of Records, one per tag, omitted when there
+        are none. Each Record carries Name, SnapshotId (the pinned snapshot,
+        whose id is also its millisecond timestamp) and CreatedBy.
 
     Also includes access-control annotations:
     - Custom.Role: user's assigned role (reader, writer, admin, owner)
@@ -1736,24 +1751,59 @@ def dataset_metadata(
     # itself table-like, so source type alone would claim "0 tags" for a
     # dataset this service never asked about.
     #
-    # Names go out comma-joined rather than as a Collection, matching
-    # Custom.MaterializedView.SourceTables. A tag name is a validated SQL
-    # identifier (letters, digits and underscores only -- see
-    # OpteryxCatalog.normalize_tag_name), so a comma can never appear inside
-    # one and the join is unambiguous to split back apart.
+    # A Collection of Records rather than a joined string: both clients read
+    # this one document (the Studio's details panel and the Manage Dataset
+    # page hit the same endpoint), and the Manage page lists each tag with the
+    # date of the snapshot it pins and who created it. A flat name list cannot
+    # carry those, and `list_tags()` returns them already -- so they are sent
+    # rather than discarded, and the panel that only draws names ignores the
+    # rest. Same shape Custom.Statistics.Distribution already uses for a
+    # multi-valued annotation.
+    #
+    # SnapshotId doubles as the pinned snapshot's timestamp: a commit takes
+    # `snapshot_id = int(time.time() * 1000)` and uses it as both the id and
+    # the snapshot's timestamp_ms (see the "timestamp-ms" note in metadata.py),
+    # so a client renders the tag's date from it without a second lookup. It
+    # fits a JS number exactly -- ~1.8e12, well inside 2**53.
     if ds is not None and source_type in TABLE_LIKE_SOURCES:
+        # A tag with no name is not renderable and not addressable -- it could
+        # not be the target of a DROP TAG -- so it is dropped here rather than
+        # sent as a row a client would have to defend against. `list_tags()`
+        # falls back to the document id, which IS the name, so this should
+        # never fire; it is counted before the count is emitted anyway, so a
+        # client can never badge "2 tags" over a list of one.
+        named = [tag for tag in tags if tag.get("name")]
         ET.SubElement(
             entity_set,
             f"{{{NS_EDM}}}Annotation",
-            attrib={"Term": "Custom.Tags.Count", "Int": str(len(tags))},
+            attrib={"Term": "Custom.Tags.Count", "Int": str(len(named))},
         )
-        tag_names = [str(tag.get("name")) for tag in tags if tag.get("name")]
-        if tag_names:
-            ET.SubElement(
-                entity_set,
-                f"{{{NS_EDM}}}Annotation",
-                attrib={"Term": "Custom.Tags", "String": ",".join(tag_names)},
+        if named:
+            tags_annotation = ET.SubElement(
+                entity_set, f"{{{NS_EDM}}}Annotation", attrib={"Term": "Custom.Tags"}
             )
+            collection_element = ET.SubElement(tags_annotation, f"{{{NS_EDM}}}Collection")
+            for tag in named:
+                record = ET.SubElement(collection_element, f"{{{NS_EDM}}}Record")
+                ET.SubElement(
+                    record,
+                    f"{{{NS_EDM}}}PropertyValue",
+                    attrib={"Property": "Name", "String": str(tag["name"])},
+                )
+                snapshot_id = _as_tag_int(tag.get("snapshot-id"))
+                if snapshot_id is not None:
+                    ET.SubElement(
+                        record,
+                        f"{{{NS_EDM}}}PropertyValue",
+                        attrib={"Property": "SnapshotId", "Int": str(snapshot_id)},
+                    )
+                created_by = tag.get("created-by")
+                if created_by:
+                    ET.SubElement(
+                        record,
+                        f"{{{NS_EDM}}}PropertyValue",
+                        attrib={"Property": "CreatedBy", "String": str(created_by)},
+                    )
 
     # Add access annotations (role, policy) when available
     if assigned_role:

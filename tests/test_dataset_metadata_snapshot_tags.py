@@ -127,18 +127,74 @@ def _annotations(content):
     }
 
 
-def _tag(name):
-    return {"name": name, "snapshot-id": 1787261893891, "created-by": "tester"}
+def _tag_records(content):
+    """The Custom.Tags Collection, as a list of {property: value} dicts."""
+    root = ET.fromstring(content)
+    for annotation in root.iter(f"{{{EDM}}}Annotation"):
+        if annotation.get("Term") != "Custom.Tags":
+            continue
+        return [
+            {
+                value.get("Property"): (value.get("String") or value.get("Int"))
+                for value in record.iter(f"{{{EDM}}}PropertyValue")
+            }
+            for record in annotation.iter(f"{{{EDM}}}Record")
+        ]
+    return None
 
 
-def test_a_tagged_table_reports_its_tag_names_and_count(catalog):
-    catalog([_tag("nightly"), _tag("release_v2")])
+def _tag(name, snapshot_id=1787261893891, created_by="tester"):
+    return {"name": name, "snapshot-id": snapshot_id, "created-by": created_by}
 
-    annotations = _annotations(_render())
 
-    assert annotations["Custom.Tags.Count"] == "2"
-    # Comma-joined, in the order list_tags returned (which is by name).
-    assert annotations["Custom.Tags"] == "nightly,release_v2"
+def test_a_tagged_table_reports_a_record_per_tag(catalog):
+    catalog(
+        [
+            _tag("nightly", snapshot_id=1787261893891, created_by="scheduler"),
+            _tag("release_v2", snapshot_id=1785000000000, created_by="tester"),
+        ]
+    )
+
+    content = _render()
+
+    assert _annotations(content)["Custom.Tags.Count"] == "2"
+    # In the order list_tags returned, which is by name.
+    assert _tag_records(content) == [
+        {"Name": "nightly", "SnapshotId": "1787261893891", "CreatedBy": "scheduler"},
+        {"Name": "release_v2", "SnapshotId": "1785000000000", "CreatedBy": "tester"},
+    ]
+
+
+def test_the_snapshot_id_survives_as_the_timestamp_the_client_renders(catalog):
+    """A client dates a tag from its snapshot id, so it must arrive exact."""
+    catalog([_tag("nightly", snapshot_id=1787261893891)])
+
+    snapshot_id = _tag_records(_render())[0]["SnapshotId"]
+
+    assert int(snapshot_id) == 1787261893891
+
+
+def test_a_tag_with_an_unusable_snapshot_id_keeps_its_name(catalog):
+    """Catalog documents aren't schema-enforced; a bad id must not emit Int="None"."""
+    catalog([_tag("nightly", snapshot_id=None), _tag("release_v2", snapshot_id="1785000000000")])
+
+    records = _tag_records(_render())
+
+    assert records[0] == {"Name": "nightly", "CreatedBy": "tester"}
+    # A stringified id is still an id -- coerced rather than dropped.
+    assert records[1]["SnapshotId"] == "1785000000000"
+
+
+def test_a_nameless_tag_is_dropped_rather_than_sent_as_a_row(catalog):
+    """It could not be rendered, and could not be the target of a DROP TAG."""
+    catalog([{"snapshot-id": 1787261893891, "created-by": "tester"}, _tag("nightly")])
+
+    content = _render()
+
+    assert [record["Name"] for record in _tag_records(content)] == ["nightly"]
+    # The count is of what was sent, so a client can never badge "2" over a
+    # list of one.
+    assert _annotations(content)["Custom.Tags.Count"] == "1"
 
 
 def test_an_untagged_table_reports_zero_rather_than_going_quiet(catalog):
@@ -148,7 +204,7 @@ def test_an_untagged_table_reports_zero_rather_than_going_quiet(catalog):
     annotations = _annotations(_render())
 
     assert annotations["Custom.Tags.Count"] == "0"
-    assert "Custom.Tags" not in annotations
+    assert _tag_records(_render()) is None
 
 
 def test_the_tag_lookup_asks_for_the_dataset_it_is_rendering(catalog):
