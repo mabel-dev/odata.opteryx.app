@@ -1067,6 +1067,11 @@ def dataset_metadata(
       * Custom.Snapshot.Author: author of the last snapshot commit (table only)
       * Custom.SortOrder.Column/Custom.SortOrder.Direction: the column the
         underlying storage is physically sorted by, if any (table only)
+      * Custom.Tags.Count: how many snapshot tags the dataset holds, 0 included.
+        Present only for catalog-backed table-like datasets -- its absence means
+        the dataset cannot hold a tag, not that it holds none.
+      * Custom.Tags: those tags' names, comma-separated, omitted when there are
+        none. Tag names are SQL identifiers, so no name contains a comma.
 
     Also includes access-control annotations:
     - Custom.Role: user's assigned role (reader, writer, admin, owner)
@@ -1187,6 +1192,12 @@ def dataset_metadata(
     # that never binds it produced a NameError which silently dropped every
     # annotation after that point, sort order included.
     ds = None
+    # Snapshot tags held by this dataset, newest catalog wheels only. Empty for
+    # anything that cannot hold one (a view, a virtual table, an external
+    # projection) as well as for a table that simply has none -- the
+    # Custom.Tags.Count annotation below is emitted only for the kinds that
+    # can, so a client can still tell those two apart.
+    tags = []
 
     # A projection of a customer's own catalog, not a dataset this catalog
     # owns. Checked before the catalog path because that path cannot answer
@@ -1351,11 +1362,14 @@ def dataset_metadata(
                 else None
             )
 
-            # schema and describe are independent catalog calls (a Firestore doc
-            # get and a GCS manifest fetch respectively) with no data dependency
-            # on one another, so fetch them concurrently instead of serially --
-            # this endpoint's latency is otherwise their sum rather than the
-            # slower of the two.
+            # schema, describe and tags are independent catalog calls (a
+            # Firestore doc get, a GCS manifest fetch and a Firestore
+            # subcollection stream respectively) with no data dependency on one
+            # another, so fetch them concurrently instead of serially -- this
+            # endpoint's latency is otherwise their sum rather than the slowest
+            # of the three. Adding tags to the existing pool is what keeps this
+            # annotation free: it finishes inside the window the other two
+            # already cost.
             def _fetch_schema():
                 try:
                     return ds.schema() if hasattr(ds, "schema") else None
@@ -1375,11 +1389,30 @@ def dataset_metadata(
                     describe_cache_put(describe_key, description)
                 return description
 
-            with ThreadPoolExecutor(max_workers=2) as pool:
+            def _fetch_tags():
+                # Only table-like datasets have snapshots, and a tag is a pin on
+                # one -- asking for a view's tags would stream a subcollection
+                # under a dataset document that does not exist, paying a round
+                # trip to be told what is already known.
+                if source_type not in TABLE_LIKE_SOURCES:
+                    return []
+                try:
+                    return workspace.list_tags(f"{collection}.{dataset}")
+                except Exception as exc:
+                    # Best effort, like every other enrichment here: an older
+                    # catalog wheel has no list_tags(), and a failed read must
+                    # not cost the caller their whole metadata document. The
+                    # cost of degrading is one missing badge.
+                    logger.warning(f"Could not read tags for {table_name}: {exc}")
+                    return []
+
+            with ThreadPoolExecutor(max_workers=3) as pool:
                 schema_future = pool.submit(_fetch_schema)
                 description_future = pool.submit(_fetch_description)
+                tags_future = pool.submit(_fetch_tags)
                 schema = schema_future.result()
                 description = description_future.result()
+                tags = tags_future.result()
 
             if schema and hasattr(schema, "columns"):
                 mv_materialized = True
@@ -1693,6 +1726,34 @@ def dataset_metadata(
         f"{{{NS_EDM}}}Annotation",
         attrib={"Term": "Custom.SourceType", "String": source_type},
     )
+
+    # Snapshot tags. The count is emitted for every table-like dataset, zero
+    # included, so a client can tell "no tags" from "this service is too old to
+    # say" and from "this kind cannot hold one" -- a view or an external
+    # projection gets no annotation at all rather than a misleading 0. `ds is
+    # not None` is what draws that line: the virtual and external-stub branches
+    # answer without a catalog handle, and an external table's source type is
+    # itself table-like, so source type alone would claim "0 tags" for a
+    # dataset this service never asked about.
+    #
+    # Names go out comma-joined rather than as a Collection, matching
+    # Custom.MaterializedView.SourceTables. A tag name is a validated SQL
+    # identifier (letters, digits and underscores only -- see
+    # OpteryxCatalog.normalize_tag_name), so a comma can never appear inside
+    # one and the join is unambiguous to split back apart.
+    if ds is not None and source_type in TABLE_LIKE_SOURCES:
+        ET.SubElement(
+            entity_set,
+            f"{{{NS_EDM}}}Annotation",
+            attrib={"Term": "Custom.Tags.Count", "Int": str(len(tags))},
+        )
+        tag_names = [str(tag.get("name")) for tag in tags if tag.get("name")]
+        if tag_names:
+            ET.SubElement(
+                entity_set,
+                f"{{{NS_EDM}}}Annotation",
+                attrib={"Term": "Custom.Tags", "String": ",".join(tag_names)},
+            )
 
     # Add access annotations (role, policy) when available
     if assigned_role:
