@@ -737,7 +737,32 @@ def read_dataset(
     filter: Optional[str] = Query(
         None,
         alias="$filter",
-        description="OData $filter expression for row filtering. Operators: eq (equal), ne (not equal), lt/le/gt/ge (comparison), and/or/not (logical), contains/startswith/endswith (string), in_subnet (IPv4 CIDR containment). Case-sensitive. in_subnet(ip_column, 'cidr') is an Opteryx extension for IPv4-typed columns, e.g. in_subnet(src_addr, '192.168.4.0/24'); the PostgreSQL <<= operator is not valid OData syntax. Example: vendor eq 'Oracle' and price gt 100. Date/datetime literals must be unquoted per the OData v4 spec, e.g. shipped_date gt 2024-01-01 — a quoted date is compared as a string and raises a type-mismatch error."
+        description=(
+            "OData $filter expression for row filtering. Operators: eq (equal), ne (not equal), "
+            "lt/le/gt/ge (comparison), and/or/not (logical), contains/startswith/endswith (string), "
+            "in_subnet (IPv4 CIDR containment). Case-sensitive. in_subnet(ip_column, 'cidr') is an "
+            "Opteryx extension for IPv4-typed columns, e.g. in_subnet(src_addr, '192.168.4.0/24'); "
+            "the PostgreSQL <<= operator is not valid OData syntax. "
+            "Example: vendor eq 'Oracle' and price gt 100. "
+            "Date/datetime literals must be unquoted per the OData v4 spec, e.g. "
+            "shipped_date gt 2024-01-01 — a quoted date is compared as a string and raises a "
+            "type-mismatch error. "
+            "Date and time functions: now() (the query's wall clock, evaluated once per query so "
+            "every row sees the same instant), year(), month(), day(), hour(), minute(), second() "
+            "(each returns the named component of a date or timestamp as an integer, e.g. "
+            "year(shipped_date) eq 2024), and date() (narrows a timestamp to its date part, e.g. "
+            "date(created_at) eq 2024-01-01). The OData functions time(), mindatetime() and "
+            "maxdatetime() are not implemented and are rejected with a message naming what to "
+            "write instead. "
+            "Rolling windows: combine now() with an ISO 8601 duration literal using add or sub, "
+            "e.g. published_at ge now() sub duration'P30D' for the last 30 days. The duration "
+            "syntax is duration'PnYnMnDTnHnMnS', optionally signed, e.g. duration'P1Y', "
+            "duration'P18M', duration'PT12H', duration'-P7D'. Year and month durations are "
+            "calendar-aware — duration'P1Y' means one calendar year and duration'P1M' one "
+            "calendar month, so their length depends on the date they are applied to — while "
+            "day, hour, minute and second durations are fixed spans (duration'P30D' is always "
+            "exactly 30 × 24 hours)."
+        )
     ),
     top: Optional[int] = Query(
         None,
@@ -1052,7 +1077,19 @@ def read_dataset(
 @router.get(
     "/{workstream}/{collection}/{dataset}/$metadata",
     summary="Per-dataset OData EDMX metadata",
-    description="Returns OData $metadata (EDMX) for a single dataset, including column types, nullability, cardinality, and min/max values as custom annotations.",
+    description=(
+        "Returns OData $metadata (EDMX) for a single dataset, including column types and "
+        "nullability, plus custom annotations carrying column statistics "
+        "(Custom.Statistics.Min/Max, DistinctValueCount, NullCount, Distribution, and CIDR for "
+        "IPv4 columns), the source type name (Custom.OriginalType, Custom.SourceType), the "
+        "caller's access (Custom.Role, Custom.Policy), dataset and column descriptions "
+        "(Custom.Description, Custom.LLMDescribed), latest-snapshot metadata "
+        "(Custom.Snapshot.Id/TotalRecords/TotalDataSize/CommitMessage/Author), physical sort "
+        "order (Custom.SortOrder.Column/Direction), snapshot tags (Custom.Tags.Count and "
+        "Custom.Tags, a Collection of Records with Name, SnapshotId and CreatedBy), and "
+        "materialized-view state (Custom.MaterializedView.*). Annotations are omitted where "
+        "they do not apply to the dataset kind or are unavailable."
+    ),
     responses={
         200: {"description": "EDMX metadata document returned as XML"},
         401: {"description": "Missing or invalid authentication"},
