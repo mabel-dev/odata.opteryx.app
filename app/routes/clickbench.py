@@ -39,7 +39,7 @@ from starlette.concurrency import run_in_threadpool
 from app.auth.deps import require_authentication
 from app.auth.permissions import DATA_ADMIN_ENTITLEMENT
 from app.auth.permissions import entitlements_from_claims
-from app.logging import get_logger
+from opteryx_shared_services.logging import get_logger
 
 logger = get_logger()
 

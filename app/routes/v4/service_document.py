@@ -7,10 +7,10 @@ from fastapi import Request
 from fastapi import Response
 from fastapi import status
 from google.cloud.firestore_v1.base_query import FieldFilter
-from app.logging import get_logger
+from opteryx_shared_services.logging import get_logger
 
 from app.auth.deps import require_authentication
-from app.config_client import get_config
+from opteryx_shared_services.config import get_config
 from app.core import _get_firestore_client
 from app.odata.virtual_datasets import VIRTUAL_INFORMATION_SCHEMA_TABLES
 from opteryx_catalog.catalog.compaction import normalize_sort_order

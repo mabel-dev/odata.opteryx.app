@@ -11,7 +11,7 @@ from typing import List
 from typing import Optional
 from typing import Tuple
 
-from app.logging import get_logger
+from opteryx_shared_services.logging import get_logger
 
 logger = get_logger()
 

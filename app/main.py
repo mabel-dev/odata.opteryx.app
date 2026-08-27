@@ -1,12 +1,14 @@
+from contextlib import asynccontextmanager
 import os
 import sys
 
 from fastapi import FastAPI
 from fastapi import HTTPException
-from app.logging import get_logger
-from app.logging import set_log_name
+from opteryx_shared_services.logging import get_logger
+from opteryx_shared_services.logging import set_log_name
 
-from app.middleware.audit import AuditMiddleware
+from opteryx_shared_services.audit import AuditMiddleware
+from app.preflight import preflight
 from app.middleware.compression import CompressionMiddleware
 from app.middleware.cors import configure_cors
 from app.routes import router as routes_router
@@ -34,7 +36,27 @@ logger.setLevel(5)
 # small dicts where the serializer is unmeasurable. ORJSONResponse was carrying
 # a deprecation warning and an orjson dependency to accelerate a path that is
 # effectively never taken, so both are gone and FastAPI's default stands.
-service = FastAPI(title="Opteryx OData v4 Service")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Prove this instance can serve before it is allowed to accept anything.
+
+    A second line of defence only. `python -m app.preflight` in the Dockerfile
+    is what fails a Cloud Run revision; a lifespan that raises can at most kill
+    one child of a server that respawns it behind an already-open port. It
+    still covers a child respawned long after startup, and running the server
+    by hand.
+
+    Deliberately in the lifespan rather than at import: importing this module is
+    something tests and tooling do, and it must not require a reachable GCP
+    project. Set `HEALTH_DEPENDENCY_CHECKS=false` to run without the probes.
+    """
+    preflight.run_startup_checks()
+    yield
+
+
+service = FastAPI(title="Opteryx OData v4 Service", lifespan=lifespan)
 
 # Register exception handlers for OData v4 error format
 service.add_exception_handler(ODataError, odata_error_handler)

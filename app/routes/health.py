@@ -1,22 +1,36 @@
-from pathlib import Path
+"""Health endpoints.
+
+`/health` is not a ping: it reports whether this instance can actually serve, by
+probing the dependencies `app.preflight` declares -- the same checks the process
+runs at startup. It answers 503 when any of them fails, so an instance whose
+dependencies have gone away stops claiming to be servable.
+
+`/health/live` is the ping. It answers 200 as long as the process is running and
+touches nothing external, so it can be used as a liveness probe without a
+transient Firestore blip getting a busy instance killed mid-request.
+"""
 
 from fastapi import APIRouter
-from fastapi import HTTPException
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import JSONResponse
+
+from app.preflight import preflight
 
 router = APIRouter(tags=["service"])
 
 
 @router.get("/health", include_in_schema=False)
-def health():
+def health() -> JSONResponse:
+    """Report whether every dependency needed to serve is reachable.
+
+    The probes are cached inside `readiness` -- this endpoint is
+    unauthenticated, so it must not be a way to make the service issue
+    unbounded RPCs.
+    """
+    healthy, payload = preflight.readiness()
+    return JSONResponse(status_code=200 if healthy else 503, content=payload)
+
+
+@router.get("/health/live", include_in_schema=False)
+def liveness() -> dict:
+    """The process is up. Nothing external is consulted."""
     return {"status": "ok"}
-
-
-@router.get("/.well-known/llms.txt", response_class=PlainTextResponse)
-def well_known_llms():
-    """Serve LLM directives file for automated agents."""
-    base_dir = Path(__file__).resolve().parents[2]
-    llms_path = base_dir / ".well-known" / "llms.txt"
-    if not llms_path.exists():
-        raise HTTPException(status_code=404, detail="LLM directives not available")
-    return PlainTextResponse(content=llms_path.read_text(encoding="utf-8"))

@@ -5,8 +5,8 @@ By default, CORS is restrictive and requires explicit origin configuration.
 """
 
 from fastapi.middleware.cors import CORSMiddleware
-from app.config_client import get_config
-from app.logging import get_logger
+from opteryx_shared_services.config import get_config
+from opteryx_shared_services.logging import get_logger
 
 logger = get_logger()
 

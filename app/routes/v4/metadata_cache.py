@@ -43,7 +43,7 @@ from collections import OrderedDict
 
 from fastapi import Response
 
-from app.config_client import get_config
+from opteryx_shared_services.config import get_config
 
 _METADATA_CACHE_MAX_ENTRIES = 128
 _metadata_cache_lock = threading.Lock()

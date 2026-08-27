@@ -11,6 +11,8 @@ dependencies = [
     "Brotli==1.2.0",
     "cryptography==50.0.0",
     "fastapi==0.141.1",
+    # config, logging, preflight and audit.
+    "opteryx-shared-services[web,storage,secrets]>=0.2.2",
     "google-cloud-firestore>=2.29.0",
     "google-cloud-secret-manager==2.30.0",
     "google-cloud-storage==3.13.1",

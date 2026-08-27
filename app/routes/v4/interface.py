@@ -45,11 +45,11 @@ except ImportError:  # pragma: no cover
     OpteryxConnector = type("OpteryxConnector", (), {})
 
 from opteryx_catalog import OpteryxCatalog
-from app.logging import get_logger
+from opteryx_shared_services.logging import get_logger
 
 from app.auth.deps import require_authentication
 from app.core import _get_firestore_client
-from app.config_client import get_config
+from opteryx_shared_services.config import get_config
 from app.odata.odata_to_logical_plan import ODataLogicalPlanBuilder
 from app.odata.plan_optimizer import ODataLogicalPlanOptimizer
 from app.odata.column_stats import ipv4_address
