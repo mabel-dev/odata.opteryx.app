@@ -240,7 +240,25 @@ register_default_connector()
 # that runs again per query, and a capability may not be installed after a
 # permission check has been answered. Unguarded on purpose -- a service that
 # cannot enforce policy must fail to start rather than serve permissively.
-opteryx.register_permissions_capability(opteryx_access.capability())
+#
+# Built over a policy STORE, not bare: bare `capability()` can only answer
+# about the asking session, and refuses GRANT/REVOKE/SHOW GRANTS ON and
+# principal checks (ALTER MATERIALIZED VIEW ... OWNER TO) with
+# PolicyStoreRequiredError. The store resolves its Firestore client through a
+# factory on every access -- the project/database come from configuration that
+# can change under a running process, and `_get_firestore_client` is
+# lru_cached, so nothing is frozen here and the per-access cost is a dict
+# lookup. Policies live at `{workspace}/$policies/access` in the CATALOG
+# database, hence `_firestore_database()`, never the default database.
+from opteryx_access.adapters.firestore import FirestorePolicyStore
+
+opteryx.register_permissions_capability(
+    opteryx_access.capability(
+        FirestorePolicyStore(
+            db_factory=lambda: _get_firestore_client(database=_firestore_database())
+        )
+    )
+)
 
 
 class _MaterializedResult:
