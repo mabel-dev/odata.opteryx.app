@@ -248,3 +248,25 @@ def test_column_relationships_appears_as_an_entity_set(monkeypatch):
         for entity_type in root.iter(f"{{{NS_EDM}}}EntityType")
     }
     assert "public_information_schema_column_relationships" in names
+
+
+def test_a_missing_index_is_reported_as_an_error_not_swallowed_quietly(caplog):
+    """The failure mode is 'the feature is silently absent', which is the worst
+    kind: the document comes back looking complete, forever, and nothing in it
+    says a whole class of content is missing."""
+    import logging
+
+    from google.api_core.exceptions import FailedPrecondition
+
+    class _NoIndex:
+        def collection_group(self, name):
+            raise FailedPrecondition("The query requires a COLLECTION_GROUP_ASC index")
+
+    with caplog.at_level(logging.ERROR):
+        assert metadata._get_relationships(_NoIndex(), {"public"}) == []
+
+    errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert errors, "a missing index must be logged at ERROR, not swallowed"
+    # getMessage(), not .message: the latter is unpopulated until a formatter
+    # has run, so asserting on it passes for the wrong reason.
+    assert any("collection-group index" in r.getMessage() for r in errors)

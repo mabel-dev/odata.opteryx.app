@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, NamedTuple
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from google.api_core.exceptions import FailedPrecondition
 from google.cloud.firestore_v1.base_query import FieldFilter
 
 # The catalog's own renderer for a persisted column's type. Imported rather than
@@ -398,6 +399,14 @@ def _get_relationships(db, workspace_ids: set[str]) -> list[dict]:
     same thing to a caller -- an EDMX document without navigation properties --
     and none of them is a reason to fail a metadata request that is otherwise
     complete.
+
+    REQUIRES A COLLECTION_GROUP_ASC INDEX on `relationships.workspace`.
+    Collection-group scope is not automatic even for a single field, and this is
+    a DIFFERENT index from the three-field one the catalog's reverse lookup
+    needs. Until it exists Firestore refuses the query outright -- and because
+    this function is deliberately non-fatal, the only symptom is navigation
+    properties quietly never appearing. That is why the miss is logged as an
+    error naming the cause, rather than a warning about an exception.
     """
     if not workspace_ids:
         return []
@@ -419,6 +428,19 @@ def _get_relationships(db, workspace_ids: set[str]) -> list[dict]:
                 max_workers=min(len(workspaces), _metadata_workers())
             ) as pool:
                 batches = list(pool.map(_run, workspaces))
+    except FailedPrecondition as exc:
+        # Almost always the missing collection-group index. Distinguished from
+        # everything else because it is a DEPLOYMENT GAP, not a blip: it will
+        # not heal, every request loses the same data, and the document comes
+        # back looking complete. The exception text carries the console link
+        # Firestore generates for creating it.
+        logger.error(
+            "Declared relationships are missing from $metadata: the Firestore "
+            "collection-group index on relationships.workspace does not exist. "
+            "Navigation properties will not appear until it is created. %s",
+            exc,
+        )
+        return []
     except Exception as exc:
         logger.warning(f"Failed to retrieve relationships: {type(exc)} {exc}")
         return []
