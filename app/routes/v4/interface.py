@@ -211,6 +211,84 @@ def _declared_relationships(
     return visible
 
 
+def _inbound_relationships(
+    workstream: str,
+    collection: str,
+    dataset: str,
+    identity: str | None,
+    access_policies_list,
+) -> list[dict]:
+    """Relationships declared elsewhere that point AT this dataset.
+
+    The design stores one row per relationship, under the dataset that declares
+    it, and answers the reverse question by searching rather than by keeping a
+    mirrored copy -- a copy holds nothing the original does not and can only
+    drift out of step with it. This is that search.
+
+    A collection group query, so it costs one indexed read rather than a walk
+    over every dataset in the workspace. Unlike the forward direction, which is
+    a direct read of this dataset's own subcollection, this one REQUIRES a
+    collection-group index on `relationships` over (references-workspace,
+    references-collection, references-dataset).
+
+    THE BACKTICKS ARE LOAD-BEARING. An unquoted Firestore property path must
+    match `[a-zA-Z_][a-zA-Z_0-9]*`, and these field names are hyphenated, so a
+    bare path is rejected outright.
+
+    THE WORKSPACE FILTER IS LOAD-BEARING TOO. A collection group query crosses
+    every workspace in the database; without it this would return other tenants'
+    relationships. It is sound because a relationship cannot cross a workspace,
+    so the far end's workspace is always this one.
+
+    Visibility runs the other way round from the forward direction: the row
+    names the dataset that DECLARED it, so that is the one the caller must be
+    able to read.
+    """
+    from google.cloud.firestore_v1.base_query import FieldFilter
+
+    try:
+        db = _get_firestore_client(database=_firestore_database())
+        if db is None:
+            return []
+        query = (
+            db.collection_group("relationships")
+            .where(filter=FieldFilter("`references-workspace`", "==", workstream))
+            .where(filter=FieldFilter("`references-collection`", "==", collection))
+            .where(filter=FieldFilter("`references-dataset`", "==", dataset))
+        )
+        rows = [doc.to_dict() or {} for doc in query.stream()]
+    except Exception as exc:
+        # Never fatal, for the same reason the forward direction is not: an
+        # absent index or an older catalog means "no inbound relationships",
+        # which is not a reason to fail an otherwise-complete document. Logged
+        # at warning with the exception, which carries Firestore's index link.
+        logger.warning(
+            f"Failed to read inbound relationships for "
+            f"{workstream}.{collection}.{dataset}: {exc}"
+        )
+        return []
+
+    visible = []
+    for row in rows:
+        if row.get("kind") != "maps":
+            continue
+        if row.get("origin") != "asserted":
+            continue
+        if row.get("status") != "active":
+            continue
+
+        near_collection = row.get("collection")
+        near_dataset = row.get("dataset")
+        if not near_collection or not near_dataset:
+            continue
+        if not _can_read_relation(
+            workstream, near_collection, near_dataset, identity, access_policies_list
+        ):
+            continue
+        visible.append(row)
+    return visible
+
+
 def _can_read_relation(
     workstream: str,
     collection: str,
@@ -1347,7 +1425,21 @@ def dataset_metadata(
             workstream, collection, dataset, identity, access_policies_list
         )
     )
-    relationship_key = tuple(sorted(str(row.get("name") or "") for row in relationships))
+    inbound_relationships = (
+        []
+        if is_virtual_info_schema
+        else _inbound_relationships(
+            workstream, collection, dataset, identity, access_policies_list
+        )
+    )
+    relationship_key = tuple(
+        sorted(str(row.get("name") or "") for row in relationships)
+    ) + tuple(
+        sorted(
+            f"{row.get('collection')}.{row.get('dataset')}.{row.get('name')}"
+            for row in inbound_relationships
+        )
+    )
     cache_key = (
         table_name,
         assigned_role,
@@ -1999,6 +2091,35 @@ def dataset_metadata(
                     f"{row.get('references-collection')}.{row.get('references-dataset')}",
                 ),
                 ("ReferencedColumn", row.get("references-column")),
+                ("Cardinality", row.get("cardinality")),
+            ):
+                if value:
+                    ET.SubElement(
+                        record,
+                        f"{{{NS_EDM}}}PropertyValue",
+                        attrib={"Property": property_name, "String": str(value)},
+                    )
+
+    # The reverse direction: relationships declared elsewhere that point at a
+    # column of this dataset. A separate term, not more Custom.Relationships
+    # records, because they are not the same fact -- one says this column
+    # points somewhere, the other says something points here -- and a client
+    # that could not tell them apart would draw one arrow for both.
+    if inbound_relationships:
+        referenced_annotation = ET.SubElement(
+            entity_set, f"{{{NS_EDM}}}Annotation", attrib={"Term": "Custom.ReferencedBy"}
+        )
+        referenced_collection_element = ET.SubElement(
+            referenced_annotation, f"{{{NS_EDM}}}Collection"
+        )
+        for row in inbound_relationships:
+            record = ET.SubElement(referenced_collection_element, f"{{{NS_EDM}}}Record")
+            for property_name, value in (
+                ("Name", row.get("name")),
+                # The column ON THIS dataset that is being pointed at.
+                ("Column", row.get("references-column")),
+                ("ReferencingTable", f"{row.get('collection')}.{row.get('dataset')}"),
+                ("ReferencingColumn", row.get("column")),
                 ("Cardinality", row.get("cardinality")),
             ):
                 if value:
