@@ -381,6 +381,98 @@ def _get_workspace_datasets(db, workspace_ids: set[str]) -> list[DatasetInfo]:
     return results
 
 
+def _get_relationships(db, workspace_ids: set[str]) -> list[dict]:
+    """Declared relationships for the given workspaces, as raw documents.
+
+    One collection-group query per workspace over the `relationships`
+    subcollection, concurrently, mirroring `_get_workspace_datasets`. The
+    documents carry their own near end (`workspace`/`collection`/`dataset`) as
+    fields, so nothing here has to walk back up a parent path.
+
+    A relationship is a DECLARATION, never enforced: a write that breaks it
+    succeeds. What it buys is that a client reading `$metadata` learns how two
+    entity sets join without being told by a human.
+
+    Never fatal. A workspace with no relationships, an older catalog that has
+    no such subcollection, or a missing collection-group index all mean the
+    same thing to a caller -- an EDMX document without navigation properties --
+    and none of them is a reason to fail a metadata request that is otherwise
+    complete.
+    """
+    if not workspace_ids:
+        return []
+
+    def _run(workspace_id):
+        query = (
+            db.collection_group("relationships")
+            .where(filter=FieldFilter("workspace", "==", workspace_id))
+            .limit(1000)
+        )
+        return [doc.to_dict() or {} for doc in query.stream()]
+
+    try:
+        workspaces = sorted(workspace_ids)
+        if len(workspaces) == 1:
+            batches = [_run(workspaces[0])]
+        else:
+            with ThreadPoolExecutor(
+                max_workers=min(len(workspaces), _metadata_workers())
+            ) as pool:
+                batches = list(pool.map(_run, workspaces))
+    except Exception as exc:
+        logger.warning(f"Failed to retrieve relationships: {type(exc)} {exc}")
+        return []
+
+    return [document for batch in batches for document in batch]
+
+
+def _navigation_edges(relationships: list[dict], visible: set[str]) -> dict[str, list[dict]]:
+    """Relationships eligible to become NavigationProperty, keyed by near resource.
+
+    Two filters, and neither is cosmetic.
+
+    ONLY ASSERTED `maps`. A NavigationProperty is a promise to a BI tool that
+    joining these two entity sets returns rows. That is true of a person's
+    declared foreign key; it is not true of an unconfirmed proposal, and it is
+    not true of a `concept` edge, whose two columns are about the same subject
+    and may share no values at all. Emitting either would make a tool present an
+    empty result as an answer.
+
+    BOTH ENDS VISIBLE. `visible` is the set of resources this caller can
+    already see, so an edge into something they cannot read is never built
+    rather than built and filtered -- the row naming the far end's collection,
+    dataset and column is itself the disclosure. This is why the whole thing is
+    computed per caller, with the ETag consequence that follows.
+    """
+    edges: dict[str, list[dict]] = {}
+    for relationship in relationships:
+        if relationship.get("kind") != "maps":
+            continue
+        if relationship.get("origin") != "asserted":
+            continue
+        if relationship.get("status") != "active":
+            continue
+
+        near = ".".join(
+            (
+                str(relationship.get("workspace") or ""),
+                str(relationship.get("collection") or ""),
+                str(relationship.get("dataset") or ""),
+            )
+        )
+        far = ".".join(
+            (
+                str(relationship.get("references-workspace") or ""),
+                str(relationship.get("references-collection") or ""),
+                str(relationship.get("references-dataset") or ""),
+            )
+        )
+        if near not in visible or far not in visible:
+            continue
+        edges.setdefault(near, []).append({**relationship, "_far_resource": far})
+    return edges
+
+
 class _DatasetFacts(NamedTuple):
     """Everything the EDMX document needs about one dataset.
 
@@ -755,6 +847,16 @@ def get_edmx_metadata(request: Request) -> Any:
     # Everything the document still needs from Firestore, in one batched read.
     facts_by_resource = _facts_for(db, filtered_datasets)
 
+    # Declared relationships become NavigationProperty below. Built from the
+    # datasets THIS caller can see, so an edge into anything else is never
+    # constructed - which is also why the document varies by identity and the
+    # ETag is computed per caller fingerprint.
+    _visible_resources = {dataset.resource for dataset in filtered_datasets}
+    _edges_by_resource = _navigation_edges(
+        _get_relationships(db, {dataset.workspace for dataset in filtered_datasets}),
+        _visible_resources,
+    )
+
     # Build EDMX XML document
     # Namespaces
     NS_EDMX = "http://docs.oasis-open.org/odata/ns/edmx"
@@ -829,7 +931,49 @@ def get_edmx_metadata(request: Request) -> Any:
                     attrib={"Term": ORIGINAL_TYPE_TERM, "String": col.source_type},
                 )
 
+        # Declared relationships, as navigation properties. Emitted after the
+        # properties because CSDL requires that order, and only for edges whose
+        # far EntityType this document actually contains: a NavigationProperty
+        # whose Type names a type that was never emitted is not a missing link,
+        # it is an invalid document, and a strict client rejects the whole
+        # thing rather than the one element.
+        for edge in _edges_by_resource.get(dataset.resource, []):
+            far_entity_name = entity_names.get(edge["_far_resource"])
+            if far_entity_name is None:
+                continue
+            navigation = ET.SubElement(
+                entity_type,
+                "{" + NS_EDM + "}NavigationProperty",
+                attrib={
+                    "Name": str(edge.get("name")),
+                    "Type": f"OData.{far_entity_name}",
+                    # The declared cardinality: many_to_one is the FK form, so
+                    # the far end is a single entity. Anything else is a
+                    # collection - and getting this wrong is how a fan-out join
+                    # silently inflates a number.
+                    "Nullable": "true",
+                },
+            )
+            ET.SubElement(
+                navigation,
+                "{" + NS_EDM + "}ReferentialConstraint",
+                attrib={
+                    "Property": str(edge.get("column")),
+                    "ReferencedProperty": str(edge.get("references-column")),
+                },
+            )
+
         entity_types_created.add(entity_type_name)
+
+    # A NavigationProperty may only name an EntityType the document emitted.
+    # The loop above cannot know that for a far dataset it has not reached yet,
+    # so any edge pointing at a resource that turned out to have no schema - and
+    # therefore no EntityType - is removed here, once the full set is known.
+    for entity_type in schema.findall("{" + NS_EDM + "}EntityType"):
+        for navigation in list(entity_type.findall("{" + NS_EDM + "}NavigationProperty")):
+            target = navigation.attrib.get("Type", "").removeprefix("OData.")
+            if target not in entity_types_created:
+                entity_type.remove(navigation)
 
     # Create EntityContainer
     entity_container = ET.SubElement(

@@ -58,6 +58,22 @@ VIRTUAL_INFORMATION_SCHEMA_TABLES: dict[str, list[EdmProperty]] = {
         _col("last_fired_at", "TIMESTAMP"),
         _col("last_fired_status", "VARCHAR"),
     ],
+    "column_relationships": [
+        _col("constraint_catalog", "VARCHAR"),
+        _col("constraint_collection", "VARCHAR"),
+        _col("constraint_name", "VARCHAR"),
+        _col("table_name", "VARCHAR"),
+        _col("column_name", "VARCHAR"),
+        _col("referenced_table_name", "VARCHAR"),
+        _col("referenced_column_name", "VARCHAR"),
+        _col("relationship_kind", "VARCHAR"),
+        _col("cardinality", "VARCHAR"),
+        _col("origin", "VARCHAR"),
+        _col("status", "VARCHAR"),
+        _col("asserted_by", "VARCHAR"),
+        _col("asserted_at", "TIMESTAMP"),
+        _col("verified_at", "TIMESTAMP"),
+    ],
     "schemata": [
         _col("catalog_name", "VARCHAR"),
         _col("schema_name", "VARCHAR"),
@@ -71,6 +87,12 @@ VIRTUAL_INFORMATION_SCHEMA_DESCRIPTIONS: dict[str, str] = {
     "columns": "System view listing the columns of the tables and views visible in this workspace.",
     "views": "System view listing the views visible in this workspace, including their SQL definition.",
     "triggers": "System view listing the triggers defined on the tables visible in this workspace, including the view each one refreshes.",
+    "column_relationships": (
+        "System view listing the relationships declared between columns of the tables "
+        "visible in this workspace. A relationship records that two columns hold "
+        "corresponding values; nothing enforces it, and a write that breaks one "
+        "succeeds. A row appears only where both of its tables are visible."
+    ),
     "schemata": "System view listing the schemas (collections) visible in this workspace.",
 }
 
