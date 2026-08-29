@@ -142,6 +142,98 @@ def _external_catalog_stub(workstream: str, collection: str, dataset: str) -> di
         return None
     return data if data.get("external-catalog") else None
 
+def _declared_relationships(
+    workstream: str,
+    collection: str,
+    dataset: str,
+    identity: str | None,
+    access_policies_list,
+) -> list[dict]:
+    """Relationships declared ON this dataset, filtered to what the caller may see.
+
+    A relationship records that a column holds values corresponding to a column
+    of another table. NOTHING ENFORCES IT: a write that breaks it succeeds, and
+    no query plan consults it. It is here so a client can see how two tables fit
+    together.
+
+    Read straight from the dataset's own `relationships` subcollection. Unlike
+    the service-wide document's collection-group query this needs no index and
+    no filter -- the dataset is already known, which is the whole benefit of
+    storing these under the dataset they are declared on.
+
+    BOTH ENDS MUST BE READABLE. The row names the far table's collection,
+    dataset and column, so a caller who can read only this side would learn the
+    shape of data they hold no grant on. The far end is always in this same
+    workspace (a relationship cannot cross one), so the same ladder the caller's
+    own access used decides it.
+
+    Never fatal: a workspace with no relationships and an older catalog with no
+    such subcollection are the same thing to a client, and neither is a reason
+    to fail an otherwise-complete metadata document.
+    """
+    try:
+        db = _get_firestore_client(database=_firestore_database())
+        if db is None:
+            return []
+        documents = (
+            db.collection(workstream)
+            .document(collection)
+            .collection("datasets")
+            .document(dataset)
+            .collection("relationships")
+            .stream()
+        )
+        rows = [doc.to_dict() or {} for doc in documents]
+    except Exception as exc:
+        logger.warning(f"Failed to read relationships for {workstream}.{collection}.{dataset}: {exc}")
+        return []
+
+    visible = []
+    for row in rows:
+        # Only what a person asserted and that still stands. An inferred
+        # proposal or a broken relationship is not something to show as fact.
+        if row.get("kind") != "maps":
+            continue
+        if row.get("origin") != "asserted":
+            continue
+        if row.get("status") != "active":
+            continue
+
+        far_collection = row.get("references-collection")
+        far_dataset = row.get("references-dataset")
+        if not far_collection or not far_dataset:
+            continue
+        if not _can_read_relation(
+            workstream, far_collection, far_dataset, identity, access_policies_list
+        ):
+            continue
+        visible.append(row)
+    return visible
+
+
+def _can_read_relation(
+    workstream: str,
+    collection: str,
+    dataset: str,
+    identity: str | None,
+    access_policies_list,
+) -> bool:
+    """Whether the caller may read one relation, by the same ladder the
+    per-dataset metadata route uses for the dataset it was asked about."""
+    if workstream == "personal":
+        return collection == identity
+    if workstream == "public":
+        return True
+    from app.auth.permissions import read_grant_for_relation
+
+    return (
+        read_grant_for_relation(
+            access_policies_list, f"{workstream}.{collection}.{dataset}"
+        )
+        is not None
+    )
+
+
 def _default_top() -> int:
     return int(get_config("ODATA_DEFAULT_TOP", "100"))
 
@@ -1241,7 +1333,28 @@ def dataset_metadata(
     # Everything the document's content depends on is now known, so a cached
     # rendering can be served without touching the catalog at all.
     if_none_match = request.headers.get("if-none-match")
-    cache_key = (table_name, assigned_role, assigned_policy, is_virtual_info_schema)
+    # Relationships are resolved BEFORE the cache is consulted because they are
+    # part of the key. Two callers can hold the same role on THIS dataset and
+    # differ in what they may read on the far side of a relationship, and a key
+    # of (table, role, policy) alone would hand one of them the other's
+    # document -- the same shape of leak the client-side $metadata cache had.
+    # Naming the visible relationships (not the caller) keeps callers who see
+    # the same thing sharing an entry, which is most of them.
+    relationships = (
+        []
+        if is_virtual_info_schema
+        else _declared_relationships(
+            workstream, collection, dataset, identity, access_policies_list
+        )
+    )
+    relationship_key = tuple(sorted(str(row.get("name") or "") for row in relationships))
+    cache_key = (
+        table_name,
+        assigned_role,
+        assigned_policy,
+        is_virtual_info_schema,
+        relationship_key,
+    )
     cached = metadata_cache_get(cache_key)
     if cached is not None:
         cached_etag, cached_xml, cached_headers = cached
@@ -1858,6 +1971,41 @@ def dataset_metadata(
                         record,
                         f"{{{NS_EDM}}}PropertyValue",
                         attrib={"Property": "CreatedBy", "String": str(created_by)},
+                    )
+
+    # Declared relationships, as a Collection of Records -- the same shape
+    # Custom.Tags uses, and for the same reason: a client needs more than one
+    # value per entry.
+    #
+    # NOT a NavigationProperty here, unlike the service-wide document. A
+    # NavigationProperty's Type must name an EntityType the document contains,
+    # and a per-dataset document contains exactly one: this dataset. Pointing at
+    # a table that is not in the document would not be a missing link, it would
+    # be an invalid document that a strict client rejects whole.
+    if relationships:
+        relationships_annotation = ET.SubElement(
+            entity_set, f"{{{NS_EDM}}}Annotation", attrib={"Term": "Custom.Relationships"}
+        )
+        relationships_collection = ET.SubElement(
+            relationships_annotation, f"{{{NS_EDM}}}Collection"
+        )
+        for row in relationships:
+            record = ET.SubElement(relationships_collection, f"{{{NS_EDM}}}Record")
+            for property_name, value in (
+                ("Name", row.get("name")),
+                ("Column", row.get("column")),
+                (
+                    "ReferencedTable",
+                    f"{row.get('references-collection')}.{row.get('references-dataset')}",
+                ),
+                ("ReferencedColumn", row.get("references-column")),
+                ("Cardinality", row.get("cardinality")),
+            ):
+                if value:
+                    ET.SubElement(
+                        record,
+                        f"{{{NS_EDM}}}PropertyValue",
+                        attrib={"Property": property_name, "String": str(value)},
                     )
 
     # Add access annotations (role, policy) when available
