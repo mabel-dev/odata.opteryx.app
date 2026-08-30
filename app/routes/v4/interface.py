@@ -61,6 +61,8 @@ from app.odata.edm_types import ORIGINAL_TYPE_TERM
 from app.odata.edm_types import RESOURCE_TERM
 from app.odata.edm_types import edm_property
 from opteryx_catalog.catalog.dataset import _stored_type_display
+from app.odata.virtual_datasets import TASK_DEFINITION_COLUMNS
+from app.odata.virtual_datasets import TASK_DESCRIPTION
 from app.odata.virtual_datasets import VIRTUAL_INFORMATION_SCHEMA_DESCRIPTIONS
 from app.odata.virtual_datasets import VIRTUAL_INFORMATION_SCHEMA_TABLES
 from app.odata.virtual_datasets import is_virtual_information_schema
@@ -343,6 +345,47 @@ EXTERNAL_TABLE_SOURCE = "ExternalTable"
 # count, a last-modified time and possibly a sort order. Leaving it out of this
 # tuple would silently drop all three from its metadata document.
 TABLE_LIKE_SOURCES = ("Table", EXTERNAL_TABLE_SOURCE, MATERIALIZED_VIEW_SOURCE)
+
+# A task: a statement the platform runs on its own. Deliberately NOT in
+# TABLE_LIKE_SOURCES -- it is the one catalog object with no storage behind it,
+# so it has no snapshot, no row count, no sort order and no tags, and every
+# annotation derived from those must stay off its document rather than be
+# reported as zero. It is in the same `workspace.collection.<object>` namespace
+# as the rest, so this endpoint has to answer for its name; what it answers
+# with is the fixed single-row definition schema (TASK_DEFINITION_COLUMNS).
+TASK_SOURCE = "Task"
+
+
+def _task_record(workspace, collection: str, dataset: str) -> dict | None:
+    """A task's registration record, or None if this name is not a task.
+
+    Called only after `load_dataset` AND `load_view` have both missed, so a
+    table, a view and a materialized view never pay for it: the read happens
+    exactly where the alternative was a 404, and it is the read that turns that
+    404 into a real document.
+
+    Returns None for "not a task" and for an older catalog wheel with no
+    `get_task()` -- both mean the same thing to the caller (fall through to the
+    404 it was already going to raise), and neither is worth a log line. Any
+    other failure is logged: a task that exists but cannot be read is a
+    different problem from one that does not exist, and silently reporting the
+    second for the first is what makes a catalog bug look like a typo.
+    """
+    getter = getattr(workspace, "get_task", None)
+    if getter is None:
+        return None
+    try:
+        return getter(f"{collection}.{dataset}")
+    except Exception as exc:  # noqa: BLE001 - catalog boundary
+        if type(exc).__name__ != "TaskNotFound":
+            logger.warning(
+                "task metadata unavailable for %s.%s: %s: %s",
+                collection,
+                dataset,
+                type(exc).__name__,
+                exc,
+            )
+        return None
 
 
 def _as_tag_int(value) -> int | None:
@@ -1467,6 +1510,10 @@ def dataset_metadata(
     # that never binds it produced a NameError which silently dropped every
     # annotation after that point, sort order included.
     ds = None
+    # A task's registration record, for the one branch that has one. Initialised
+    # beside `ds` and for exactly the same reason: the annotation block below
+    # reads it, and a branch that never bound it would raise NameError there.
+    task = None
     # Snapshot tags held by this dataset, newest catalog wheels only. Empty for
     # anything that cannot hold one (a view, a virtual table, an external
     # projection) as well as for a table that simply has none -- the
@@ -1587,8 +1634,9 @@ def dataset_metadata(
                 gcs_bucket=_bucket_name(),
             )
 
-            # Try to load as a dataset first, then as a view
+            # Try to load as a dataset first, then as a view, then as a task.
             ds = None
+            task = None
             source_type = "Table"
             try:
                 ds = workspace.load_dataset(f"{collection}.{dataset}")
@@ -1601,8 +1649,30 @@ def dataset_metadata(
                     ds = workspace.load_view(f"{collection}.{dataset}")
                     source_type = "View"
                 except Exception as exc:
-                    logger.error(f"Failed to load dataset/view from catalog for {table_name}: {exc}")
-                    raise HTTPException(status_code=404, detail="dataset not found in catalog") from exc
+                    # Last rung, and the only one that costs an extra read --
+                    # paid here, where the alternative was to 404. A task is a
+                    # name in the same namespace as the two above, so this
+                    # endpoint owes it an answer; it just has no storage, and
+                    # therefore no `ds`.
+                    task = _task_record(workspace, collection, dataset)
+                    if task is None:
+                        logger.error(
+                            f"Failed to load dataset/view/task from catalog for {table_name}: {exc}"
+                        )
+                        raise HTTPException(
+                            status_code=404, detail="dataset not found in catalog"
+                        ) from exc
+                    source_type = TASK_SOURCE
+                    # Fixed, and known without a schema document: a task reads
+                    # as the single row of its own definition.
+                    for column in TASK_DEFINITION_COLUMNS:
+                        col_names.append(column.name)
+                        col_types.append(column.type)
+                        col_metadata[column.name] = {
+                            "type": column.type,
+                            "facets": column.facets,
+                            "source_type": column.source_type,
+                        }
 
             # Set source header for clients
             response.headers["X-Dataset-Source"] = source_type
@@ -1722,7 +1792,14 @@ def dataset_metadata(
                 # structurally valid (an EntitySet's EntityType needs a key).
                 # Custom.MaterializedView.Materialized, emitted below, is what tells
                 # a client those columns are a placeholder and not the real schema.
-                if source_type in (MATERIALIZED_VIEW_SOURCE, "View"):
+                if source_type == TASK_SOURCE:
+                    # Expected, and not a placeholder: a task has no schema
+                    # document because it has no rows, and its columns were
+                    # filled in from TASK_DEFINITION_COLUMNS when it was
+                    # identified above. Nothing to do, and emphatically not a
+                    # 404 -- the object exists and has just been read.
+                    pass
+                elif source_type in (MATERIALIZED_VIEW_SOURCE, "View"):
                     # Single string key placeholder
                     col_names = ["id"]
                     col_metadata = {"id": {"type": "Edm.String", "nullable": True}}
@@ -2143,6 +2220,21 @@ def dataset_metadata(
             attrib={"Term": "Custom.Policy", "String": assigned_policy},
         )
 
+    # A task's description is its own if it was given one at registration, and
+    # otherwise the fixed sentence saying what a task is -- the same treatment
+    # virtual datasets get below, for the same reason: there is no describe()
+    # to fall back on, and an object with no description at all reads in the UI
+    # as an object nobody can explain.
+    if source_type == TASK_SOURCE:
+        ET.SubElement(
+            entity_set,
+            f"{{{NS_EDM}}}Annotation",
+            attrib={
+                "Term": "Custom.Description",
+                "String": str((task or {}).get("description") or TASK_DESCRIPTION),
+            },
+        )
+
     # Virtual datasets have no catalog-backed metadata, so give them a fixed description
     # rather than leaving Custom.Description absent.
     if source_type == "Virtual":
@@ -2291,6 +2383,76 @@ def dataset_metadata(
                 )
         except Exception:
             pass
+
+    # A task's registration record. Unlike the materialized-view block below,
+    # nothing here needs a second catalog call: `_task_record` already read the
+    # whole document (statement included) to decide this WAS a task, and `task`
+    # is that record. A task with no rows and no schema is almost entirely
+    # description, so these annotations are the document rather than a garnish
+    # on it.
+    if source_type == TASK_SOURCE and task is not None:
+        # Custom.Definition is the term views and materialized views already use
+        # for their defining SQL; a task's statement is the same kind of thing
+        # and gets the same term, so a client that can already show one can show
+        # this without learning a new name.
+        if task.get("sql"):
+            ET.SubElement(
+                entity_set,
+                f"{{{NS_EDM}}}Annotation",
+                attrib={"Term": "Custom.Definition", "String": str(task["sql"])},
+            )
+        # `runs-as` is the pinned identity the task executes as -- whose grants
+        # decide whether it can still do its job. A different question from who
+        # created it, and often a different person.
+        for term, key in (
+            ("Custom.Task.RunsAs", "runs-as"),
+            ("Custom.Task.CreatedBy", "created-by"),
+            ("Custom.Task.LastUpdatedBy", "last-updated-by"),
+            ("Custom.Task.LastFiredStatus", "last-fired-status"),
+            ("Custom.Task.SuspendedBy", "suspended-by"),
+            ("Custom.Task.StatementId", "statement-id"),
+        ):
+            value = task.get(key)
+            if value:
+                ET.SubElement(
+                    entity_set,
+                    f"{{{NS_EDM}}}Annotation",
+                    attrib={"Term": term, "String": str(value)},
+                )
+        for term, key in (
+            ("Custom.Task.CreatedAt", "created-at-ms"),
+            ("Custom.Task.LastUpdatedAt", "last-updated-at-ms"),
+            ("Custom.Task.LastFiredAt", "last-fired-at-ms"),
+            ("Custom.Task.SuspendedAt", "suspended-at-ms"),
+            # The version the last SUCCESSFUL run consumed to. Stamped only on
+            # success, so a gap behind a failed run stays visible.
+            ("Custom.Task.LastWindowTo", "last-window-to"),
+        ):
+            value = task.get(key)
+            if value is not None:
+                try:
+                    ET.SubElement(
+                        entity_set,
+                        f"{{{NS_EDM}}}Annotation",
+                        attrib={"Term": term, "Int": str(int(value))},
+                    )
+                except (TypeError, ValueError):
+                    pass
+        # Emitted unconditionally, unlike everything above, so that `false`
+        # means "running" rather than "this service is too old to say". NOTE:
+        # nothing currently WRITES `suspended-at-ms` for a task -- the catalog
+        # has no suspend_task(), and its only suspend setter is
+        # set_materialized_view_suspended -- so this reads false for every task
+        # until that lands. It is emitted now so the client contract does not
+        # have to change when it does.
+        ET.SubElement(
+            entity_set,
+            f"{{{NS_EDM}}}Annotation",
+            attrib={
+                "Term": "Custom.Task.Suspended",
+                "Bool": str(task.get("suspended-at-ms") is not None).lower(),
+            },
+        )
 
     # A materialized view additionally has a registration record: the SQL it is
     # refreshed from, the tables it reads, and its last refresh outcome. Best
