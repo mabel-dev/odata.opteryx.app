@@ -194,7 +194,6 @@ def test_the_registration_record_is_annotated(catalog):
     # The statement gets Custom.Definition, the term views and materialized
     # views already use, so a client that renders one renders this for free.
     assert annotations["Custom.Definition"] == TASK["sql"]
-    assert annotations["Custom.Task.RunsAs"] == "svc-compaction@opteryx"
     assert annotations["Custom.Task.CreatedBy"] == "justin"
     assert annotations["Custom.Task.LastUpdatedBy"] == "alex"
     assert annotations["Custom.Task.LastFiredStatus"] == "ok"
@@ -202,6 +201,28 @@ def test_the_registration_record_is_annotated(catalog):
     assert annotations["Custom.Task.LastFiredAt"] == str(TASK["last-fired-at-ms"])
     assert annotations["Custom.Task.LastWindowTo"] == "41"
     assert annotations["Custom.SourceType"] == "Task"
+
+
+def test_a_task_never_reports_a_run_as_identity(catalog):
+    """A task has no act-as identity, and must not appear to.
+
+    Anyone may trigger a task; whether it runs follows the permissions of
+    whoever triggered it. An act-as identity belongs to a TRIGGER -- the thing
+    that fires work when a dataset is updated, where that work needs rights the
+    updater may not have (an update to `sales` firing work against
+    `inventory`). The catalog still stores `runs-as` on the task document, and
+    `get_task` still returns it, so this is not absent for want of data: it is
+    withheld. Publishing it lets a client present it as "the identity this task
+    runs as", which lends the task's authority to anyone who can reach it --
+    the exact failure the task/trigger split exists to prevent.
+    """
+    catalog(task=TASK)
+    assert TASK["runs-as"], "the fixture must still supply one, or this proves nothing"
+
+    content, _ = _render()
+    assert "Custom.Task.RunsAs" not in _annotations(content)
+    assert "runs_as" not in _properties(content)
+    assert TASK["runs-as"] not in content
 
 
 def test_the_tasks_own_description_wins_over_the_generic_one(catalog):

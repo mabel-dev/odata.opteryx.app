@@ -73,7 +73,8 @@ def test_a_task_gets_an_entity_type(monkeypatch):
 
 def test_the_entity_type_is_the_task_definition(monkeypatch):
     """One row, described by the fields the catalog stores for a task -- its
-    statement, the identity it runs as, and how the last firing went."""
+    statement, who created it, and how the last firing went. NOT the identity it
+    runs as: a task has none, that belongs to the trigger that fires it."""
     root, _ = _render(monkeypatch, [_task()], GRANT)
 
     entity = next(
@@ -86,8 +87,11 @@ def test_the_entity_type_is_the_task_definition(monkeypatch):
     assert properties == [column.name for column in TASK_DEFINITION_COLUMNS]
     # The fields that make it a task rather than a table, spot-checked by name so
     # a rename of any of them fails here rather than silently in the Studio.
-    for column in ("statement", "runs_as", "last_fired_status", "last_window_to"):
+    for column in ("statement", "last_fired_status", "last_window_to"):
         assert column in properties
+    # A task has no act-as identity -- that belongs to the trigger that fires
+    # it, never to the task. See test_dataset_metadata_task.py.
+    assert "runs_as" not in properties
 
 
 def test_a_task_is_annotated_as_a_task(monkeypatch):

@@ -101,6 +101,15 @@ VIRTUAL_INFORMATION_SCHEMA_TABLES: dict[str, list[EdmProperty]] = {
 #
 # Column order is the document order of the definition: what it is, then what it
 # runs, then who owns it, then how the last run went.
+#
+# There is deliberately NO `runs_as`. A task is a unit of work that anyone may
+# trigger, and whether it runs follows the permissions of whoever triggered it.
+# An act-as identity belongs to a TRIGGER -- the thing that fires work when a
+# dataset is updated, where that work needs rights the updater may not have (an
+# update to `sales` firing work against `inventory`). Reporting one on the task
+# lends the task's authority to anyone who can reach it, which is the failure
+# the task/trigger split exists to prevent. The catalog still stores `runs-as`
+# on the task document; it is deliberately not read here.
 TASK_DEFINITION_COLUMNS: list[EdmProperty] = [
     _col("task_catalog", "VARCHAR"),
     _col("task_collection", "VARCHAR"),
@@ -111,9 +120,6 @@ TASK_DEFINITION_COLUMNS: list[EdmProperty] = [
     # materialized view's definition is stored.
     _col("statement", "VARCHAR"),
     _col("statement_id", "VARCHAR"),
-    # The pinned identity the task executes as, which is a different question
-    # from who created it and often a different person.
-    _col("runs_as", "VARCHAR"),
     _col("created_by", "VARCHAR"),
     _col("created_at", "TIMESTAMP"),
     # Who last changed the STATEMENT. Sourced from the statement document, not

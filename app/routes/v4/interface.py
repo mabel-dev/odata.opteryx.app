@@ -2401,11 +2401,15 @@ def dataset_metadata(
                 f"{{{NS_EDM}}}Annotation",
                 attrib={"Term": "Custom.Definition", "String": str(task["sql"])},
             )
-        # `runs-as` is the pinned identity the task executes as -- whose grants
-        # decide whether it can still do its job. A different question from who
-        # created it, and often a different person.
+        # `runs-as` is deliberately NOT emitted, though the catalog stores it on
+        # the task document. A task is a unit of work anyone may trigger, and
+        # whether it runs follows the permissions of the caller who triggered
+        # it. An act-as identity is a property of a TRIGGER -- the thing that
+        # fires work when a dataset is updated, where that work needs rights the
+        # updater may not have. Publishing it here invites a client to present
+        # it as "the identity this task runs as", which is precisely the
+        # privilege lending the task/trigger split exists to prevent.
         for term, key in (
-            ("Custom.Task.RunsAs", "runs-as"),
             ("Custom.Task.CreatedBy", "created-by"),
             ("Custom.Task.LastUpdatedBy", "last-updated-by"),
             ("Custom.Task.LastFiredStatus", "last-fired-status"),
