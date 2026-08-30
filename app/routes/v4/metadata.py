@@ -24,6 +24,7 @@ from app.core import _get_firestore_client
 from opteryx_shared_services.logging import get_logger
 from app.odata.edm_types import ORIGINAL_TYPE_TERM, RESOURCE_TERM, EdmProperty, edm_property
 from app.odata.virtual_datasets import (
+    TASK_DEFINITION_COLUMNS,
     VIRTUAL_INFORMATION_SCHEMA_TABLES,
     is_virtual_information_schema,
 )
@@ -81,12 +82,25 @@ EXTERNAL_TABLE_SOURCE = "ExternalTable"
 STUB_MARKER = "external-catalog"
 
 
+# A task -- a statement the platform runs on its own -- lives at
+# `{collection}/tasks/{name}`, a sibling subcollection of `datasets` and `views`,
+# and shares the one `workspace.collection.<object>` namespace with them. It holds
+# no rows, so it is described here as the single-row table of its own definition
+# (TASK_DEFINITION_COLUMNS): its EntityType exists because the service document's
+# twin listing emits it as an EntitySet, and an EntitySet whose EntityType is
+# absent from this document is a dangling reference to any client that reads both.
+TASK_SOURCE = "Task"
+TASKS_SUBCOLLECTION = "tasks"
+
+
 def _source_type_from_doc(data, collection: str) -> str:
     """Source label for a catalog document: View, MaterializedView or Table.
 
     `collection` is the subcollection the document came from ("datasets" or
     "views"); materialized views live in "datasets" and are told apart from
-    plain datasets by their `dataset-type` field.
+    plain datasets by their `dataset-type` field. Tasks are not routed through
+    here -- they come from their own listing, which knows what they are without
+    having to read the document to find out.
     """
     if collection == "views":
         return "View"
@@ -338,6 +352,93 @@ def _get_personal_datasets(db, identity: str) -> list[DatasetInfo]:
     return results
 
 
+def _get_tasks(db, workspace_ids: set[str], limit: int = 1000) -> list[DatasetInfo]:
+    """Retrieve the tasks in the given workspaces, as single-row datasets.
+
+    The twin of `service_document._get_tasks`, and duplicated for the same
+    reason the rest of this listing is: the two documents are built from the
+    same catalog but describe it differently, and this one carries no sort
+    orders and no policy annotations.
+
+    Not routed through `_query_collection_group`, because a task document does
+    not carry the `workspace` and `collection` fields a dataset or view document
+    does (OpteryxCatalog.create_task writes neither). Both are read off the
+    document path instead, and the workspace restriction applied here rather
+    than pushed down -- a `where("workspace", ...)` filter matches none of these
+    documents, so reusing that query would have listed no tasks at all while
+    looking like a workspace simply has none.
+
+    A task has no schema document to fetch, so `schema_id`/`inline_schema`/
+    `doc_ref` are all left unset: `_facts_for` answers for it from the fixed
+    TASK_DEFINITION_COLUMNS without a read.
+    """
+    if not workspace_ids:
+        return []
+
+    results: list[DatasetInfo] = []
+
+    try:
+        for doc in db.collection_group(TASKS_SUBCOLLECTION).limit(limit).stream():
+            try:
+                # `.parent` is the "tasks" subcollection, `.parent.parent` the
+                # collection document holding it, `.parent.parent.parent` the
+                # workspace -- the two names the document itself omits.
+                collection_ref = doc.reference.parent.parent
+                if collection_ref is None:
+                    continue
+                collection_name = collection_ref.id
+                # "$dropped"/"$properties" are collection documents too, and a
+                # bare collection-group query reaches whatever is filed beneath
+                # them. Same guard the dataset listing uses.
+                if collection_name.startswith("$"):
+                    continue
+
+                workspace = collection_ref.parent.id
+                if workspace not in workspace_ids:
+                    continue
+
+                data = doc.to_dict() or {}
+                name = data.get("name") or doc.id
+
+                results.append(
+                    DatasetInfo(
+                        resource=_normalize_resource_name(
+                            f"{workspace}.{collection_name}.{name}"
+                        ),
+                        workspace=workspace,
+                        collection=collection_name,
+                        name=name,
+                        source=TASK_SOURCE,
+                        # `created-at-ms` is when the task was registered, not
+                        # when its definition last changed; the statement it runs
+                        # is versioned in a subcollection this listing does not
+                        # read. Left unset rather than reported approximately.
+                        last_modified_ms=None,
+                    )
+                )
+            except Exception:
+                continue
+    except FailedPrecondition as exc:
+        # The missing COLLECTION_GROUP_ASC index on `tasks`, almost always.
+        # Reported at ERROR for the reason `_get_relationships` reports its own:
+        # a deployment gap that never heals, whose only symptom is that a whole
+        # class of object is quietly absent from a document that looks complete.
+        logger.error(
+            "Tasks are missing from $metadata: the Firestore collection-group "
+            "index on `tasks` does not exist. Tasks will not be described until "
+            "it is created. %s",
+            exc,
+        )
+        return []
+    except Exception as exc:
+        # Non-fatal, unlike the dataset listing below: an EDMX document missing
+        # its tasks is incomplete, one that 504s describes nothing at all.
+        logger.warning(f"Failed to retrieve tasks: {type(exc)} {exc}")
+        return []
+
+    return results
+
+
 def _get_workspace_datasets(db, workspace_ids: set[str]) -> list[DatasetInfo]:
     """Retrieve all datasets and views from the given workspace IDs.
 
@@ -567,6 +668,16 @@ def _facts_for(db, datasets: list[DatasetInfo]) -> dict[str, _DatasetFacts]:
     pending: list[tuple[DatasetInfo, str]] = []  # datasets awaiting a batch read
 
     for dataset in datasets:
+        if dataset.source == TASK_SOURCE:
+            # No schema document backs a task -- it holds no rows to have one.
+            # It reads as the single row of its own definition, whose columns
+            # are fixed, so this costs no Firestore read either.
+            facts[dataset.resource] = _DatasetFacts(
+                columns=TASK_DEFINITION_COLUMNS,
+                last_modified_ms=None,
+            )
+            continue
+
         if is_virtual_information_schema(dataset.collection, dataset.name):
             # Not backed by a catalog entry: fixed schema, and nothing to be
             # last-modified.
@@ -744,7 +855,9 @@ def get_edmx_metadata(request: Request) -> Any:
     Custom annotations:
     - Custom.SourceType: "Table", "View", "MaterializedView" (a dataset the catalog
       marks with dataset-type "materialized_view" -- physically a table, refreshed
-      from a query), or "Virtual" (synthetic information_schema datasets)
+      from a query), "ExternalTable", "Task" (a statement the platform runs on its
+      own; it holds no rows, so it is described as the single-row table of its own
+      definition) or "Virtual" (synthetic information_schema datasets)
     - Custom.LastModified: ISO 8601 timestamp of last modification
     - Per-dataset column statistics available at /{ws}/{coll}/{ds}/$metadata
 
@@ -791,6 +904,7 @@ def get_edmx_metadata(request: Request) -> Any:
         # app.auth.deps.require_authentication) only ever see the
         # workstream.collection pairs reachable without credentials.
         all_datasets = _get_workspace_datasets(db, {ANONYMOUS_EXEMPT_WORKSTREAM})
+        all_datasets.extend(_get_tasks(db, {ANONYMOUS_EXEMPT_WORKSTREAM}))
         filtered_datasets = [
             dataset
             for dataset in all_datasets
@@ -813,12 +927,20 @@ def get_edmx_metadata(request: Request) -> Any:
 
         # Collect all datasets. The personal collection and the workspace
         # collection groups are unrelated Firestore queries, so overlap them.
-        with ThreadPoolExecutor(max_workers=2) as discovery:
+        with ThreadPoolExecutor(max_workers=3) as discovery:
             personal = discovery.submit(_get_personal_datasets, db, identity)
             workspace = discovery.submit(_get_workspace_datasets, db, workspace_ids)
+            # A third independent Firestore query, overlapped with the other
+            # two. `personal` joins the fetch set because it is not in
+            # `workspace_ids` (built from policy-bearing workstreams) and the
+            # caller's own personal tasks belong in the document; every other
+            # identity's are dropped by the authorization loop below, by the
+            # same rule that drops their datasets.
+            tasks = discovery.submit(_get_tasks, db, workspace_ids | {"personal"})
             all_datasets: list[DatasetInfo] = list(personal.result())
             # Raises through, as it did serially, when Firestore is unreachable.
             all_datasets.extend(workspace.result())
+            all_datasets.extend(tasks.result())
 
         # Filter datasets by read permission
         filtered_datasets: list[DatasetInfo] = []

@@ -6,6 +6,7 @@ from fastapi import HTTPException
 from fastapi import Request
 from fastapi import Response
 from fastapi import status
+from google.api_core.exceptions import FailedPrecondition
 from google.cloud.firestore_v1.base_query import FieldFilter
 from opteryx_shared_services.logging import get_logger
 
@@ -47,12 +48,29 @@ EXTERNAL_TABLE_SOURCE = "ExternalTable"
 STUB_MARKER = "external-catalog"
 
 
+# A task -- a statement the platform runs on its own -- lives at
+# `{collection}/tasks/{name}`, a sibling subcollection of `datasets` and `views`.
+# It shares the one `workspace.collection.<object>` namespace with them, so it is
+# listed beside them rather than in a section of its own: a name in that namespace
+# identifies exactly one object, and a task that is invisible here still takes its
+# name -- CREATE TABLE on it fails with "already exists as a task" for something
+# the user can find nowhere in the UI.
+#
+# A task holds no rows, so it is listed as the single-row table of its own
+# definition (app.odata.virtual_datasets.TASK_DEFINITION_COLUMNS) -- a real
+# EntitySet with a real url, not an entry a client has to know to skip.
+TASK_SOURCE = "Task"
+TASKS_SUBCOLLECTION = "tasks"
+
+
 def _source_type_from_doc(data, collection: str) -> str:
     """Source label for a catalog document: View, MaterializedView or Table.
 
     `collection` is the subcollection the document came from ("datasets" or
     "views"); materialized views live in "datasets" and are told apart from
-    plain datasets by their `dataset-type` field.
+    plain datasets by their `dataset-type` field. Tasks are not routed through
+    here -- they come from their own listing, which knows what they are without
+    having to read the document to find out.
     """
     if collection == "views":
         return "View"
@@ -344,6 +362,105 @@ def _get_personal_datasets(db, identity: str) -> list[DatasetInfo]:
     return results
 
 
+def _get_tasks(db, workspace_ids: set[str], limit: int = 1000) -> list[DatasetInfo]:
+    """Retrieve the tasks in the given workspaces, as single-row datasets.
+
+    Deliberately NOT routed through `_query_collection_group`, because a task
+    document is not shaped like a dataset or view document: `create_task` writes
+    no `workspace` and no `collection` field (see OpteryxCatalog.create_task).
+    Both are therefore read off the document's own path, and the workspace
+    restriction is applied here in Python rather than pushed down as a
+    `where("workspace", ...)` filter -- against these documents that filter
+    matches nothing at all, so reusing that query would have listed no tasks,
+    silently and identically to there being none.
+
+    One collection-group query covers every workspace, as opposed to one
+    subcollection read per workspace-and-collection: the collections a workspace
+    holds are not known here without listing them first, which is the round trip
+    this avoids.
+
+    Soft-deleted workspaces are dropped first, for the same reason
+    `_get_workspace_datasets` drops them: a dropped workspace's documents can
+    still be present momentarily and would otherwise come back looking live.
+    """
+    if not workspace_ids:
+        return []
+
+    results: list[DatasetInfo] = []
+
+    try:
+        workspace_ids = _drop_soft_deleted_workspaces(db, workspace_ids)
+        if not workspace_ids:
+            return []
+
+        for doc in db.collection_group(TASKS_SUBCOLLECTION).limit(limit).stream():
+            try:
+                # `.parent` is the "tasks" subcollection, `.parent.parent` the
+                # collection document that holds it, and `.parent.parent.parent`
+                # the workspace collection -- so the two names a task document
+                # does not carry are both one hop away in its path.
+                collection_ref = doc.reference.parent.parent
+                if collection_ref is None:
+                    continue
+                collection_name = collection_ref.id
+                # Same $-prefix guard the dataset listing uses: "$dropped" and
+                # "$properties" are collection documents too, and a bare
+                # collection-group query reaches anything filed beneath them.
+                if collection_name.startswith("$"):
+                    continue
+
+                workspace = collection_ref.parent.id
+                if workspace not in workspace_ids:
+                    continue
+
+                data = doc.to_dict() or {}
+                name = data.get("name") or doc.id
+
+                resource_name = _normalize_resource_name(
+                    f"{workspace}.{collection_name}.{name}"
+                )
+
+                results.append(
+                    DatasetInfo(
+                        resource=resource_name,
+                        workspace=workspace,
+                        collection=collection_name,
+                        name=name,
+                        source=TASK_SOURCE,
+                        role=None,
+                        policy=None,
+                        # A task has no storage behind it, so there is no
+                        # physical sort order to report -- not "unordered by
+                        # accident", but nothing that could carry an order.
+                        ordered=False,
+                    )
+                )
+            except Exception:
+                continue
+    except FailedPrecondition as exc:
+        # Almost certainly the missing COLLECTION_GROUP_ASC index on `tasks`.
+        # Logged at ERROR rather than swallowed for the reason the relationships
+        # listing does the same (see metadata._get_relationships): it is a
+        # deployment gap that will not heal, and its only symptom is tasks never
+        # appearing in the object tree -- which is indistinguishable from a
+        # workspace that has no tasks.
+        logger.error(
+            "Tasks are missing from the service document: the Firestore "
+            "collection-group index on `tasks` does not exist. Tasks will not be "
+            "listed until it is created. %s",
+            exc,
+        )
+        return []
+    except Exception as exc:
+        # Non-fatal, unlike the dataset listing: a service document without
+        # tasks is incomplete, but a service document that 504s lists nothing
+        # at all.
+        logger.warning(f"Failed to retrieve tasks: {type(exc)} {exc}")
+        return []
+
+    return results
+
+
 def _drop_soft_deleted_workspaces(db, workspace_ids: set[str]) -> set[str]:
     """Filter out workspaces that no longer really exist, so their datasets
     never reach the collection-group query below in the first place.
@@ -466,8 +583,12 @@ def get_service_document(
         * url: relative URL for querying (workspace/collection/dataset)
         * source: "Table", "View", "MaterializedView" (a dataset the catalog marks
           with dataset-type "materialized_view" -- physically a table, refreshed
-          from a query), or "Virtual" (synthetic, e.g. information_schema.tables)
-          indicating dataset type
+          from a query), "ExternalTable" (a projection of a workspace's own
+          catalog), "Task" (a statement the platform runs on its own, listed here
+          because it shares the workspace.collection.<object> namespace with the
+          rest, and readable as the single row of its own definition) or
+          "Virtual" (synthetic, e.g. information_schema.tables) indicating
+          dataset type
         * role: user's permission level (reader, writer, admin, owner)
         * policy: access-control policy that grants permission
         * ordered: whether the underlying storage has a configured physical sort order
@@ -507,6 +628,7 @@ def get_service_document(
         # app.auth.deps.require_authentication) only ever see the
         # workstream.collection pairs reachable without credentials.
         all_datasets = _get_workspace_datasets(db, {ANONYMOUS_EXEMPT_WORKSTREAM})
+        all_datasets.extend(_get_tasks(db, {ANONYMOUS_EXEMPT_WORKSTREAM}))
         filtered_datasets = []
         for dataset in all_datasets:
             if (dataset.workspace, dataset.collection) in ANONYMOUS_EXEMPT_PAIRS:
@@ -540,6 +662,14 @@ def get_service_document(
         all_datasets: list[DatasetInfo] = []
         all_datasets.extend(_get_personal_datasets(db, identity))
         all_datasets.extend(_get_workspace_datasets(db, workspace_ids))
+        # Tasks come from their own collection group rather than from either of
+        # the two above, and are authorized by the same loop below -- a task the
+        # caller has no read grant on is dropped exactly as a table would be.
+        # `personal` is added to the fetch set (it is not in `workspace_ids`,
+        # which is built from policy-bearing workstreams) so the caller's own
+        # personal tasks are discovered; every other identity's are dropped
+        # below, by the same rule that drops their datasets.
+        all_datasets.extend(_get_tasks(db, workspace_ids | {"personal"}))
 
         # Filter datasets by read permission
         filtered_datasets: list[DatasetInfo] = []
@@ -549,7 +679,14 @@ def get_service_document(
             if dataset.resource == f"personal.{identity}" or dataset.resource.startswith(
                 f"personal.{identity}."
             ):
-                # Role and policy should already be set for personal datasets
+                # Role and policy are already set for personal datasets and views,
+                # which `_get_personal_datasets` stamps as it reads them. A personal
+                # TASK arrives from the tasks collection group instead, which is
+                # identity-agnostic and so stamps neither -- it is the caller's own,
+                # established by the branch condition, so it earns the same pair here.
+                if dataset.role is None:
+                    dataset.role = "owner"
+                    dataset.policy = "always-allow-personal"
                 filtered_datasets.append(dataset)
                 continue
 

@@ -38,6 +38,9 @@ _STUBBED_NAMES = [
     "opteryx.planner",
     "opteryx.planner.logical_planner",
     "opteryx.utils",
+    "opteryx_access",
+    "opteryx_access.adapters",
+    "opteryx_access.adapters.firestore",
     "opteryx_catalog",
     "opteryx_catalog.catalog",
     "opteryx_catalog.catalog.compaction",
@@ -64,8 +67,24 @@ def _build_stubs():
     stubs["opteryx"] = opteryx_mod
 
     access_mod = _package("opteryx_access")
-    access_mod.capability = lambda: object()
+    # Takes the policy store app.routes.v4.interface builds and hands it: a bare
+    # `capability()` can only answer about the asking session, so the real call
+    # is `capability(store)`. Accepts anything -- these stubs exist to load the
+    # module without an engine, and there is nothing here for a capability to
+    # decide about.
+    access_mod.capability = lambda *args, **kwargs: object()
     stubs["opteryx_access"] = access_mod
+
+    stubs["opteryx_access.adapters"] = _package("opteryx_access.adapters")
+
+    # The Firestore-backed policy store. Constructed at import by
+    # app.routes.v4.interface, which passes a `db_factory` and nothing else;
+    # never consulted under the stubs, since no query runs.
+    access_firestore = types.ModuleType("opteryx_access.adapters.firestore")
+    access_firestore.FirestorePolicyStore = type(
+        "FirestorePolicyStore", (), {"__init__": lambda self, *args, **kwargs: None}
+    )
+    stubs["opteryx_access.adapters.firestore"] = access_firestore
 
     connectors = types.ModuleType("opteryx.connectors")
     connectors.OpteryxConnector = type("OpteryxConnector", (), {})
