@@ -70,6 +70,12 @@ VIRTUAL_INFORMATION_SCHEMA_TABLES: dict[str, list[EdmProperty]] = {
         _col("cardinality", "VARCHAR"),
         _col("origin", "VARCHAR"),
         _col("status", "VARCHAR"),
+        # Inferred rows only. This list is a hand-maintained mirror of the
+        # engine's projection, in another repository, with nothing comparing
+        # the two - so a column added there has to be added here or the entity
+        # set silently under-reports what SELECT * returns.
+        _col("confidence", "FLOAT64"),
+        _col("evidence", "VARCHAR"),
         _col("asserted_by", "VARCHAR"),
         _col("asserted_at", "TIMESTAMP"),
         _col("verified_at", "TIMESTAMP"),
@@ -91,7 +97,10 @@ VIRTUAL_INFORMATION_SCHEMA_DESCRIPTIONS: dict[str, str] = {
         "System view listing the relationships declared between columns of the tables "
         "visible in this workspace. A relationship records that two columns hold "
         "corresponding values; nothing enforces it, and a write that breaks one "
-        "succeeds. A row appears only where both of its tables are visible."
+        "succeeds. A row appears only where both of its tables are visible. "
+        "Rows with origin='inferred' and status='unverified' are unconfirmed "
+        "proposals carrying the evidence they were proposed on; they are never "
+        "emitted as navigable relationships."
     ),
     "schemata": "System view listing the schemas (collections) visible in this workspace.",
 }

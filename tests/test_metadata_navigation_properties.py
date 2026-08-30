@@ -229,6 +229,8 @@ def test_column_relationships_is_a_virtual_information_schema_table():
         "cardinality",
         "origin",
         "status",
+        "confidence",
+        "evidence",
         "asserted_by",
         "asserted_at",
         "verified_at",
