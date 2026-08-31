@@ -9,7 +9,7 @@ description = "Opteryx OData Service"
 requires-python = '>=3.14'
 dependencies = [
     "Brotli==1.2.0",
-    "cryptography==50.0.0",
+    "cryptography==50.0.1",
     "fastapi==0.141.1",
     # config, logging, preflight and audit.
     "opteryx-shared-services[web,storage,secrets]>=0.2.2",
@@ -18,9 +18,9 @@ dependencies = [
     "google-cloud-storage==3.13.1",
     "opteryx-catalog[kms]>=0.4.125",
     "opteryx-shared-services[web,storage,secrets]>=0.2.2",
-    "opteryx-core>=0.9.88",
-    "opteryx-access>=0.2.7",
-    "opteryx-iceberg>=0.1.8",
+    "opteryx-core>=0.9.90",
+    "opteryx-access>=0.2.9",
+    "opteryx-iceberg>=0.1.9",
     "python-jose[cryptography]==3.5.0",
     "python-multipart==0.0.32",
     "requests==2.34.2",
@@ -33,7 +33,7 @@ dependencies = [
     # %28default%29 and every gRPC read fails with INVALID_ARGUMENT
     # "Invalid database id %28default%29". Named databases are unaffected.
     # Remove the cap once upstream ships a fixed release.
-    "google-api-core<2.35.0",
+    "google-api-core<2.34.0",
 ]
 
 [project.optional-dependencies]
