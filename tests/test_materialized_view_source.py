@@ -366,6 +366,49 @@ def test_materialized_view_exposes_refresh_annotations(monkeypatch):
     assert "Custom.MaterializedView.LastRefreshed" in content
     assert 'Term="Custom.MaterializedView.LastRefreshStatus" String="success"' in content
     assert 'Term="Custom.MaterializedView.Materialized" Bool="true"' in content
+    # A running view says so explicitly rather than by omission -- see
+    # test_a_suspended_materialized_view_says_so.
+    assert 'Term="Custom.MaterializedView.Suspended" Bool="false"' in content
+    assert "Custom.MaterializedView.SuspendedAt" not in content
+    assert "Custom.MaterializedView.SuspendedBy" not in content
+
+
+class FakeSuspendedMVCatalog(FakeMVCatalog):
+    def get_materialized_view(self, identifier):
+        return {
+            "sql": "SELECT id FROM public.examples.base",
+            "source-tables": ["examples.base"],
+            # The last real refresh SUCCEEDED and stays reported as such: a
+            # suspension does not overwrite the outcome of the last refresh that
+            # actually ran. Which is exactly why "paused" needs its own
+            # annotation -- without one this view reads as entirely healthy.
+            "last-refreshed-at-ms": 1700000000000,
+            "last-refresh-status": "success",
+            "suspended-at-ms": 1787262500000,
+            "suspended-by": "justin",
+        }
+
+
+def test_a_suspended_materialized_view_says_so(monkeypatch):
+    """ALTER MATERIALIZED VIEW ... SUSPEND stops refreshes without dropping the
+    triggers, so "deliberately off" and "quietly broken" stop looking alike --
+    but only if something reports it. Nothing did: no information_schema
+    projection carries it (an MV lists there as a plain BASE TABLE), so this
+    document is where a client learns it."""
+    monkeypatch.setattr(interface, "OpteryxCatalog", FakeSuspendedMVCatalog)
+    req = DummyRequest()
+    req.state.claims = {"identity": "test-user"}
+    resp = Response()
+    res = interface.dataset_metadata(
+        req, resp, workstream="public", collection="examples", dataset="mv_suspended"
+    )
+    content = res.content.decode() if hasattr(res, "content") else res.body.decode()
+
+    assert 'Term="Custom.MaterializedView.Suspended" Bool="true"' in content
+    assert 'Term="Custom.MaterializedView.SuspendedAt" Int="1787262500000"' in content
+    assert 'Term="Custom.MaterializedView.SuspendedBy" String="justin"' in content
+    # Untouched, and still the truth about the last refresh that ran.
+    assert 'Term="Custom.MaterializedView.LastRefreshStatus" String="success"' in content
 
 
 class FakeUnrefreshedMaterializedView(FakeMaterializedView):
@@ -425,6 +468,10 @@ def test_never_refreshed_materialized_view_still_has_metadata(monkeypatch):
     # No refresh has happened, so neither refresh annotation is emitted.
     assert "Custom.MaterializedView.LastRefreshed" not in content
     assert "Custom.MaterializedView.LastRefreshStatus" not in content
+    # Suspension is emitted unconditionally even here: a view that has never
+    # refreshed is a different thing from one somebody paused, and both states
+    # are reachable at once.
+    assert 'Term="Custom.MaterializedView.Suspended" Bool="false"' in content
 
 
 class FakePlainDataset(FakeMaterializedView):

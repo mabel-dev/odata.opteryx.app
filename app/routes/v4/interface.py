@@ -2409,11 +2409,24 @@ def dataset_metadata(
         # updater may not have. Publishing it here invites a client to present
         # it as "the identity this task runs as", which is precisely the
         # privilege lending the task/trigger split exists to prevent.
+        # WHAT THE TASK WRITES, derived from its own statement when it was
+        # registered. Emitted because a trigger says which dataset FIRES a task
+        # and nothing else says which dataset it FEEDS: without this, a client
+        # drawing a pipeline has an edge going into a task and none coming out.
+        # Comma-separated, matching `information_schema.tasks.writes`; omitted
+        # entirely when the task writes nothing, or was registered by a catalog
+        # too old to have recorded it.
+        writes = task.get("writes") or []
+        if writes:
+            ET.SubElement(
+                entity_set,
+                f"{{{NS_EDM}}}Annotation",
+                attrib={"Term": "Custom.Task.Writes", "String": ",".join(writes)},
+            )
         for term, key in (
             ("Custom.Task.CreatedBy", "created-by"),
             ("Custom.Task.LastUpdatedBy", "last-updated-by"),
             ("Custom.Task.LastFiredStatus", "last-fired-status"),
-            ("Custom.Task.SuspendedBy", "suspended-by"),
             ("Custom.Task.StatementId", "statement-id"),
         ):
             value = task.get(key)
@@ -2427,7 +2440,6 @@ def dataset_metadata(
             ("Custom.Task.CreatedAt", "created-at-ms"),
             ("Custom.Task.LastUpdatedAt", "last-updated-at-ms"),
             ("Custom.Task.LastFiredAt", "last-fired-at-ms"),
-            ("Custom.Task.SuspendedAt", "suspended-at-ms"),
             # The version the last SUCCESSFUL run consumed to. Stamped only on
             # success, so a gap behind a failed run stays visible.
             ("Custom.Task.LastWindowTo", "last-window-to"),
@@ -2442,21 +2454,18 @@ def dataset_metadata(
                     )
                 except (TypeError, ValueError):
                     pass
-        # Emitted unconditionally, unlike everything above, so that `false`
-        # means "running" rather than "this service is too old to say". NOTE:
-        # nothing currently WRITES `suspended-at-ms` for a task -- the catalog
-        # has no suspend_task(), and its only suspend setter is
-        # set_materialized_view_suspended -- so this reads false for every task
-        # until that lands. It is emitted now so the client contract does not
-        # have to change when it does.
-        ET.SubElement(
-            entity_set,
-            f"{{{NS_EDM}}}Annotation",
-            attrib={
-                "Term": "Custom.Task.Suspended",
-                "Bool": str(task.get("suspended-at-ms") is not None).lower(),
-            },
-        )
+        # There is deliberately NO Custom.Task.Suspended here, and there was:
+        # emitted unconditionally so that `false` would mean "running" rather
+        # than "this service is too old to say". It was always false. Nothing
+        # writes `suspended-at-ms` on a task document, because A TASK CANNOT BE
+        # SUSPENDED -- a task is WHAT runs and a trigger is WHEN, and what you
+        # suppress is the when. The catalog's suspend setters are
+        # set_trigger_suspended and set_materialized_view_suspended; there is no
+        # third one to wire this to, and a field with one possible value tells a
+        # client "this workflow is running" about a workflow that may well be
+        # paused. Suspension of a task's schedule is read from its TRIGGERS:
+        # information_schema.triggers.suspended_at, which is projected as of
+        # opteryx-core 0.9.94 (the floor in pyproject.toml).
 
     # A materialized view additionally has a registration record: the SQL it is
     # refreshed from, the tables it reads, and its last refresh outcome. Best
@@ -2503,6 +2512,48 @@ def dataset_metadata(
                     attrib={
                         "Term": "Custom.MaterializedView.LastRefreshed",
                         "Int": str(int(refreshed_at)),
+                    },
+                )
+            # Whether an operator has PAUSED this view's refresh, as opposed to
+            # its refresh being broken. `last-refresh-status` still reports the
+            # last real refresh outcome and is deliberately untouched by a
+            # suspension, so a suspended view whose last refresh succeeded reads
+            # "ok" and looks entirely healthy without this. Emitted
+            # unconditionally, unlike the annotations around it, so `false`
+            # means "refreshing" rather than "this service is too old to say" --
+            # the distinction a client cannot otherwise draw from an absent
+            # annotation.
+            #
+            # Nothing equivalent exists on information_schema: a materialized
+            # view lists there as an ordinary BASE TABLE (the engine's `tables`
+            # projection knows only BASE TABLE and VIEW), so this document is
+            # currently the only place the state is legible at all.
+            suspended_at = mv.get("suspended-at-ms")
+            ET.SubElement(
+                entity_set,
+                f"{{{NS_EDM}}}Annotation",
+                attrib={
+                    "Term": "Custom.MaterializedView.Suspended",
+                    "Bool": str(suspended_at is not None).lower(),
+                },
+            )
+            if suspended_at:
+                ET.SubElement(
+                    entity_set,
+                    f"{{{NS_EDM}}}Annotation",
+                    attrib={
+                        "Term": "Custom.MaterializedView.SuspendedAt",
+                        "Int": str(int(suspended_at)),
+                    },
+                )
+            suspended_by = mv.get("suspended-by")
+            if suspended_by:
+                ET.SubElement(
+                    entity_set,
+                    f"{{{NS_EDM}}}Annotation",
+                    attrib={
+                        "Term": "Custom.MaterializedView.SuspendedBy",
+                        "String": str(suspended_by),
                     },
                 )
             refresh_status = mv.get("last-refresh-status")

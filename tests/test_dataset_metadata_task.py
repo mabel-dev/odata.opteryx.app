@@ -50,6 +50,8 @@ TASK = {
     "created-at-ms": 1787261893891,
     "last-updated-by": "alex",
     "last-updated-at-ms": 1787261999999,
+    # Present in get_task()'s return shape, and never anything but None -- see
+    # test_a_task_says_nothing_about_suspension.
     "suspended-at-ms": None,
     "suspended-by": None,
     "last-fired-at-ms": 1787262000000,
@@ -240,20 +242,38 @@ def test_a_task_with_no_description_still_gets_one(catalog):
     assert _annotations(_render()[0])["Custom.Description"] == TASK_DESCRIPTION
 
 
-def test_suspended_is_emitted_even_when_false(catalog):
-    """`false` has to mean "running", not "this service is too old to say" --
-    so it is emitted unconditionally, unlike every other task annotation."""
+def test_a_task_says_nothing_about_suspension(catalog):
+    """These three terms were emitted, and Custom.Task.Suspended was emitted
+    unconditionally so that `false` would mean "running". It was always false:
+    nothing writes `suspended-at-ms` on a task document, because a task cannot
+    be suspended. A task is WHAT runs and its trigger is WHEN -- suppressing the
+    schedule suspends the TRIGGER, and that is where a client reads it from
+    (information_schema.triggers.suspended_at).
+
+    A field with one possible value is worse than an absent one: it answered
+    "is this workflow paused?" with "no" for workflows that were paused. So the
+    terms must be ABSENT, not false."""
     catalog(task=TASK)
-    assert _annotations(_render()[0])["Custom.Task.Suspended"] == "false"
+    annotations = _annotations(_render()[0])
+
+    for term in (
+        "Custom.Task.Suspended",
+        "Custom.Task.SuspendedAt",
+        "Custom.Task.SuspendedBy",
+    ):
+        assert term not in annotations, f"{term} must not be emitted for a task"
 
 
-def test_a_suspended_task_says_so(catalog):
+def test_a_task_document_carrying_suspension_is_still_not_reported(catalog):
+    """Belt and braces on the rule above: even handed a task document with the
+    fields populated -- which nothing in the catalog produces -- the renderer
+    must not start describing a state the object does not have."""
     catalog(task={**TASK, "suspended-at-ms": 1787262500000, "suspended-by": "justin"})
     annotations = _annotations(_render()[0])
 
-    assert annotations["Custom.Task.Suspended"] == "true"
-    assert annotations["Custom.Task.SuspendedBy"] == "justin"
-    assert annotations["Custom.Task.SuspendedAt"] == "1787262500000"
+    assert "Custom.Task.Suspended" not in annotations
+    assert "Custom.Task.SuspendedAt" not in annotations
+    assert "Custom.Task.SuspendedBy" not in annotations
 
 
 def test_a_task_is_not_dressed_as_a_table(catalog):

@@ -57,11 +57,49 @@ VIRTUAL_INFORMATION_SCHEMA_TABLES: dict[str, list[EdmProperty]] = {
         _col("trigger_name", "VARCHAR"),
         _col("event_object_table", "VARCHAR"),
         _col("action_kind", "VARCHAR"),
-        _col("target_view", "VARCHAR"),
+        # `target`, not `target_view`. A trigger has exactly one target and it
+        # may be a task, so the engine collapsed the pair into one column; this
+        # mirror kept the old name, and a client that trusted it and asked for
+        # `$select=target_view` got ColumnNotFound from the engine rather than a
+        # column of nulls. That is what test_virtual_schemas_match_the_engine
+        # now catches.
+        _col("target", "VARCHAR"),
+        # WHOSE AUTHORITY the trigger's unattended runs carry. It was missing
+        # here entirely, so the one identity behind work that happens with
+        # nobody present was invisible to every OData client.
+        _col("runs_as", "VARCHAR"),
         _col("created_by", "VARCHAR"),
         _col("created_at", "TIMESTAMP"),
         _col("last_fired_at", "TIMESTAMP"),
         _col("last_fired_status", "VARCHAR"),
+        # Set by ALTER TRIGGER ... SUSPEND, cleared by RESUME. Without them a
+        # paused trigger reads exactly like a running one until something writes
+        # to its source and the refused fire stamps last_fired_status.
+        _col("suspended_at", "TIMESTAMP"),
+        _col("suspended_by", "VARCHAR"),
+    ],
+    # Every task registered in the workspace. Mirrors the engine's
+    # `InformationSchemaTasksTable`; `writes` is what makes a task a node with
+    # an edge going OUT, so a pipeline that passes through one can be followed
+    # end to end. Comma-separated, because a relation name cannot contain a
+    # comma.
+    "tasks": [
+        _col("task_catalog", "VARCHAR"),
+        _col("task_collection", "VARCHAR"),
+        _col("task_name", "VARCHAR"),
+        _col("description", "VARCHAR"),
+        _col("statement", "VARCHAR"),
+        _col("statement_id", "VARCHAR"),
+        _col("writes", "VARCHAR"),
+        _col("created_by", "VARCHAR"),
+        _col("created_at", "TIMESTAMP"),
+        _col("last_updated_by", "VARCHAR"),
+        _col("last_updated_at", "TIMESTAMP"),
+        _col("suspended_at", "TIMESTAMP"),
+        _col("suspended_by", "VARCHAR"),
+        _col("last_fired_at", "TIMESTAMP"),
+        _col("last_fired_status", "VARCHAR"),
+        _col("last_window_to", "BIGINT"),
     ],
     "column_relationships": [
         _col("constraint_catalog", "VARCHAR"),
@@ -76,9 +114,11 @@ VIRTUAL_INFORMATION_SCHEMA_TABLES: dict[str, list[EdmProperty]] = {
         _col("origin", "VARCHAR"),
         _col("status", "VARCHAR"),
         # Inferred rows only. This list is a hand-maintained mirror of the
-        # engine's projection, in another repository, with nothing comparing
-        # the two - so a column added there has to be added here or the entity
-        # set silently under-reports what SELECT * returns.
+        # engine's projection, in another repository -- but no longer an
+        # unchecked one: tests/test_virtual_schemas_match_engine.py compares
+        # every list here against `information_schema._TABLE_CLASSES[...]._COLUMNS`
+        # and fails on any divergence. It was unchecked, and `triggers` drifted
+        # by two columns before anybody noticed.
         _col("confidence", "FLOAT64"),
         _col("evidence", "VARCHAR"),
         _col("asserted_by", "VARCHAR"),
@@ -120,14 +160,22 @@ TASK_DEFINITION_COLUMNS: list[EdmProperty] = [
     # materialized view's definition is stored.
     _col("statement", "VARCHAR"),
     _col("statement_id", "VARCHAR"),
+    # What the statement WRITES, derived from its own AST when the task was
+    # registered -- never declared, so it cannot disagree with the statement.
+    # Comma-separated; empty both for a task that writes nothing and for one
+    # registered before the field existed.
+    _col("writes", "VARCHAR"),
     _col("created_by", "VARCHAR"),
     _col("created_at", "TIMESTAMP"),
     # Who last changed the STATEMENT. Sourced from the statement document, not
     # the task document, for the reason get_task separates them.
     _col("last_updated_by", "VARCHAR"),
     _col("last_updated_at", "TIMESTAMP"),
-    _col("suspended_at", "TIMESTAMP"),
-    _col("suspended_by", "VARCHAR"),
+    # No `suspended_at`/`suspended_by`, and there were: nothing writes them on a
+    # task document because a task cannot be suspended. A task is WHAT runs; its
+    # trigger is WHEN, and the when is what gets suppressed. Both columns could
+    # only ever be null, so they described a state this object does not have.
+    # Read suspension from information_schema.triggers instead.
     _col("last_fired_at", "TIMESTAMP"),
     _col("last_fired_status", "VARCHAR"),
     # The `current_version` the last SUCCESSFUL run consumed to -- a version
@@ -148,7 +196,11 @@ VIRTUAL_INFORMATION_SCHEMA_DESCRIPTIONS: dict[str, str] = {
     "tables": "System view listing the tables and views visible in this workspace.",
     "columns": "System view listing the columns of the tables and views visible in this workspace.",
     "views": "System view listing the views visible in this workspace, including their SQL definition.",
-    "triggers": "System view listing the triggers defined on the tables visible in this workspace, including the view each one refreshes.",
+    "triggers": (
+        "System view listing the triggers defined on the tables visible in this "
+        "workspace, including what each one runs, whose authority it runs with, "
+        "and whether it has been suspended."
+    ),
     "column_relationships": (
         "System view listing the relationships declared between columns of the tables "
         "visible in this workspace. A relationship records that two columns hold "
