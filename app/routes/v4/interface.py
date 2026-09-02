@@ -1360,7 +1360,7 @@ def dataset_metadata(
     - Custom.Role: user's assigned role (reader, writer, admin, owner)
     - Custom.Policy: policy that granted access
 
-    `<workspace>/information_schema/{tables,columns,views,triggers,schemata,column_relationships}` are virtual,
+    `<workspace>/information_schema/{tables,columns,views,triggers,tasks,schemata,column_relationships,grants}` are virtual,
     non-catalog datasets (source "Virtual") with a fixed schema (see
     app.odata.virtual_datasets). They're
     visible in every workspace the caller can otherwise access, and access to them is

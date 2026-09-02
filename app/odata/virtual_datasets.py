@@ -129,6 +129,25 @@ VIRTUAL_INFORMATION_SCHEMA_TABLES: dict[str, list[EdmProperty]] = {
         _col("catalog_name", "VARCHAR"),
         _col("schema_name", "VARCHAR"),
     ],
+    # The workspace's access as a relation: for the workspace, each collection
+    # and each table and view, every stored policy that reaches it. Mirrors
+    # the engine's `InformationSchemaGrantsTable`; `origin` is what the table
+    # is for -- `explicit` where the policy is stored AT the object (what
+    # `SHOW GRANTS ON` reports), `inherited` where it covers the object from
+    # above (what `SHOW EFFECTIVE GRANTS ON` adds). The engine gates each row
+    # on the caller's authority to administer the object, so what a reader
+    # gets here is what they could have asked the statements for.
+    "grants": [
+        _col("grant_catalog", "VARCHAR"),
+        _col("grant_collection", "VARCHAR"),
+        _col("object_kind", "VARCHAR"),
+        _col("object_name", "VARCHAR"),
+        _col("grantee", "VARCHAR"),
+        _col("role", "VARCHAR"),
+        _col("pattern", "VARCHAR"),
+        _col("level", "VARCHAR"),
+        _col("origin", "VARCHAR"),
+    ],
 }
 
 # A task holds no rows, so unlike a table there is nothing to give it a schema
@@ -211,6 +230,12 @@ VIRTUAL_INFORMATION_SCHEMA_DESCRIPTIONS: dict[str, str] = {
         "emitted as navigable relationships."
     ),
     "schemata": "System view listing the schemas (collections) visible in this workspace.",
+    "grants": (
+        "System view listing, for the workspace and each collection, table and view "
+        "in it, every access policy that reaches it. origin says whether the policy is "
+        "stored at that object (explicit) or covers it from the collection or workspace "
+        "above (inherited). Rows are shown only for objects the caller may administer."
+    ),
 }
 
 

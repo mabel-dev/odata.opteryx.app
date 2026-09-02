@@ -24,7 +24,7 @@ dependencies = [
     # the engine that owns those columns fails the build rather than publishing
     # a $metadata document the data path cannot serve.
     "opteryx-core>=0.9.94",
-    "opteryx-access>=0.2.7",
+    "opteryx-access>=0.2.10",
     "opteryx-iceberg>=0.1.8",
     "python-jose[cryptography]==3.5.0",
     "python-multipart==0.0.32",
