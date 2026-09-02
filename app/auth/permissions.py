@@ -335,6 +335,79 @@ def accessible_workstreams(policies: List[Dict[str, str]]) -> set:
     }
 
 
+def roles_in_workstream(policies: List[Dict[str, str]], workstream: str) -> List[str]:
+    """The roles `policies` hold on patterns reaching `workstream`, in policy order.
+
+    A superset in the same sense as `accessible_workstreams`: a role on one
+    relation counts as a role held in its workstream. That is the right grain for
+    deciding which information_schema tables to OFFER in a workspace - a caller
+    who owns one dataset there can see that dataset's triggers, so the triggers
+    table has rows for them - while the engine decides row by row what is in it.
+    """
+    return [
+        p["role"]
+        for p in policies
+        if p.get("pattern") and p.get("role") and workstream_from_pattern(p["pattern"]) == workstream
+    ]
+
+
+def virtual_information_schema_role(
+    policies: List[Dict[str, str]], workstream: str, name: str
+) -> Optional[str]:
+    """The role under which `<workstream>.information_schema.<name>` is offered to a
+    caller holding `policies`, or None when it is not offered to them at all.
+
+    Each virtual table has a required action (`VIRTUAL_INFORMATION_SCHEMA_ACTIONS`
+    - the one the engine gates its rows on), and the table is offered where the
+    caller holds a role in the workspace that confers it. Whether a role confers
+    an action is asked of opteryx-access, the library the engine's own gate is
+    answered from, so the listing cannot offer a table the query would return
+    empty, nor withhold one it would fill.
+
+    `personal` is the caller's own namespace, held as owner without any policy
+    saying so; `public` is readable by everyone the same way. Both are decided
+    here rather than left to the caller for the same reason the engine decides
+    implicit grants in one place.
+
+    The role reported is the FIRST qualifying one in policy order, as
+    `read_grant_for_relation` reports the first qualifying grant.
+    """
+    from opteryx_access.actions import action_allowed_for_role
+
+    from app.odata.virtual_datasets import VIRTUAL_INFORMATION_SCHEMA_ACTIONS
+
+    action = VIRTUAL_INFORMATION_SCHEMA_ACTIONS.get(name)
+    if action is None:
+        return None
+
+    if workstream == "personal":
+        roles = ["owner"]
+    else:
+        roles = roles_in_workstream(policies, workstream)
+        if workstream == "public":
+            roles.append("reader")
+
+    for role in roles:
+        if action_allowed_for_role(role, action):
+            return role
+    return None
+
+
+def visible_virtual_information_schema(
+    policies: List[Dict[str, str]], workstream: str
+) -> List[Tuple[str, str]]:
+    """Every virtual information_schema table offered in `workstream` to a caller
+    holding `policies`, as `(name, role)` in registry order."""
+    from app.odata.virtual_datasets import VIRTUAL_INFORMATION_SCHEMA_TABLES
+
+    offered = []
+    for name in VIRTUAL_INFORMATION_SCHEMA_TABLES:
+        role = virtual_information_schema_role(policies, workstream, name)
+        if role is not None:
+            offered.append((name, role))
+    return offered
+
+
 def read_grant_for_relation(
     policies: List[Dict[str, str]], relation: str
 ) -> Optional[Tuple[str, Optional[str]]]:

@@ -1328,6 +1328,46 @@ def read_dataset(
         404: {"description": "Dataset not found in catalog"},
     },
 )
+def _materialized_view_runs_as(catalog, mv: dict, qualified: str | None) -> str | None:
+    """The identity a view's unattended refresh runs as, read from its triggers.
+
+    One per source, and kept agreeing by the catalog - `ALTER MATERIALIZED
+    VIEW ... OWNER TO` repoints all of them in one batch - so ONE distinct
+    identity is the expected answer and is what this emits. Two is a view
+    somebody split by hand with `ALTER TRIGGER ... OWNER TO`; naming either
+    would be a guess, so nothing is emitted and `information_schema.triggers`
+    is where the split is visible.
+
+    TRANSITIONAL: a view registered before the identity moved onto its
+    triggers still carries `runs-as` on its own record until the catalog's
+    backfill (`scripts/backfill_refresh_trigger_identity.py`) retires it. It
+    is honoured only where the triggers hold nothing, and goes with the field.
+
+    Best effort throughout: an older catalog wheel has no `list_triggers`, and
+    a source that cannot be listed must not break the metadata document.
+    """
+    candidates: set[str] = set()
+    for source in mv.get("source-tables") or []:
+        try:
+            triggers = catalog.list_triggers(source)
+        except Exception as exc:  # noqa: BLE001 - see docstring
+            logger.debug(f"refresh triggers on {source} unreadable for {qualified}: {exc}")
+            continue
+        for trigger in triggers or []:
+            if trigger.get("kind") != "materialized_view_refresh":
+                continue
+            target = trigger.get("target-view")
+            if qualified and target and target != qualified:
+                continue
+            if trigger.get("runs-as"):
+                candidates.add(str(trigger["runs-as"]))
+    if not candidates and mv.get("runs-as"):
+        return str(mv["runs-as"])
+    if len(candidates) == 1:
+        return next(iter(candidates))
+    return None
+
+
 def dataset_metadata(
     request: Request,
     response: Response,
@@ -1362,10 +1402,11 @@ def dataset_metadata(
 
     `<workspace>/information_schema/{tables,columns,views,triggers,tasks,schemata,column_relationships,grants}` are virtual,
     non-catalog datasets (source "Virtual") with a fixed schema (see
-    app.odata.virtual_datasets). They're
-    visible in every workspace the caller can otherwise access, and access to them is
-    always reader regardless of the caller's actual role; finer-grained filtering
-    happens downstream at query time.
+    app.odata.virtual_datasets). Each is offered in a workspace the caller can
+    otherwise reach when they hold a role there that confers the action the engine
+    gates its rows on: the shape tables to any role, `triggers`, `tasks` and
+    `grants` to owners (see app.auth.permissions.virtual_information_schema_role).
+    Which rows are in it is decided downstream, at query time.
 
     Content-Type: application/xml (EDMX)
 
@@ -1388,9 +1429,9 @@ def dataset_metadata(
     if identity is None and not is_anonymous_exempt(workstream, collection):
         raise HTTPException(status_code=401, detail="Missing or invalid credentials")
 
-    from app.auth.permissions import accessible_workstreams
     from app.auth.permissions import get_access_policies_from_claims
     from app.auth.permissions import read_grant_for_relation
+    from app.auth.permissions import virtual_information_schema_role
 
     # Default: no access
     allowed = False
@@ -1403,18 +1444,27 @@ def dataset_metadata(
 
     access_policies_list = get_access_policies_from_claims(claims)
 
+    # The virtual information_schema datasets have no catalog entry for a policy to
+    # name, so they are not granted per relation. One is offered in a workstream
+    # when the caller holds a role there conferring the action the engine gates its
+    # rows on - `personal` and `public` included, which the helper answers the way
+    # the engine answers implicit grants. Decided first because it is the whole
+    # decision for these datasets: the branches below are for catalog objects.
+    if is_virtual_info_schema:
+        role = virtual_information_schema_role(access_policies_list, workstream, dataset)
+        if role is None:
+            raise HTTPException(status_code=403, detail="forbidden: not allowed to view metadata")
+        allowed = True
+        assigned_role = role
+        assigned_policy = "virtual-information-schema"
+
     # Personal workspace handling
-    if workstream == "personal":
+    if not allowed and workstream == "personal":
         # the collection is the identity for personal workspaces
         if collection == identity:
             allowed = True
             assigned_role = "owner"
             assigned_policy = "always-allow-personal"
-        elif is_virtual_info_schema:
-            # The virtual information_schema datasets are visible in every workspace
-            # the caller can reach, including their own personal one -- role gets
-            # forced to reader below regardless of this branch.
-            allowed = True
         else:
             # deny access to other users' personal workspaces
             raise HTTPException(status_code=403, detail="forbidden: not allowed to view metadata")
@@ -1427,29 +1477,16 @@ def dataset_metadata(
 
     # Policy-granted access
     if not allowed:
-        if is_virtual_info_schema:
-            # These have no catalog entry for a policy to name, so they can't be granted
-            # per-relation. They're visible in any workstream the caller can otherwise
-            # reach, and filtered downstream at query time.
-            allowed = workstream in accessible_workstreams(access_policies_list)
-        else:
-            # The caller needs a read grant on THIS relation. Matching on the pattern's
-            # workstream alone would let a grant on one dataset disclose every dataset
-            # beside it in the same workspace.
-            grant = read_grant_for_relation(access_policies_list, table_name)
-            if grant is not None:
-                allowed = True
-                assigned_role, assigned_policy = grant
+        # The caller needs a read grant on THIS relation. Matching on the pattern's
+        # workstream alone would let a grant on one dataset disclose every dataset
+        # beside it in the same workspace.
+        grant = read_grant_for_relation(access_policies_list, table_name)
+        if grant is not None:
+            allowed = True
+            assigned_role, assigned_policy = grant
 
     if not allowed:
         raise HTTPException(status_code=403, detail="forbidden: not allowed to view metadata")
-
-    # The virtual information_schema datasets are visible in every workspace the caller
-    # can otherwise reach (the check above); finer-grained filtering happens downstream
-    # at query time. Access to them is always reader.
-    if is_virtual_info_schema:
-        assigned_role = "reader"
-        assigned_policy = "virtual-information-schema"
 
     # Everything the document's content depends on is now known, so a cached
     # rendering can be served without touching the catalog at all.
@@ -2566,11 +2603,23 @@ def dataset_metadata(
                         "String": str(refresh_status),
                     },
                 )
-            # The identity a refresh runs as. Pinned at creation and moved only
-            # by ALTER MATERIALIZED VIEW ... OWNER TO, so it answers "whose
-            # grants keep this view fresh" - a different question from who last
-            # changed its definition, immediately below.
-            runs_as = mv.get("runs-as")
+            # The identity a refresh runs as. It lives on each of the view's
+            # REFRESH TRIGGERS - the view carries none of its own, exactly as
+            # a task does not - pinned when the trigger is landed and moved by
+            # ALTER MATERIALIZED VIEW ... OWNER TO (every trigger at once) or
+            # ALTER TRIGGER ... OWNER TO (one). It answers "whose grants keep
+            # this view fresh" - a different question from who last changed
+            # its definition, immediately below.
+            # Matched by qualified target where the handle knows its
+            # workspace; an older wheel without the attribute gets every
+            # refresh trigger on the source, which is right for all but a
+            # source feeding two views.
+            workspace_name = getattr(workspace, "workspace", None)
+            runs_as = _materialized_view_runs_as(
+                workspace,
+                mv,
+                f"{workspace_name}.{collection}.{dataset}" if workspace_name else None,
+            )
             if runs_as:
                 ET.SubElement(
                     entity_set,

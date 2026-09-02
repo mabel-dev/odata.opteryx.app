@@ -13,7 +13,6 @@ from opteryx_shared_services.logging import get_logger
 from app.auth.deps import require_authentication
 from opteryx_shared_services.config import get_config
 from app.core import _get_firestore_client
-from app.odata.virtual_datasets import VIRTUAL_INFORMATION_SCHEMA_TABLES
 from opteryx_catalog.catalog.compaction import normalize_sort_order
 
 logger = get_logger()
@@ -640,6 +639,7 @@ def get_service_document(
         from app.auth.permissions import accessible_workstreams
         from app.auth.permissions import get_access_policies_from_claims
         from app.auth.permissions import read_grant_for_relation
+        from app.auth.permissions import visible_virtual_information_schema
 
         access_policies_list = get_access_policies_from_claims(claims)
 
@@ -711,10 +711,14 @@ def get_service_document(
         # Every workspace the caller has any access to gets the virtual
         # information_schema datasets, including their own personal workspace. They
         # aren't backed by catalog entries, so they're appended directly here rather
-        # than discovered via Firestore. Access to them is always reader; finer-grained
-        # filtering happens downstream at query time.
+        # than discovered via Firestore. Which tables are offered depends on the
+        # role the caller holds in the workspace: `tables`, `columns` and the rest
+        # of the shape for anyone, `triggers`, `tasks` and `grants` only where they
+        # hold owner - the same tiers the engine filters the rows at, so a table
+        # is never offered that would only ever come back empty. Which rows are in
+        # it is decided downstream, at query time.
         for workspace in workspace_ids | {"personal"}:
-            for name in VIRTUAL_INFORMATION_SCHEMA_TABLES:
+            for name, role in visible_virtual_information_schema(access_policies_list, workspace):
                 filtered_datasets.append(
                     DatasetInfo(
                         resource=f"{workspace}.information_schema.{name}",
@@ -722,7 +726,7 @@ def get_service_document(
                         collection="information_schema",
                         name=name,
                         source="Virtual",
-                        role="reader",
+                        role=role,
                         policy="virtual-information-schema",
                     )
                 )

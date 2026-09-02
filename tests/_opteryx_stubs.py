@@ -39,6 +39,7 @@ _STUBBED_NAMES = [
     "opteryx.planner.logical_planner",
     "opteryx.utils",
     "opteryx_access",
+    "opteryx_access.actions",
     "opteryx_access.adapters",
     "opteryx_access.adapters.firestore",
     "opteryx_catalog",
@@ -74,6 +75,24 @@ def _build_stubs():
     # decide about.
     access_mod.capability = lambda *args, **kwargs: object()
     stubs["opteryx_access"] = access_mod
+
+    # The role -> action table app.auth.permissions asks when deciding which
+    # virtual information_schema tables to offer. The real one is
+    # opteryx_access.actions.ACTION_ROLES; this is the shape of it these tests
+    # need - a reader reads, a writer also writes, an owner does everything.
+    _STUB_ROLE_ACTIONS = {
+        "reader": {"READ"},
+        "writer": {"READ", "WRITE", "UPDATE", "DELETE", "CREATE", "REFRESH"},
+        "owner": {
+            "READ", "WRITE", "UPDATE", "DELETE", "CREATE", "REFRESH",
+            "DROP", "ALTER", "MANIFEST", "AUTOMATE", "GRANT", "REVOKE",
+        },
+    }
+    access_actions = types.ModuleType("opteryx_access.actions")
+    access_actions.action_allowed_for_role = (
+        lambda role, action: action in _STUB_ROLE_ACTIONS.get(role, set())
+    )
+    stubs["opteryx_access.actions"] = access_actions
 
     stubs["opteryx_access.adapters"] = _package("opteryx_access.adapters")
 

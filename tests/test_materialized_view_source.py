@@ -389,6 +389,103 @@ class FakeSuspendedMVCatalog(FakeMVCatalog):
         }
 
 
+def _mv_record():
+    return {
+        "sql": "SELECT id FROM public.examples.base",
+        "source-tables": ["public.examples.base", "public.examples.other"],
+        "last-refreshed-at-ms": 1700000000000,
+        "last-refresh-status": "success",
+    }
+
+
+def _refresh_trigger(runs_as, target="public.examples.mv_runs_as"):
+    trigger = {"name": "refresh__x", "kind": "materialized_view_refresh", "target-view": target}
+    if runs_as:
+        trigger["runs-as"] = runs_as
+    return trigger
+
+
+def _runs_as_document(monkeypatch, catalog_class, dataset="mv_runs_as"):
+    monkeypatch.setattr(interface, "OpteryxCatalog", catalog_class)
+    req = DummyRequest()
+    req.state.claims = {"identity": "test-user"}
+    resp = Response()
+    res = interface.dataset_metadata(
+        req, resp, workstream="public", collection="examples", dataset=dataset
+    )
+    return res.content.decode() if hasattr(res, "content") else res.body.decode()
+
+
+def test_runs_as_is_read_from_the_views_refresh_triggers(monkeypatch):
+    """The identity lives on each refresh trigger, not on the view - the view
+    carries none, exactly as a task does not - and the triggers are kept
+    agreeing by ALTER MATERIALIZED VIEW ... OWNER TO, so one answer comes back.
+    A trigger aimed at ANOTHER view on the same source is not this view's."""
+
+    class Catalog(FakeMVCatalog):
+        workspace = "public"
+
+        def get_materialized_view(self, identifier):
+            return _mv_record()
+
+        def list_triggers(self, identifier):
+            return [
+                _refresh_trigger("svc-etl"),
+                _refresh_trigger("somebody-else", target="public.examples.another_view"),
+            ]
+
+    content = _runs_as_document(monkeypatch, Catalog)
+    assert 'Term="Custom.MaterializedView.RunsAs" String="svc-etl"' in content
+
+
+def test_the_views_legacy_field_is_honoured_only_where_the_triggers_hold_nothing(monkeypatch):
+    """A view registered before the identity moved onto its triggers still
+    carries the old view-level field until the catalog's backfill retires it."""
+
+    class Legacy(FakeMVCatalog):
+        workspace = "public"
+
+        def get_materialized_view(self, identifier):
+            return dict(_mv_record(), **{"runs-as": "legacy"})
+
+        def list_triggers(self, identifier):
+            return [_refresh_trigger(None)]
+
+    class Pinned(Legacy):
+        def list_triggers(self, identifier):
+            return [_refresh_trigger("svc-etl")]
+
+    assert 'RunsAs" String="legacy"' in _runs_as_document(monkeypatch, Legacy)
+    assert 'RunsAs" String="svc-etl"' in _runs_as_document(monkeypatch, Pinned)
+
+
+def test_triggers_that_disagree_name_nobody(monkeypatch):
+    """Two identities is a view somebody split by hand with ALTER TRIGGER ...
+    OWNER TO. Naming either would be a guess; the split is visible in
+    information_schema.triggers, which is the feed that carries both."""
+
+    class Split(FakeMVCatalog):
+        workspace = "public"
+
+        def get_materialized_view(self, identifier):
+            return _mv_record()
+
+        def list_triggers(self, identifier):
+            if identifier.endswith(".base"):
+                return [_refresh_trigger("olive")]
+            return [_refresh_trigger("ginny")]
+
+    assert "Custom.MaterializedView.RunsAs" not in _runs_as_document(monkeypatch, Split)
+
+
+def test_an_older_catalog_without_list_triggers_still_produces_a_document(monkeypatch):
+    # FakeMVCatalog has no list_triggers and no view-level field: no annotation,
+    # no failure.
+    content, _ = _mv_metadata_document(monkeypatch, dataset="mv_no_identity")
+    assert "Custom.MaterializedView.RunsAs" not in content
+    assert 'Term="Custom.MaterializedView.SourceTables"' in content
+
+
 def test_a_suspended_materialized_view_says_so(monkeypatch):
     """ALTER MATERIALIZED VIEW ... SUSPEND stops refreshes without dropping the
     triggers, so "deliberately off" and "quietly broken" stop looking alike --

@@ -254,6 +254,35 @@ VIRTUAL_INFORMATION_SCHEMA_DESCRIPTIONS: dict[str, str] = {
 }
 
 
+# The action a caller must hold on SOMETHING in a workspace for the table to be
+# offered there. It is the action the engine gates the table's ROWS on (see the
+# information_schema module docstring in opteryx-core), so a table is listed only
+# where a query of it could return anything. Offering `tasks` to a reader would
+# hand them an always-empty table whose column list and description say what
+# they are not allowed to see - which is a disclosure, just a small one.
+#
+#   READ      existence and shape: what a reader needs to write a query
+#   AUTOMATE  tasks and triggers: standing automation, owner tier
+#   GRANT     grants: who holds what, owner tier
+#
+# Which ROLES confer each action is opteryx-access's to say (`ACTION_ROLES`),
+# and app.auth.permissions asks it rather than restating the answer here.
+VIRTUAL_INFORMATION_SCHEMA_ACTIONS: dict[str, str] = {
+    "tables": "READ",
+    "columns": "READ",
+    "views": "READ",
+    "triggers": "AUTOMATE",
+    "tasks": "AUTOMATE",
+    "column_relationships": "READ",
+    "schemata": "READ",
+    "grants": "GRANT",
+}
+
+# A table with a schema but no tier would be offered to nobody; one with a tier
+# but no schema could not be described. Either is a registration mistake.
+assert VIRTUAL_INFORMATION_SCHEMA_ACTIONS.keys() == VIRTUAL_INFORMATION_SCHEMA_TABLES.keys()
+
+
 def is_virtual_information_schema(collection: str, name: str) -> bool:
     """Whether (collection, name) refers to a virtual information_schema dataset."""
     return collection == "information_schema" and name in VIRTUAL_INFORMATION_SCHEMA_TABLES

@@ -916,6 +916,7 @@ def get_edmx_metadata(request: Request) -> Any:
             accessible_workstreams,
             get_access_policies_from_claims,
             read_grant_for_relation,
+            visible_virtual_information_schema,
         )
 
         access_policies_list = get_access_policies_from_claims(claims)
@@ -970,10 +971,13 @@ def get_edmx_metadata(request: Request) -> Any:
         # Every workspace the caller has any access to gets the virtual
         # information_schema datasets, including their own personal workspace. They
         # aren't backed by catalog entries, so they're appended directly here rather
-        # than discovered via Firestore. Finer-grained filtering happens downstream at
-        # query time.
+        # than discovered via Firestore. Offered per the role the caller holds in
+        # the workspace - the shape tables to anyone, `triggers`, `tasks` and
+        # `grants` to owners - matching the tiers the engine filters rows at (see
+        # visible_virtual_information_schema). Which rows are in a table is
+        # decided downstream, at query time.
         for workspace in workspace_ids | {"personal"}:
-            for name in VIRTUAL_INFORMATION_SCHEMA_TABLES:
+            for name, _role in visible_virtual_information_schema(access_policies_list, workspace):
                 filtered_datasets.append(
                     DatasetInfo(
                         resource=f"{workspace}.information_schema.{name}",

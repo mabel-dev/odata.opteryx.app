@@ -2,6 +2,9 @@ from app.auth.permissions import accessible_workstreams
 from app.auth.permissions import get_access_policies_from_claims
 from app.auth.permissions import read_grant_for_relation
 from app.auth.permissions import role_allows_read
+from app.auth.permissions import roles_in_workstream
+from app.auth.permissions import virtual_information_schema_role
+from app.auth.permissions import visible_virtual_information_schema
 
 
 def test_policies_list_tuple_converted():
@@ -98,3 +101,98 @@ def test_non_read_roles_grant_nothing():
 def test_role_allows_read_covers_read_capable_roles():
     assert all(role_allows_read(r) for r in ("reader", "writer", "admin", "owner", "OWNER"))
     assert not any(role_allows_read(r) for r in (None, "", "none", "denied"))
+
+
+# ---------------------------------------------------------------------------
+# Which information_schema tables are OFFERED in a workspace follows the tier the
+# engine filters their rows at: shape tables to any role, automation and grants
+# to owners. Offering `tasks` to a reader would list an always-empty table whose
+# columns describe what they may not see.
+# ---------------------------------------------------------------------------
+
+SHAPE_TABLES = ["tables", "columns", "views", "column_relationships", "schemata"]
+OWNER_TABLES = ["triggers", "tasks", "grants"]
+
+
+def _names(offered):
+    return [name for name, _role in offered]
+
+
+def test_a_reader_is_offered_the_shape_tables_only():
+    policies = [{"pattern": "ws.*", "role": "reader", "policy": "p1"}]
+
+    offered = visible_virtual_information_schema(policies, "ws")
+
+    assert sorted(_names(offered)) == sorted(SHAPE_TABLES)
+    assert {role for _name, role in offered} == {"reader"}
+
+
+def test_a_writer_is_offered_no_more_than_a_reader():
+    policies = [{"pattern": "ws.*", "role": "writer", "policy": "p1"}]
+
+    assert sorted(_names(visible_virtual_information_schema(policies, "ws"))) == sorted(SHAPE_TABLES)
+
+
+def test_an_owner_is_offered_every_table():
+    policies = [{"pattern": "ws.*", "role": "owner", "policy": "p1"}]
+
+    offered = visible_virtual_information_schema(policies, "ws")
+
+    assert sorted(_names(offered)) == sorted(SHAPE_TABLES + OWNER_TABLES)
+    assert {role for _name, role in offered} == {"owner"}
+
+
+def test_owner_on_one_dataset_still_offers_the_automation_tables():
+    """The tier is held per workspace, not per relation: an owner of one dataset
+    can see that dataset's triggers, so the triggers table has rows for them.
+    Which rows is the engine's decision."""
+    policies = [{"pattern": "ws.sales.orders", "role": "owner", "policy": "p1"}]
+
+    assert virtual_information_schema_role(policies, "ws", "triggers") == "owner"
+    assert virtual_information_schema_role(policies, "ws", "tasks") == "owner"
+    assert virtual_information_schema_role(policies, "ws", "grants") == "owner"
+
+
+def test_a_role_in_another_workspace_offers_nothing_here():
+    policies = [{"pattern": "elsewhere.*", "role": "owner", "policy": "p1"}]
+
+    assert visible_virtual_information_schema(policies, "ws") == []
+    assert roles_in_workstream(policies, "ws") == []
+
+
+def test_the_role_reported_is_the_first_qualifying_one():
+    policies = [
+        {"pattern": "ws.a.*", "role": "reader", "policy": "p1"},
+        {"pattern": "ws.b.*", "role": "owner", "policy": "p2"},
+    ]
+
+    assert virtual_information_schema_role(policies, "ws", "tables") == "reader"
+    assert virtual_information_schema_role(policies, "ws", "tasks") == "owner"
+
+
+def test_personal_is_offered_everything_as_owner_without_a_policy():
+    offered = visible_virtual_information_schema([], "personal")
+
+    assert sorted(_names(offered)) == sorted(SHAPE_TABLES + OWNER_TABLES)
+    assert {role for _name, role in offered} == {"owner"}
+
+
+def test_public_is_offered_the_shape_tables_as_reader_without_a_policy():
+    offered = visible_virtual_information_schema([], "public")
+
+    assert sorted(_names(offered)) == sorted(SHAPE_TABLES)
+    assert {role for _name, role in offered} == {"reader"}
+
+
+def test_an_unrecognised_role_is_offered_nothing():
+    # "admin" is a live role in services not yet migrated; opteryx-access
+    # confers nothing on it, so the engine would return no rows, so no table.
+    policies = [{"pattern": "ws.*", "role": "admin", "policy": "p1"}]
+
+    assert visible_virtual_information_schema(policies, "ws") == []
+
+
+def test_a_name_that_is_not_a_virtual_table_is_not_offered():
+    policies = [{"pattern": "ws.*", "role": "owner", "policy": "p1"}]
+
+    assert virtual_information_schema_role(policies, "ws", "orders") is None

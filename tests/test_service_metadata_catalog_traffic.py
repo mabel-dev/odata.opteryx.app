@@ -109,7 +109,7 @@ def _dataset(
     )
 
 
-def _get(monkeypatch, datasets, headers=None, patterns=("public.*",)):
+def _get(monkeypatch, datasets, headers=None, patterns=("public.*",), role="reader"):
     monkeypatch.setattr(metadata, "_get_workspace_datasets", lambda _db, ids: list(datasets))
 
     request = type("R", (), {})()
@@ -117,7 +117,7 @@ def _get(monkeypatch, datasets, headers=None, patterns=("public.*",)):
     request.headers = headers or {}
     request.state.claims = {
         "identity": "tester",
-        "policies": [{"pattern": pattern, "role": "reader"} for pattern in patterns],
+        "policies": [{"pattern": pattern, "role": role} for pattern in patterns],
     }
     return metadata.get_edmx_metadata(request)
 
@@ -193,6 +193,30 @@ def test_virtual_datasets_are_never_read(monkeypatch, db):
 
     assert db.batches == []
     assert "public_information_schema_tables" in body
+
+
+def test_a_reader_is_not_offered_the_automation_tables(monkeypatch, db):
+    """The virtual tables are offered at the tier the engine filters their rows
+    at. A reader's `tasks` would be an always-empty entity set whose columns say
+    what they may not see, so it is not in their document at all."""
+    body = _body(_get(monkeypatch, [], patterns=("ws.*",), role="reader"))
+
+    assert 'EntitySet Name="ws_information_schema_tables"' in body
+    assert 'EntitySet Name="ws_information_schema_columns"' in body
+    assert "ws_information_schema_tasks" not in body
+    assert "ws_information_schema_triggers" not in body
+    assert "ws_information_schema_grants" not in body
+    # public is reader for everyone; personal is the caller's own, as owner.
+    assert "public_information_schema_tasks" not in body
+    assert 'EntitySet Name="personal_information_schema_tasks"' in body
+
+
+def test_an_owner_is_offered_the_automation_tables(monkeypatch, db):
+    body = _body(_get(monkeypatch, [], patterns=("ws.*",), role="owner"))
+
+    assert 'EntitySet Name="ws_information_schema_tasks"' in body
+    assert 'EntitySet Name="ws_information_schema_triggers"' in body
+    assert 'EntitySet Name="ws_information_schema_grants"' in body
 
 
 def test_duplicate_resources_are_resolved_once(monkeypatch, db):
