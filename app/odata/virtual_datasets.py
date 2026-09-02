@@ -77,6 +77,12 @@ VIRTUAL_INFORMATION_SCHEMA_TABLES: dict[str, list[EdmProperty]] = {
         # to its source and the refused fire stamps last_fired_status.
         _col("suspended_at", "TIMESTAMP"),
         _col("suspended_by", "VARCHAR"),
+        # The floor between two firings, set by ALTER TRIGGER ... SET MINIMUM
+        # INTERVAL TO. Null for a trigger created before the setting existed,
+        # which fires on every commit; 0 where the floor was removed. Inside the
+        # interval a commit stamps `last_fired_status: throttled` and fires
+        # nothing - the setting working, not a fault.
+        _col("minimum_interval_seconds", "BIGINT"),
     ],
     # Every task registered in the workspace. Mirrors the engine's
     # `InformationSchemaTasksTable`; `writes` is what makes a task a node with
@@ -225,7 +231,9 @@ VIRTUAL_INFORMATION_SCHEMA_DESCRIPTIONS: dict[str, str] = {
         "\n"
         "- `target` is what fires: a view or a task\n"
         "- `runs_as` is whose authority the run carries\n"
-        "- `suspended_at` is set while the trigger is paused"
+        "- `suspended_at` is set while the trigger is paused\n"
+        "- `minimum_interval_seconds` is the floor between two firings; a commit "
+        "inside it stamps `last_fired_status: throttled` and fires nothing"
     ),
     "tasks": (
         "Tasks registered in this workspace: statements the platform runs on its own.\n"
