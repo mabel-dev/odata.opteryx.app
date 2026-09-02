@@ -1305,29 +1305,6 @@ def read_dataset(
     )
 
 
-@router.get(
-    "/{workstream}/{collection}/{dataset}/$metadata",
-    summary="Per-dataset OData EDMX metadata",
-    description=(
-        "Returns OData $metadata (EDMX) for a single dataset, including column types and "
-        "nullability, plus custom annotations carrying column statistics "
-        "(Custom.Statistics.Min/Max, DistinctValueCount, NullCount, Distribution, and CIDR for "
-        "IPv4 columns), the source type name (Custom.OriginalType, Custom.SourceType), the "
-        "caller's access (Custom.Role, Custom.Policy), dataset and column descriptions "
-        "(Custom.Description, Custom.LLMDescribed), latest-snapshot metadata "
-        "(Custom.Snapshot.Id/TotalRecords/TotalDataSize/CommitMessage/Author), physical sort "
-        "order (Custom.SortOrder.Column/Direction), snapshot tags (Custom.Tags.Count and "
-        "Custom.Tags, a Collection of Records with Name, SnapshotId and CreatedBy), and "
-        "materialized-view state (Custom.MaterializedView.*). Annotations are omitted where "
-        "they do not apply to the dataset kind or are unavailable."
-    ),
-    responses={
-        200: {"description": "EDMX metadata document returned as XML"},
-        401: {"description": "Missing or invalid authentication"},
-        403: {"description": "Forbidden: no permission to view dataset metadata"},
-        404: {"description": "Dataset not found in catalog"},
-    },
-)
 def _materialized_view_runs_as(catalog, mv: dict, qualified: str | None) -> str | None:
     """The identity a view's unattended refresh runs as, read from its triggers.
 
@@ -1368,6 +1345,29 @@ def _materialized_view_runs_as(catalog, mv: dict, qualified: str | None) -> str 
     return None
 
 
+@router.get(
+    "/{workstream}/{collection}/{dataset}/$metadata",
+    summary="Per-dataset OData EDMX metadata",
+    description=(
+        "Returns OData $metadata (EDMX) for a single dataset, including column types and "
+        "nullability, plus custom annotations carrying column statistics "
+        "(Custom.Statistics.Min/Max, DistinctValueCount, NullCount, Distribution, and CIDR for "
+        "IPv4 columns), the source type name (Custom.OriginalType, Custom.SourceType), the "
+        "caller's access (Custom.Role, Custom.Policy), dataset and column descriptions "
+        "(Custom.Description, Custom.LLMDescribed), latest-snapshot metadata "
+        "(Custom.Snapshot.Id/TotalRecords/TotalDataSize/CommitMessage/Author), physical sort "
+        "order (Custom.SortOrder.Column/Direction), snapshot tags (Custom.Tags.Count and "
+        "Custom.Tags, a Collection of Records with Name, SnapshotId and CreatedBy), and "
+        "materialized-view state (Custom.MaterializedView.*). Annotations are omitted where "
+        "they do not apply to the dataset kind or are unavailable."
+    ),
+    responses={
+        200: {"description": "EDMX metadata document returned as XML"},
+        401: {"description": "Missing or invalid authentication"},
+        403: {"description": "Forbidden: no permission to view dataset metadata"},
+        404: {"description": "Dataset not found in catalog"},
+    },
+)
 def dataset_metadata(
     request: Request,
     response: Response,
