@@ -204,37 +204,52 @@ TASK_DEFINITION_COLUMNS: list[EdmProperty] = [
 ]
 
 TASK_DESCRIPTION = (
-    "A task: a statement the platform runs on its own. A task holds no rows of its "
-    "own, so it reads as the single row describing itself."
+    "A **task** is a statement the platform runs on its own. It holds no rows, "
+    "so it reads as the one row describing itself."
 )
 
 
 # Default Custom.Description annotation per virtual dataset, used where the real
-# catalog would otherwise supply a description/comment.
+# catalog would otherwise supply a description/comment. The UI renders these
+# with the limited markdown described at
+# https://docs.opteryx.app/docs/core-concepts/markdown-in-descriptions -- bold,
+# italic, inline code, links, flat lists, headings. Keep the opening sentence to
+# one line; put anything a reader needs to know about a specific column in a
+# bullet naming that column.
 VIRTUAL_INFORMATION_SCHEMA_DESCRIPTIONS: dict[str, str] = {
-    "tables": "System view listing the tables and views visible in this workspace.",
-    "columns": "System view listing the columns of the tables and views visible in this workspace.",
-    "views": "System view listing the views visible in this workspace, including their SQL definition.",
+    "tables": "Tables and views visible in this workspace, with their latest snapshot and size.",
+    "columns": "Columns of every table and view visible in this workspace.",
+    "views": "Views visible in this workspace, with their SQL definition.",
     "triggers": (
-        "System view listing the triggers defined on the tables visible in this "
-        "workspace, including what each one runs, whose authority it runs with, "
-        "and whether it has been suspended."
+        "Triggers on the tables visible in this workspace.\n"
+        "\n"
+        "- `target` is what fires: a view or a task\n"
+        "- `runs_as` is whose authority the run carries\n"
+        "- `suspended_at` is set while the trigger is paused"
+    ),
+    "tasks": (
+        "Tasks registered in this workspace: statements the platform runs on its own.\n"
+        "\n"
+        "- `writes` lists the tables the statement writes to, comma-separated\n"
+        "- `last_window_to` is the version the last successful run consumed to"
     ),
     "column_relationships": (
-        "System view listing the relationships declared between columns of the tables "
-        "visible in this workspace. A relationship records that two columns hold "
-        "corresponding values; nothing enforces it, and a write that breaks one "
-        "succeeds. A row appears only where both of its tables are visible. "
-        "Rows with origin='inferred' and status='unverified' are unconfirmed "
-        "proposals carrying the evidence they were proposed on; they are never "
-        "emitted as navigable relationships."
+        "Relationships declared between columns of the tables visible in this "
+        "workspace. A relationship is a declaration, not a constraint: **nothing "
+        "enforces it**.\n"
+        "\n"
+        "- A row appears only where both tables are visible\n"
+        "- `origin` of `inferred` with `status` of `unverified` is an unconfirmed "
+        "proposal, never emitted as a navigable relationship"
     ),
-    "schemata": "System view listing the schemas (collections) visible in this workspace.",
+    "schemata": "Schemas (collections) visible in this workspace.",
     "grants": (
-        "System view listing, for the workspace and each collection, table and view "
-        "in it, every access policy that reaches it. origin says whether the policy is "
-        "stored at that object (explicit) or covers it from the collection or workspace "
-        "above (inherited). Rows are shown only for objects the caller may administer."
+        "Access policies reaching the workspace and each collection, table and view "
+        "in it. Rows are shown only for objects the caller may administer.\n"
+        "\n"
+        "- `origin` of `explicit`: stored at the object, as `SHOW GRANTS ON` reports\n"
+        "- `origin` of `inherited`: covers it from the collection or workspace above, "
+        "as `SHOW EFFECTIVE GRANTS ON` adds"
     ),
 }
 
