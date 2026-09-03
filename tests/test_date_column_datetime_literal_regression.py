@@ -107,8 +107,12 @@ def _manifest(column_type, lower, upper, column_name="date_added"):
 
 def _surviving_files(column_type, bounds, filter_expr):
     manifest = _manifest(column_type, *bounds)
-    manifest.prune_files([_filter_condition(filter_expr)])
-    return manifest.files
+    # `prune_files` does not mutate: it returns the pruned manifest and leaves
+    # this one whole. Discarding the return value read the ORIGINAL file list,
+    # which made every "reads the data" assertion pass vacuously and every
+    # "still prunes" assertion impossible - the test could not see a prune at
+    # all, so it could not have caught the regression it exists to pin.
+    return manifest.prune_files([_filter_condition(filter_expr)]).files
 
 
 # ---------------------------------------------------------------------------

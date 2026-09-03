@@ -110,7 +110,12 @@ def test_role_allows_read_covers_read_capable_roles():
 # columns describe what they may not see.
 # ---------------------------------------------------------------------------
 
-SHAPE_TABLES = ["tables", "columns", "views", "column_relationships", "schemata"]
+# `listeners` sits with the shape tables even though it is about automation:
+# its rows are the CALLER'S OWN subscriptions and nobody else's, and LISTEN is
+# gated on reading what the object writes rather than on owning it - so a
+# reader can hold rows here, and it is the only table where a non-owner
+# subscriber can see what they subscribed to.
+SHAPE_TABLES = ["tables", "columns", "views", "column_relationships", "schemata", "listeners"]
 OWNER_TABLES = ["triggers", "tasks", "grants"]
 
 

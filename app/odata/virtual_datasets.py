@@ -55,7 +55,20 @@ VIRTUAL_INFORMATION_SCHEMA_TABLES: dict[str, list[EdmProperty]] = {
         _col("trigger_catalog", "VARCHAR"),
         _col("trigger_collection", "VARCHAR"),
         _col("trigger_name", "VARCHAR"),
+        # What the trigger HANGS OFF, as `collection.name`: the dataset whose
+        # commits fire a commit trigger, or the task a schedule or signal
+        # trigger fires.
+        _col("trigger_holder", "VARCHAR"),
+        # The dataset the fired run's window is bound from: the holder for a
+        # commit trigger, the OVER table for a schedule or signal trigger, and
+        # null when such a trigger has none.
         _col("event_object_table", "VARCHAR"),
+        # "commit" | "schedule" | "signal". The three columns after it describe
+        # a clock: null for a commit trigger, whose event is the commit itself.
+        _col("event_kind", "VARCHAR"),
+        _col("schedule", "VARCHAR"),
+        _col("time_zone", "VARCHAR"),
+        _col("next_due_at", "TIMESTAMP"),
         _col("action_kind", "VARCHAR"),
         # `target`, not `target_view`. A trigger has exactly one target and it
         # may be a task, so the engine collapsed the pair into one column; this
@@ -83,6 +96,9 @@ VIRTUAL_INFORMATION_SCHEMA_TABLES: dict[str, list[EdmProperty]] = {
         # interval a commit stamps `last_fired_status: throttled` and fires
         # nothing - the setting working, not a fault.
         _col("minimum_interval_seconds", "BIGINT"),
+        # When a signal trigger's token was last rotated; null for the other
+        # kinds. The token itself is never reported here.
+        _col("signal_token_rotated_at", "TIMESTAMP"),
     ],
     # Every task registered in the workspace. Mirrors the engine's
     # `InformationSchemaTasksTable`; `writes` is what makes a task a node with
@@ -106,6 +122,22 @@ VIRTUAL_INFORMATION_SCHEMA_TABLES: dict[str, list[EdmProperty]] = {
         _col("last_fired_at", "TIMESTAMP"),
         _col("last_fired_status", "VARCHAR"),
         _col("last_window_to", "BIGINT"),
+        # The CALLER's own subscription to the task ("ERROR" / "SUCCESS" /
+        # "EVERYTHING"), or null. Not a subscriber count - that would tell
+        # everyone who can read this table how many people watch a task.
+        _col("listening", "VARCHAR"),
+    ],
+    "listeners": [
+        # Object columns, not task columns: a subscription is to a task OR a
+        # materialized view, and `kind` says which ("task" |
+        # "materialized_view"). The engine records the kind at subscription
+        # time; the caller never writes it, since the three share one namespace.
+        _col("object_catalog", "VARCHAR"),
+        _col("object_collection", "VARCHAR"),
+        _col("object_name", "VARCHAR"),
+        _col("kind", "VARCHAR"),
+        _col("outcome", "VARCHAR"),
+        _col("created_at", "TIMESTAMP"),
     ],
     "column_relationships": [
         _col("constraint_catalog", "VARCHAR"),
@@ -229,6 +261,10 @@ VIRTUAL_INFORMATION_SCHEMA_DESCRIPTIONS: dict[str, str] = {
     "triggers": (
         "Triggers on the tables visible in this workspace.\n"
         "\n"
+        "- `event_kind` is what fires it: `commit` on `event_object_table`, "
+        "`schedule` (see `schedule`, `time_zone`, `next_due_at`) or `signal`\n"
+        "- `trigger_holder` is what it hangs off: the source dataset, or the task "
+        "for a schedule or signal trigger\n"
         "- `target` is what fires: a view or a task\n"
         "- `runs_as` is whose authority the run carries\n"
         "- `suspended_at` is set while the trigger is paused\n"
@@ -239,7 +275,15 @@ VIRTUAL_INFORMATION_SCHEMA_DESCRIPTIONS: dict[str, str] = {
         "Tasks registered in this workspace: statements the platform runs on its own.\n"
         "\n"
         "- `writes` lists the tables the statement writes to, comma-separated\n"
-        "- `last_window_to` is the version the last successful run consumed to"
+        "- `last_window_to` is the version the last successful run consumed to\n"
+        "- `listening` is YOUR subscription to the task's outcomes, or null"
+    ),
+    "listeners": (
+        "The tasks and materialized views YOU are subscribed to for run "
+        "notifications - one row per subscription, yours only. `kind` is "
+        "`task` or `materialized_view`; `outcome` is which outcomes it covers: "
+        "`ERROR`, `SUCCESS` or `EVERYTHING`. Subscribe with `LISTEN TO <name> "
+        "[FOR ...]`, unsubscribe with `UNLISTEN <name>`."
     ),
     "column_relationships": (
         "Relationships declared between columns of the tables visible in this "
@@ -281,6 +325,12 @@ VIRTUAL_INFORMATION_SCHEMA_ACTIONS: dict[str, str] = {
     "views": "READ",
     "triggers": "AUTOMATE",
     "tasks": "AUTOMATE",
+    # READ, and deliberately not AUTOMATE like `tasks`: LISTEN is gated on
+    # reading what the task WRITES, so a subscriber need not own the task -
+    # and this table is the only place a non-owner subscriber can see what
+    # they subscribed to, since `tasks` is closed to them. Its rows are the
+    # caller's own, so any reader could have some.
+    "listeners": "READ",
     "column_relationships": "READ",
     "schemata": "READ",
     "grants": "GRANT",
