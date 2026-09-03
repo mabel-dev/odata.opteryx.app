@@ -196,3 +196,23 @@ def test_a_name_that_is_not_a_virtual_table_is_not_offered():
     policies = [{"pattern": "ws.*", "role": "owner", "policy": "p1"}]
 
     assert virtual_information_schema_role(policies, "ws", "orders") is None
+
+
+def test_scoped_entitlement_offers_automation_tables_where_no_policy_can():
+    """`automation_admin::public` is AUTOMATE on `public.*`, held by an account no
+    policy can grant it to. The tier gate resolves it through opteryx-access, the
+    same library the engine's gate is answered from, so odata offers exactly the
+    tables the query would fill. Reported as `entitlement`, which is not a role."""
+    held = ["data_admin", "automation_admin::public"]
+    assert virtual_information_schema_role([], "public", "triggers") is None
+    assert virtual_information_schema_role([], "public", "triggers", entitlements=held) == "entitlement"
+    assert virtual_information_schema_role([], "public", "tasks", entitlements=held) == "entitlement"
+    # Scope is in the name: nothing in a workspace it does not name.
+    assert virtual_information_schema_role([], "opteryx", "triggers", entitlements=held) is None
+    # A role that already confers the action still wins, and is reported as itself.
+    owner = [{"pattern": "opteryx.*", "role": "owner"}]
+    assert virtual_information_schema_role(owner, "opteryx", "triggers", entitlements=held) == "owner"
+    # Unrecognized names confer nothing.
+    assert virtual_information_schema_role([], "public", "triggers", entitlements=["platform_admin"]) is None
+    offered = dict(visible_virtual_information_schema([], "public", entitlements=held))
+    assert offered["triggers"] == "entitlement" and offered["tasks"] == "entitlement"

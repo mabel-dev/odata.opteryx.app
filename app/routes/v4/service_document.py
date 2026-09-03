@@ -637,6 +637,7 @@ def get_service_document(
     else:
         # Determine access policies from JWT "policies" claim (do not rely on a "permissions" key).
         from app.auth.permissions import accessible_workstreams
+        from app.auth.permissions import entitlements_from_claims
         from app.auth.permissions import get_access_policies_from_claims
         from app.auth.permissions import read_grant_for_relation
         from app.auth.permissions import visible_virtual_information_schema
@@ -718,7 +719,7 @@ def get_service_document(
         # is never offered that would only ever come back empty. Which rows are in
         # it is decided downstream, at query time.
         for workspace in workspace_ids | {"personal"}:
-            for name, role in visible_virtual_information_schema(access_policies_list, workspace):
+            for name, role in visible_virtual_information_schema(access_policies_list, workspace, entitlements=sorted(entitlements_from_claims(claims))):
                 filtered_datasets.append(
                     DatasetInfo(
                         resource=f"{workspace}.information_schema.{name}",

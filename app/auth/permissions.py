@@ -352,7 +352,10 @@ def roles_in_workstream(policies: List[Dict[str, str]], workstream: str) -> List
 
 
 def virtual_information_schema_role(
-    policies: List[Dict[str, str]], workstream: str, name: str
+    policies: List[Dict[str, str]],
+    workstream: str,
+    name: str,
+    entitlements: Optional[List[str]] = None,
 ) -> Optional[str]:
     """The role under which `<workstream>.information_schema.<name>` is offered to a
     caller holding `policies`, or None when it is not offered to them at all.
@@ -390,11 +393,24 @@ def virtual_information_schema_role(
     for role in roles:
         if action_allowed_for_role(role, action):
             return role
+
+    # An entitlement confers the action without a role: `automation_admin::public`
+    # is AUTOMATE on `public.*`, held by an account no policy can grant it to.
+    # Resolved by opteryx-access, the same library the engine's gate is answered
+    # from, so this offers exactly the tables that query would fill. Reported as
+    # `entitlement`, which is deliberately not a role name.
+    if entitlements:
+        from opteryx_access import entitlement_permits_workspace_action
+        from opteryx_access import resolve_entitlements
+
+        for entitlement in resolve_entitlements(entitlements):
+            if entitlement_permits_workspace_action(entitlement, workstream, action):
+                return "entitlement"
     return None
 
 
 def visible_virtual_information_schema(
-    policies: List[Dict[str, str]], workstream: str
+    policies: List[Dict[str, str]], workstream: str, entitlements: Optional[List[str]] = None
 ) -> List[Tuple[str, str]]:
     """Every virtual information_schema table offered in `workstream` to a caller
     holding `policies`, as `(name, role)` in registry order."""
@@ -402,7 +418,7 @@ def visible_virtual_information_schema(
 
     offered = []
     for name in VIRTUAL_INFORMATION_SCHEMA_TABLES:
-        role = virtual_information_schema_role(policies, workstream, name)
+        role = virtual_information_schema_role(policies, workstream, name, entitlements=entitlements)
         if role is not None:
             offered.append((name, role))
     return offered

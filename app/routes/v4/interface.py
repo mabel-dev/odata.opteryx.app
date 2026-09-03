@@ -739,6 +739,7 @@ def execute_odata_query(
     access_policies: Optional[List[dict]] = None,
     billing_account: Optional[str] = None,
     visibility_filters: Optional[dict] = None,
+    entitlements: Optional[List[str]] = None,
 ) -> dict:
     """Execute an OData query and return results.
 
@@ -824,6 +825,12 @@ def execute_odata_query(
             # `access_policies_for_query` appends none. jobs.opteryx guards the same
             # way, and pins it with a test.
             access_policies=access_policies or [],
+            # The caller's entitlement names, bare. The engine's permission
+            # capability resolves what they confer (`automation_admin::public`
+            # is AUTOMATE on `public.*`), which is how an entitled caller sees
+            # the triggers and tasks in a workspace no policy can grant. Without
+            # them the same query answers empty here and full through jobs.
+            entitlements=entitlements or [],
             billing_account=billing_account,
         )
 
@@ -1158,6 +1165,7 @@ def read_dataset(
     # Opteryx's permission checks are evaluated against the actual caller.
     from app.auth.permissions import (
         access_policies_for_query,
+        entitlements_from_claims,
         is_anonymous_exempt,
         visibility_filters_from_claims,
     )
@@ -1165,6 +1173,7 @@ def read_dataset(
     claims = getattr(request.state, "claims", None) or {}
     identity = claims.get("identity")
     access_policies = access_policies_for_query(claims)
+    entitlements = sorted(entitlements_from_claims(claims))
     billing_account = claims.get("billing_account")
     # Row-level scoping. Always supplied: it denies rather than allows when the caller's
     # billing account is unknown, and Opteryx leaves unlisted relations unfiltered.
@@ -1191,6 +1200,7 @@ def read_dataset(
             access_policies=access_policies,
             billing_account=billing_account,
             visibility_filters=visibility_filters,
+            entitlements=entitlements,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=f"Invalid query: {str(e)}")
@@ -1429,6 +1439,7 @@ def dataset_metadata(
     if identity is None and not is_anonymous_exempt(workstream, collection):
         raise HTTPException(status_code=401, detail="Missing or invalid credentials")
 
+    from app.auth.permissions import entitlements_from_claims
     from app.auth.permissions import get_access_policies_from_claims
     from app.auth.permissions import read_grant_for_relation
     from app.auth.permissions import virtual_information_schema_role
@@ -1443,6 +1454,7 @@ def dataset_metadata(
     is_virtual_info_schema = is_virtual_information_schema(collection, dataset)
 
     access_policies_list = get_access_policies_from_claims(claims)
+    entitlements_list = sorted(entitlements_from_claims(claims))
 
     # The virtual information_schema datasets have no catalog entry for a policy to
     # name, so they are not granted per relation. One is offered in a workstream
@@ -1451,7 +1463,9 @@ def dataset_metadata(
     # the engine answers implicit grants. Decided first because it is the whole
     # decision for these datasets: the branches below are for catalog objects.
     if is_virtual_info_schema:
-        role = virtual_information_schema_role(access_policies_list, workstream, dataset)
+        role = virtual_information_schema_role(
+            access_policies_list, workstream, dataset, entitlements=entitlements_list
+        )
         if role is None:
             raise HTTPException(status_code=403, detail="forbidden: not allowed to view metadata")
         allowed = True

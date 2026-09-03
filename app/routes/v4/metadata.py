@@ -914,6 +914,7 @@ def get_edmx_metadata(request: Request) -> Any:
         # Determine access policies from JWT "policies" claim (do not rely on a "permissions" key).
         from app.auth.permissions import (
             accessible_workstreams,
+            entitlements_from_claims,
             get_access_policies_from_claims,
             read_grant_for_relation,
             visible_virtual_information_schema,
@@ -977,7 +978,7 @@ def get_edmx_metadata(request: Request) -> Any:
         # visible_virtual_information_schema). Which rows are in a table is
         # decided downstream, at query time.
         for workspace in workspace_ids | {"personal"}:
-            for name, _role in visible_virtual_information_schema(access_policies_list, workspace):
+            for name, _role in visible_virtual_information_schema(access_policies_list, workspace, entitlements=sorted(entitlements_from_claims(claims))):
                 filtered_datasets.append(
                     DatasetInfo(
                         resource=f"{workspace}.information_schema.{name}",
