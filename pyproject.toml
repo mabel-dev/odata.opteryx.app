@@ -16,14 +16,14 @@ dependencies = [
     "google-cloud-firestore>=2.29.0",
     "google-cloud-secret-manager==2.30.0",
     "google-cloud-storage==3.13.1",
-    "opteryx-catalog[kms]>=0.4.127",
+    "opteryx-catalog[kms]>=0.4.138",
     "opteryx-shared-services[web,storage,secrets]>=0.2.2",
     # 0.9.94 is the floor for information_schema.triggers carrying `suspended_at`
     # / `suspended_by`. tests/test_virtual_schemas_match_engine.py compares this
     # service's virtual schema against the installed engine, so a floor behind
     # the engine that owns those columns fails the build rather than publishing
     # a $metadata document the data path cannot serve.
-    "opteryx-core>=0.9.95",
+    "opteryx-core>=0.9.97",
     "opteryx-access>=0.2.12",
     "opteryx-iceberg>=0.1.8",
     "python-jose[cryptography]==3.5.0",
