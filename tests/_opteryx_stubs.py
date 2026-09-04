@@ -44,7 +44,7 @@ _STUBBED_NAMES = [
     "opteryx_access.adapters.firestore",
     "opteryx_catalog",
     "opteryx_catalog.catalog",
-    "opteryx_catalog.catalog.compaction",
+    "opteryx_catalog.catalog.sort_order",
     "opteryx_catalog.catalog.dataset",
 ]
 
@@ -143,9 +143,9 @@ def _build_stubs():
 
     stubs["opteryx_catalog.catalog"] = _package("opteryx_catalog.catalog")
 
-    compaction = types.ModuleType("opteryx_catalog.catalog.compaction")
+    compaction = types.ModuleType("opteryx_catalog.catalog.sort_order")
     compaction.normalize_sort_order = lambda *args, **kwargs: None
-    stubs["opteryx_catalog.catalog.compaction"] = compaction
+    stubs["opteryx_catalog.catalog.sort_order"] = compaction
 
     # The real `_stored_type_display` renders DECIMAL precision/scale and ARRAY
     # element types into the canonical display string; the bare name is enough

@@ -1646,7 +1646,7 @@ def dataset_metadata(
         sort_order_column = None
         sort_order_ascending = True
         try:
-            from opteryx_catalog.catalog.compaction import normalize_sort_order
+            from opteryx_catalog.catalog.sort_order import normalize_sort_order
 
             normalized = normalize_sort_order(stub.get("sort-orders"))
             if normalized:
@@ -1860,7 +1860,7 @@ def dataset_metadata(
 
             # Resolve the dataset's physical sort order (if any) to a column name, for the
             # Custom.SortOrder annotation below. This reuses the same sort_orders field and
-            # id -> name -> index resolution precedence that DatasetCompactor already applies
+            # id -> name -> index resolution precedence that resolve_sort_column applies
             # when deciding whether sort-preserving compaction is available, so it costs no
             # extra catalog round trip -- everything it needs (ds.metadata, schema columns)
             # is already fetched above.
@@ -1868,7 +1868,7 @@ def dataset_metadata(
             sort_order_ascending = True
             if source_type in TABLE_LIKE_SOURCES:
                 try:
-                    from opteryx_catalog.catalog.compaction import normalize_sort_order
+                    from opteryx_catalog.catalog.sort_order import normalize_sort_order
 
                     raw_sort_orders = getattr(getattr(ds, "metadata", None), "sort_orders", None)
                     normalized = normalize_sort_order(raw_sort_orders)

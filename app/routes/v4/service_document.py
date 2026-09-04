@@ -13,7 +13,7 @@ from opteryx_shared_services.logging import get_logger
 from app.auth.deps import require_authentication
 from opteryx_shared_services.config import get_config
 from app.core import _get_firestore_client
-from opteryx_catalog.catalog.compaction import normalize_sort_order
+from opteryx_catalog.catalog.sort_order import normalize_sort_order
 
 logger = get_logger()
 router = APIRouter(prefix="/api/v4", tags=["OData v4"])
