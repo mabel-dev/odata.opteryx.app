@@ -2711,4 +2711,147 @@ def dataset_metadata(
     return metadata_response(xml, etag, headers, if_none_match)
 
 
+def _may_read(claims: dict, relation: str) -> bool:
+    """Whether the caller may read one fully-qualified relation.
+
+    The same three rungs the dataset endpoints climb, in the same order:
+    `personal.<identity>.*` is the caller's own, `public.*` is readable by
+    anyone, and everything else needs a read grant matched against the WHOLE
+    relation name - not its workspace, which would let a grant on one dataset
+    disclose every dataset beside it.
+    """
+    from app.auth.permissions import get_access_policies_from_claims
+    from app.auth.permissions import read_grant_for_relation
+
+    parts = relation.split(".")
+    if len(parts) < 3:
+        return False
+    workstream, collection = parts[0], parts[1]
+    if workstream == "personal":
+        identity = claims.get("identity")
+        return bool(identity) and collection == identity
+    if workstream == "public":
+        return True
+    return read_grant_for_relation(get_access_policies_from_claims(claims), relation) is not None
+
+
+@router.get(
+    "/{workstream}/$inbound-edges",
+    summary="What puts work into a dataset, from any workspace",
+    description=(
+        "Every trigger or task in the catalog whose work lands on `target`, wherever it "
+        "lives. `information_schema.triggers` enumerates ONE workspace and a trigger is "
+        "recorded in its SOURCE's workspace, so a chain that crosses a workspace boundary "
+        "is invisible from the target's side: this is the read that answers it. Two records "
+        "can put an edge into a dataset and both are reported - a trigger naming it "
+        "(`materialized_view_refresh`, `task`) and a task whose statement writes it "
+        "(`writes`). A row whose source the caller cannot read still comes back, with "
+        "`source` and `workspace` null and `visible` false: that something upstream exists "
+        "is not the secret, its name is."
+    ),
+    responses={
+        200: {"description": "The inbound edges, in `value`"},
+        400: {"description": "`target` missing, not fully qualified, or in another workspace than the path"},
+        401: {"description": "Missing or invalid authentication"},
+        403: {"description": "Forbidden: no read access to the target"},
+    },
+)
+def inbound_edges(
+    request: Request,
+    response: Response,
+    workstream: str,
+    target: str = Query(
+        ...,
+        description=(
+            "The fully-qualified `workspace.collection.name` whose upstream is wanted. Must "
+            "be in the workspace named in the path."
+        ),
+    ),
+) -> Any:
+    """The trigger graph read backwards, for one dataset.
+
+    WORKSPACE-SCOPED PATH for a deliberately cross-workspace answer: the rows
+    come from anywhere, but the question is about a dataset in `workstream`, and
+    the path is what the caller's read grant is checked against. Its own segment
+    (`$inbound-edges`, in the OData manner of `$metadata`) rather than a virtual
+    `information_schema` table, because it is not one: it takes a required
+    argument, and the engine has no such table to keep this one honest against.
+
+    ONE INDEXED QUERY EACH behind it - see opteryx_catalog.inbound_edges - not
+    the walk over every collection and dataset that reading a workspace's whole
+    trigger listing costs. That is what makes it affordable to ask per node.
+    """
+    response.headers["OData-Version"] = "4.0"
+
+    claims = getattr(request.state, "claims", {}) or {}
+
+    parts = (target or "").split(".")
+    if len(parts) < 3:
+        raise HTTPException(
+            status_code=400,
+            detail="target must be a fully-qualified workspace.collection.name",
+        )
+    if parts[0] != workstream:
+        # The path is what authorization is decided on, so a target somewhere
+        # else would be a check on one dataset guarding an answer about another.
+        raise HTTPException(
+            status_code=400,
+            detail=f"target {target} is not in workspace {workstream}",
+        )
+
+    if not _may_read(claims, target):
+        raise HTTPException(status_code=403, detail="forbidden: not allowed to read target")
+
+    from opteryx_catalog.inbound_edges import find_inbound_edges
+
+    client = _get_firestore_client(GCP_PROJECT_ID, _firestore_database())
+    if client is None:
+        raise HTTPException(status_code=503, detail="catalog unavailable")
+
+    rows = find_inbound_edges(client, target)
+
+    value = []
+    for row in rows:
+        visible = _may_read(claims, row["source"])
+        value.append(
+            {
+                "target": row["target"],
+                # Elided rather than dropped: the caller is owed the fact that
+                # something upstream exists even where they may not be told what.
+                "source": row["source"] if visible else None,
+                "workspace": row["workspace"] if visible else None,
+                "source_kind": row["source_kind"] if visible else None,
+                "visible": visible,
+                "kind": row["kind"],
+                "trigger": row["trigger"] if visible else None,
+                "runs_as": row["runs_as"] if visible else None,
+                "last_fired_at": _iso_from_ms(row["last_fired_at_ms"]) if visible else None,
+                "last_fired_status": row["last_fired_status"] if visible else None,
+                "suspended": bool(row["suspended_at_ms"]) if visible else None,
+            }
+        )
+
+    return Response(
+        content=json.dumps({"target": target, "value": value}).encode("utf-8"),
+        media_type="application/json",
+        headers={"OData-Version": "4.0"},
+    )
+
+
+def _iso_from_ms(value) -> Optional[str]:
+    """Epoch milliseconds as an ISO 8601 UTC string, the spelling every other
+    timestamp in this API carries. None stays None: a trigger that has never
+    fired has no time, and 1970 is not it."""
+    if value is None:
+        return None
+    try:
+        return (
+            dt.datetime.fromtimestamp(int(value) / 1000, tz=dt.timezone.utc)
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
+    except (TypeError, ValueError, OSError):
+        return None
+
+
 __all__ = ["router"]
