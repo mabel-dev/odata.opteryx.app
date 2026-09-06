@@ -16,7 +16,7 @@ dependencies = [
     "google-cloud-storage==3.13.1",
     "opteryx-catalog[kms]>=0.4.141",
     "opteryx-shared-services[web,storage,secrets]>=0.2.2",
-    "opteryx-core>=0.9.100",
+    "opteryx-core>=0.9.101",
     "opteryx-access>=0.2.12",
     "opteryx-iceberg>=0.1.9",
     "python-jose[cryptography]==3.5.0",
