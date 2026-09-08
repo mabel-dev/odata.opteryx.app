@@ -11,6 +11,7 @@ from google.cloud.firestore_v1.base_query import FieldFilter
 from opteryx_shared_services.logging import get_logger
 
 from app.auth.deps import require_authentication
+from app.odata.content_negotiation import MEDIA_JSON, require_acceptable
 from opteryx_shared_services.config import get_config
 from app.core import _get_firestore_client
 from opteryx_catalog.catalog.sort_order import normalize_sort_order
@@ -561,8 +562,9 @@ def _get_workspace_datasets(db, workspace_ids: set[str]) -> list[DatasetInfo]:
     responses={
         200: {"description": "Service document with EntitySet list and access metadata"},
         401: {"description": "Missing or invalid authentication"},
+        406: {"description": "Accept header does not admit application/json, the only format this route returns"},
     },
-    dependencies=[Depends(require_authentication)],
+    dependencies=[Depends(require_authentication), Depends(require_acceptable(MEDIA_JSON))],
 )
 def get_service_document(
     request: Request,

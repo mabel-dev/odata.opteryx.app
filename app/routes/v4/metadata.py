@@ -22,6 +22,7 @@ from app.auth.deps import require_authentication
 from opteryx_shared_services.config import get_config
 from app.core import _get_firestore_client
 from opteryx_shared_services.logging import get_logger
+from app.odata.content_negotiation import MEDIA_XML, require_acceptable
 from app.odata.edm_types import ORIGINAL_TYPE_TERM, RESOURCE_TERM, EdmProperty, edm_property
 from app.odata.virtual_datasets import (
     TASK_DEFINITION_COLUMNS,
@@ -825,9 +826,10 @@ def _entity_names(datasets: list[DatasetInfo]) -> dict[str, str]:
     responses={
         200: {"description": "EDMX metadata document (XML)"},
         401: {"description": "Missing or invalid authentication"},
+        406: {"description": "Accept header does not admit application/xml, the only format this route returns"},
         504: {"description": "Firestore unavailable; cannot enumerate datasets"},
     },
-    dependencies=[Depends(require_authentication)],
+    dependencies=[Depends(require_authentication), Depends(require_acceptable(MEDIA_XML))],
 )
 def get_edmx_metadata(request: Request) -> Any:
     """

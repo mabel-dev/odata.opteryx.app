@@ -1,4 +1,4 @@
-"""Tests for rejecting unsupported OData query options ($search, $expand)."""
+"""Tests for rejecting unsupported OData query options ($search, $expand, $compute)."""
 class TestSearchRejection:
     """Test that $search queries are rejected with 501."""
 
@@ -101,6 +101,46 @@ class TestExpandRejection:
         """Error response should be valid OData format."""
         response = client.get(
             "/api/v4/public/demo/users?$expand=Orders"
+        )
+        assert response.status_code == 501
+        assert response.headers.get("OData-Version") == "4.0"
+        data = response.json()
+        assert "error" in data
+        assert "code" in data["error"]
+        assert "message" in data["error"]
+
+
+class TestComputeRejection:
+    """Test that $compute queries are rejected with 501.
+
+    Unlike $search/$expand, $compute was never a recognized FastAPI query
+    parameter at all -- an unbound query param is silently dropped rather
+    than erroring, which is exactly the "silently ignore unsupported
+    functionality" behaviour OData minimal conformance (13.1.1 item 7)
+    forbids. These tests guard against that regressing back to silent.
+    """
+
+    def test_compute_with_value_rejected(self, client):
+        """$compute=Amount mul 2 as Doubled should return 501 Not Implemented."""
+        response = client.get(
+            "/api/v4/public/demo/users?$compute=id mul 2 as DoubledId"
+        )
+        assert response.status_code == 501
+        data = response.json()
+        assert "error" in data
+        assert "$compute" in data["error"]["message"]
+
+    def test_compute_empty_allowed(self, client):
+        """$compute= with empty value should not trigger rejection."""
+        response = client.get(
+            "/api/v4/public/demo/users?$compute=&$top=1"
+        )
+        assert response.status_code != 501
+
+    def test_compute_error_format(self, client):
+        """Error response should be valid OData format."""
+        response = client.get(
+            "/api/v4/public/demo/users?$compute=id mul 2 as DoubledId"
         )
         assert response.status_code == 501
         assert response.headers.get("OData-Version") == "4.0"

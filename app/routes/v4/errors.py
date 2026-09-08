@@ -28,6 +28,8 @@ def _map_status_to_code(status_code: int) -> str:
         status.HTTP_401_UNAUTHORIZED: "Unauthorized",
         status.HTTP_403_FORBIDDEN: "Forbidden",
         status.HTTP_404_NOT_FOUND: "NotFound",
+        status.HTTP_406_NOT_ACCEPTABLE: "NotAcceptable",
+        status.HTTP_501_NOT_IMPLEMENTED: "NotImplemented",
         status.HTTP_500_INTERNAL_SERVER_ERROR: "InternalServerError",
         status.HTTP_502_BAD_GATEWAY: "BadGateway",
         status.HTTP_503_SERVICE_UNAVAILABLE: "ServiceUnavailable",

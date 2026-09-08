@@ -34,13 +34,23 @@ class ODataLogicalPlanBuilder:
     Expression parsing is delegated to ODataExpressionParser.
     """
 
-    def __init__(self, table_name: str):
+    def __init__(
+        self,
+        table_name: str,
+        version: Optional[int] = None,
+        version_tag: Optional[str] = None,
+    ):
         """Initialize the builder for a specific table.
 
         Args:
             table_name: Fully qualified table name (workstream.collection.dataset)
+            version: Explicit snapshot id (0 is the engine's sentinel for
+                VERSION AS OF PREVIOUS), or None to read the current snapshot.
+            version_tag: Tag name (including "current"), or None.
         """
         self.table_name = table_name
+        self.version = version
+        self.version_tag = version_tag
         self.plan = LogicalPlan()
         self.current_step_id: Optional[str] = None
         self.expression_parser = ODataExpressionParser()
@@ -178,6 +188,8 @@ class ODataLogicalPlanBuilder:
         scan_node.relation = self.table_name
         scan_node.alias = self.table_name.split(".")[-1]  # Use dataset name as alias
         scan_node.hints = []
+        scan_node.version = self.version
+        scan_node.version_tag = self.version_tag
         # Don't set columns - binder will populate it
 
         return self._add_node(scan_node)

@@ -1,6 +1,25 @@
 """OData API endpoints for the OData service.
 
 This module provides OData protocol endpoints for querying Opteryx data.
+
+DO NOT INVENT NEW NON-STANDARD ENDPOINTS ON THIS SERVICE. NOT ONE, EVER,
+UNDER ANY CIRCUMSTANCE, without the workspace-scoped ACL implications being
+explicitly signed off first.
+
+This service's job is OData: `$metadata`, `$filter`, `$select`, `$top`,
+`$skip`, `$count`, `$apply` - the protocol, applied to workspace-scoped
+collections, gated by the read grant on the path. A bespoke `$name` route
+that is not part of that protocol is a byte-for-byte re-implementation of
+"what an entitlement means here," made by whoever wrote that one route,
+usually while solving a real and sympathetic problem - and every one of them
+found here so far (`$inbound-edges`, `$lineage`, `$consumers`, all added and
+removed the same week, 2026-09) answered its question by walking outside the
+workspace named in the path and reporting on objects in OTHER workspaces,
+elided by name but not by existence. That is not a bug in any one of them;
+it is what "give me an answer that isn't scoped to one workspace" costs by
+construction, and it is a design decision this codebase does not get to make
+route-by-route. If a feature needs a cross-workspace read, that is a product
+and security decision made above this file, not a `$` prefix invented in it.
 """
 
 from __future__ import annotations
@@ -49,9 +68,14 @@ from opteryx_shared_services.logging import get_logger
 
 from app.auth.deps import require_authentication
 from app.core import _get_firestore_client
+from app.odata.content_negotiation import MEDIA_JSON
+from app.odata.content_negotiation import MEDIA_XML
+from app.odata.content_negotiation import require_acceptable
 from opteryx_shared_services.config import get_config
 from app.odata.odata_to_logical_plan import ODataLogicalPlanBuilder
 from app.odata.plan_optimizer import ODataLogicalPlanOptimizer
+from app.odata.version_selector import label_to_version_kwargs
+from app.odata.version_selector import split_dataset_label
 from app.odata.column_stats import ipv4_address
 from app.odata.column_stats import ipv4_enclosing_cidr
 from app.odata.column_stats import is_ipv4_source
@@ -718,14 +742,20 @@ def _execute_count_query(
     filter_expr: Optional[str],
     apply_expr: Optional[str],
     visibility_filters=None,
+    version: Optional[int] = None,
+    version_tag: Optional[str] = None,
 ) -> int:
     """Run a COUNT(*) plan over the same filters as the row query, returning the total.
 
     Takes a session factory rather than a session because this runs concurrently
     with the row query (see execute_odata_query) and a session carries per-execution
     state, so the two must not share one.
+
+    version/version_tag must match the row query's -- otherwise $count=true
+    against a pinned snapshot could report a total that doesn't match the rows
+    returned alongside it.
     """
-    count_builder = ODataLogicalPlanBuilder(table_name)
+    count_builder = ODataLogicalPlanBuilder(table_name, version=version, version_tag=version_tag)
     count_plan = count_builder.build(
         filter_expr=filter_expr,
         select_cols=None,
@@ -770,6 +800,8 @@ def execute_odata_query(
     billing_account: Optional[str] = None,
     visibility_filters: Optional[dict] = None,
     entitlements: Optional[List[str]] = None,
+    version: Optional[int] = None,
+    version_tag: Optional[str] = None,
 ) -> dict:
     """Execute an OData query and return results.
 
@@ -787,6 +819,9 @@ def execute_odata_query(
         skip: $skip offset
         count_requested: Whether to include total count
         apply_expr: OData $apply expression
+        version: Explicit snapshot id from a `@{label}` version selector, or None
+        version_tag: Tag name (including "current") from a `@{label}` version
+            selector, or None
 
     Returns:
         dict with keys:
@@ -817,7 +852,7 @@ def execute_odata_query(
     # When top is set, fetch top+1 internally to detect truncation
     fetch_top = top + 1 if top > 0 else top
 
-    plan_builder = ODataLogicalPlanBuilder(table_name)
+    plan_builder = ODataLogicalPlanBuilder(table_name, version=version, version_tag=version_tag)
     try:
         logical_plan = plan_builder.build(
             filter_expr=filter_expr,
@@ -890,6 +925,8 @@ def execute_odata_query(
             filter_expr,
             apply_expr,
             visibility_filters,
+            version,
+            version_tag,
         )
 
     try:
@@ -914,7 +951,9 @@ def execute_odata_query(
                 # to learn the shape. This runs while the count query is in flight,
                 # so it costs nothing beyond the count it hides behind.
                 try:
-                    schema_builder = ODataLogicalPlanBuilder(table_name)
+                    schema_builder = ODataLogicalPlanBuilder(
+                        table_name, version=version, version_tag=version_tag
+                    )
                     schema_plan = schema_builder.build(
                         filter_expr=filter_expr,
                         select_cols=select_cols,
@@ -987,14 +1026,28 @@ router = APIRouter(
 @router.get(
     "/{workstream}/{collection}/{dataset}",
     summary="Query dataset rows",
-    description="Retrieve data from a dataset with OData v4 query parameters ($filter, $select, $orderby, $top, $skip, $apply, $count). Returns paginated results with total count and nextLink for server-driven paging.",
+    description=(
+        "Retrieve data from a dataset with OData v4 query parameters ($filter, $select, $orderby, "
+        "$top, $skip, $apply, $count). Returns paginated results with total count and nextLink "
+        "for server-driven paging. "
+        "The dataset segment may carry a `@{label}` version selector: `dataset@current` (the "
+        "default, also what a bare `dataset` means), `dataset@previous` (the most recent version "
+        "of the data before this one — maintenance snapshots such as compaction that changed no "
+        "rows are skipped), `dataset@{tag}` (a named snapshot), or `dataset@{snapshot_id}` (a "
+        "specific snapshot id). `@current` and `@previous` are resolved fresh on every page, so "
+        "paging through them is not snapshot-isolated against concurrent writes; `@{tag}` and "
+        "`@{snapshot_id}` are immutable and page consistently."
+    ),
     responses={
         200: {"description": "Query succeeded; returns rows and pagination metadata"},
-        400: {"description": f"Invalid query: malformed $filter, unsupported $top value (not 0-{_DOC_MAX_TOP}), negative $skip, $skip without $orderby, invalid $count value, or invalid $apply expression"},
+        400: {"description": f"Invalid query: malformed $filter, unsupported $top value (not 0-{_DOC_MAX_TOP}), negative $skip, $skip without $orderby, invalid $count value, invalid $apply expression, OData-MaxVersion below 4.0, or a malformed @{{label}} version selector"},
         401: {"description": "Missing or invalid authentication (no bearer token or basic auth)"},
         403: {"description": "Forbidden: authenticated but no permission for dataset"},
-        501: {"description": "Unsupported query feature: $search or $expand not implemented"},
+        404: {"description": "Dataset not found, or the @{label} version selector names a tag/snapshot/previous version that does not exist"},
+        406: {"description": "Accept header does not admit application/json, the only format this route returns"},
+        501: {"description": "Unsupported query feature: $search, $expand, or $compute not implemented"},
     },
+    dependencies=[Depends(require_acceptable(MEDIA_JSON))],
 )
 def read_dataset(
     request: Request,
@@ -1062,6 +1115,11 @@ def read_dataset(
         alias="$search",
         description="Full-text search (not implemented; returns 501)"
     ),
+    compute: Optional[str] = Query(
+        None,
+        alias="$compute",
+        description="Computed properties (not implemented; returns 501)"
+    ),
     apply: Optional[str] = Query(
         None,
         alias="$apply",
@@ -1101,7 +1159,13 @@ def read_dataset(
     # Set OData-Version header
     response.headers["OData-Version"] = "4.0"
 
-    table_name = f"{workstream}.{collection}.{dataset}"
+    try:
+        dataset_name, label = split_dataset_label(dataset)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    version_kwargs = label_to_version_kwargs(label)
+
+    table_name = f"{workstream}.{collection}.{dataset_name}"
 
     # Parse the raw query string once, here: it is needed for duplicate detection,
     # for the $expand rejection below, and again for the @odata.nextLink further
@@ -1116,6 +1180,12 @@ def read_dataset(
         raise HTTPException(
             status_code=501,
             detail="$search is not supported by this service"
+        )
+
+    if compute and compute.strip():
+        raise HTTPException(
+            status_code=501,
+            detail="$compute is not supported by this service"
         )
 
     # A blank "$expand=" asks for nothing and is allowed through; only an actual
@@ -1231,6 +1301,7 @@ def read_dataset(
             billing_account=billing_account,
             visibility_filters=visibility_filters,
             entitlements=entitlements,
+            **version_kwargs,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=f"Invalid query: {str(e)}")
@@ -1258,6 +1329,23 @@ def read_dataset(
             raise HTTPException(status_code=400, detail=f"Invalid query: {describe_type_mismatch(e)}")
         raise HTTPException(status_code=400, detail=f"Invalid query: {str(e)}")
     except opteryx.exceptions.DatasetReadError as e:
+        # Opteryx-core raises this single exception type for two very different
+        # situations: a genuine storage failure (manifest unreadable), and a
+        # `@{label}` version selector that named a tag/snapshot/previous version
+        # that doesn't exist (see OpteryxTable._resolve_snapshot upstream). The
+        # two need different status codes, and there's no distinct exception
+        # type to catch, so this is keyed off the resolver's own stable message
+        # templates ("No tag ...", "No previous version for ...", "... which
+        # could not be read"). A version-selector opteryx exception subclass
+        # upstream would let this stop matching message text.
+        msg = str(e)
+        if (
+            msg.startswith("No tag ")
+            or msg.startswith("No previous version for ")
+            or "which could not be read" in msg
+        ):
+            raise HTTPException(status_code=404, detail=msg) from e
+
         # The dataset exists in the catalog but its stored metadata could not be
         # read -- a manifest the storage layer refused or could not return. Not a
         # 404: the dataset is registered, and answering "not found" sends the
@@ -1385,6 +1473,61 @@ def _materialized_view_runs_as(catalog, mv: dict, qualified: str | None) -> str 
     return None
 
 
+def _resolve_labeled_snapshot(workspace, collection: str, dataset: str, ds, label: str):
+    """Resolve a `@{label}` version selector against an already-loaded,
+    already permission-checked dataset object.
+
+    Mirrors the three label kinds opteryx-core's OpteryxTable._resolve_snapshot
+    resolves for `VERSION AS OF` (opteryx/connectors/opteryx_connector.py), so
+    $metadata and row queries agree on what a label means. Called only after
+    the caller's permission to view this dataset's metadata has already been
+    checked -- resolving a label is not itself a permission decision.
+    """
+    lowered = label.lower()
+
+    if lowered == "current":
+        return ds.snapshot()
+
+    if lowered == "previous":
+        previous_user_snapshot = getattr(ds, "previous_user_snapshot", None)
+        if previous_user_snapshot is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{collection}.{dataset} does not support @previous",
+            )
+        snap = previous_user_snapshot()
+        if snap is None:
+            raise HTTPException(
+                status_code=404, detail=f"no previous version for {collection}.{dataset}"
+            )
+        return snap
+
+    if label.isdigit():
+        snap = ds.snapshot(int(label))
+        if snap is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"snapshot {label} not found for {collection}.{dataset}",
+            )
+        return snap
+
+    from opteryx_catalog.exceptions import TagNotFound
+
+    try:
+        snapshot_id = workspace.resolve_tag(f"{collection}.{dataset}", label)
+    except TagNotFound:
+        raise HTTPException(
+            status_code=404, detail=f"tag {label} not found for {collection}.{dataset}"
+        )
+    snap = ds.snapshot(snapshot_id)
+    if snap is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"tag {label} names a snapshot that could not be read",
+        )
+    return snap
+
+
 @router.get(
     "/{workstream}/{collection}/{dataset}/$metadata",
     summary="Per-dataset OData EDMX metadata",
@@ -1402,14 +1545,21 @@ def _materialized_view_runs_as(catalog, mv: dict, qualified: str | None) -> str 
         "and Custom.Sources, a Collection of Records with Dataset and Visible - Dataset is "
         "omitted and Visible false for a source the caller cannot read), and "
         "materialized-view state (Custom.MaterializedView.*). Annotations are omitted where "
-        "they do not apply to the dataset kind or are unavailable."
+        "they do not apply to the dataset kind or are unavailable. "
+        "The dataset segment may carry a `@{label}` version selector -- `dataset@current`, "
+        "`dataset@previous`, `dataset@{tag}`, or `dataset@{snapshot_id}` -- and the "
+        "Custom.Snapshot.* and Custom.Tags annotations describe that version rather than "
+        "the current one."
     ),
     responses={
         200: {"description": "EDMX metadata document returned as XML"},
+        400: {"description": "Malformed @{label} version selector, or the dataset kind does not support snapshot versioning"},
         401: {"description": "Missing or invalid authentication"},
         403: {"description": "Forbidden: no permission to view dataset metadata"},
-        404: {"description": "Dataset not found in catalog"},
+        404: {"description": "Dataset not found in catalog, or the @{label} version selector names a tag/snapshot/previous version that does not exist"},
+        406: {"description": "Accept header does not admit application/xml, the only format this route returns"},
     },
+    dependencies=[Depends(require_acceptable(MEDIA_XML))],
 )
 def dataset_metadata(
     request: Request,
@@ -1467,6 +1617,15 @@ def dataset_metadata(
     """
     # Set OData-Version header
     response.headers["OData-Version"] = "4.0"
+
+    # Split off a `@{label}` version selector, if present. Every use of `dataset`
+    # below this point -- catalog identifiers, entity names, permission checks --
+    # is the true dataset name; the label is resolved separately, once the
+    # dataset object is loaded (see _resolve_labeled_snapshot below).
+    try:
+        dataset, label = split_dataset_label(dataset)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
     table_name = f"{workstream}.{collection}.{dataset}"
 
@@ -1791,16 +1950,33 @@ def dataset_metadata(
             # (SimpleDataset.snapshot -> DatasetMetadata.current_snapshot), so
             # it is read here rather than dispatched alongside the two calls
             # that really do go to the network.
+            #
+            # A `@{label}` selector is a hard requirement, not something to
+            # degrade quietly the way the unlabeled path does: a caller who
+            # asked for a specific tag/snapshot/previous version that doesn't
+            # exist (or a dataset kind that doesn't support one) gets a 400/404
+            # from _resolve_labeled_snapshot, not a metadata document silently
+            # missing its Custom.Snapshot.* annotations.
             snapshot = None
-            try:
-                if (
-                    source_type in TABLE_LIKE_SOURCES
-                    and hasattr(ds, "snapshot")
-                    and callable(getattr(ds, "snapshot"))
+            if label is None:
+                try:
+                    if (
+                        source_type in TABLE_LIKE_SOURCES
+                        and hasattr(ds, "snapshot")
+                        and callable(getattr(ds, "snapshot"))
+                    ):
+                        snapshot = ds.snapshot()
+                except Exception:
+                    snapshot = None
+            else:
+                if source_type not in TABLE_LIKE_SOURCES or not (
+                    hasattr(ds, "snapshot") and callable(getattr(ds, "snapshot"))
                 ):
-                    snapshot = ds.snapshot()
-            except Exception:
-                snapshot = None
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"{collection}.{dataset} does not support snapshot versioning",
+                    )
+                snapshot = _resolve_labeled_snapshot(workspace, collection, dataset, ds, label)
 
             # Which immutable artifacts a description would be computed from --
             # None when there is no snapshot to pin it to, in which case the
@@ -2263,8 +2439,7 @@ def dataset_metadata(
     # A Collection of Records rather than a list of names because an elided
     # entry has no name to give and must still occupy its place: its Record
     # carries no Dataset and Visible is false, the same three-way reading
-    # (`dataset` null, `visible` false, entry kept) `$inbound-edges` and
-    # `$lineage` give in JSON.
+    # (`dataset` null, `visible` false, entry kept) `$lineage` gives in JSON.
     if ds is not None and source_type in TABLE_LIKE_SOURCES:
         ET.SubElement(
             entity_set,
@@ -2832,127 +3007,6 @@ def _may_read(claims: dict, relation: str) -> bool:
     return read_grant_for_relation(get_access_policies_from_claims(claims), relation) is not None
 
 
-@router.get(
-    "/{workstream}/$inbound-edges",
-    summary="What puts work into a dataset, from any workspace",
-    description=(
-        "Every trigger or task in the catalog whose work lands on `target`, wherever it "
-        "lives. `information_schema.triggers` enumerates ONE workspace and a trigger is "
-        "recorded in its SOURCE's workspace, so a chain that crosses a workspace boundary "
-        "is invisible from the target's side: this is the read that answers it. Two records "
-        "can put an edge into a dataset and both are reported - a trigger naming it "
-        "(`materialized_view_refresh`, `task`) and a task whose statement writes it "
-        "(`writes`). A row whose source the caller cannot read still comes back, with "
-        "`source` and `workspace` null and `visible` false: that something upstream exists "
-        "is not the secret, its name is."
-    ),
-    responses={
-        200: {"description": "The inbound edges, in `value`"},
-        400: {"description": "`target` missing, not fully qualified, or in another workspace than the path"},
-        401: {"description": "Missing or invalid authentication"},
-        403: {"description": "Forbidden: no read access to the target"},
-    },
-)
-def inbound_edges(
-    request: Request,
-    response: Response,
-    workstream: str,
-    target: str = Query(
-        ...,
-        description=(
-            "The fully-qualified `workspace.collection.name` whose upstream is wanted. Must "
-            "be in the workspace named in the path."
-        ),
-    ),
-) -> Any:
-    """The trigger graph read backwards, for one dataset.
-
-    WORKSPACE-SCOPED PATH for a deliberately cross-workspace answer: the rows
-    come from anywhere, but the question is about a dataset in `workstream`, and
-    the path is what the caller's read grant is checked against. Its own segment
-    (`$inbound-edges`, in the OData manner of `$metadata`) rather than a virtual
-    `information_schema` table, because it is not one: it takes a required
-    argument, and the engine has no such table to keep this one honest against.
-
-    ONE INDEXED QUERY EACH behind it - see opteryx_catalog.inbound_edges - not
-    the walk over every collection and dataset that reading a workspace's whole
-    trigger listing costs. That is what makes it affordable to ask per node.
-    """
-    response.headers["OData-Version"] = "4.0"
-
-    claims = getattr(request.state, "claims", {}) or {}
-    _require_provenance_target(claims, workstream, target)
-
-    from opteryx_catalog.inbound_edges import find_inbound_edges
-
-    client = _get_firestore_client(GCP_PROJECT_ID, _firestore_database())
-    if client is None:
-        raise HTTPException(status_code=503, detail="catalog unavailable")
-
-    rows = find_inbound_edges(client, target)
-
-    value = []
-    for row in rows:
-        visible = _may_read(claims, row["source"])
-        # A task's declared read set (PROVENANCE_DESIGN.md S2.3) rides on its
-        # `writes` edge; a trigger declares nothing about what its target
-        # reads, and the catalog says so with None. Each name is elided on
-        # its own grant, not the source's: the task may be readable while one
-        # of the things it reads is not, and the reverse.
-        reads = row.get("reads")
-        value.append(
-            {
-                "target": row["target"],
-                # Elided rather than dropped: the caller is owed the fact that
-                # something upstream exists even where they may not be told what.
-                "source": row["source"] if visible else None,
-                "workspace": row["workspace"] if visible else None,
-                "source_kind": row["source_kind"] if visible else None,
-                "visible": visible,
-                "kind": row["kind"],
-                "trigger": row["trigger"] if visible else None,
-                "runs_as": row["runs_as"] if visible else None,
-                "last_fired_at": _iso_from_ms(row["last_fired_at_ms"]) if visible else None,
-                "last_fired_status": row["last_fired_status"] if visible else None,
-                "suspended": bool(row["suspended_at_ms"]) if visible else None,
-                "reads": _elided_names(claims, reads) if isinstance(reads, list) else None,
-            }
-        )
-
-    return Response(
-        content=json.dumps({"target": target, "value": value}).encode("utf-8"),
-        media_type="application/json",
-        headers={"OData-Version": "4.0"},
-    )
-
-
-def _require_provenance_target(claims: dict, workstream: str, target: str) -> None:
-    """The target of a provenance read, checked the way `$inbound-edges` checks it.
-
-    Three routes ask about one fully-qualified dataset from a workspace-scoped
-    path, and all three owe the same answer to the same three faults. A name
-    that is not fully qualified cannot be matched against anything stored,
-    because a bare `collection.dataset` means a different thing in every
-    workspace (400). A target outside the path's workspace would have one
-    dataset's read check guarding an answer about another, since the path is
-    what authorization is decided on (400). And a caller without READ on the
-    target is refused before the catalog is asked anything (403).
-    """
-    parts = (target or "").split(".")
-    if len(parts) < 3:
-        raise HTTPException(
-            status_code=400,
-            detail="target must be a fully-qualified workspace.collection.name",
-        )
-    if parts[0] != workstream:
-        raise HTTPException(
-            status_code=400,
-            detail=f"target {target} is not in workspace {workstream}",
-        )
-    if not _may_read(claims, target):
-        raise HTTPException(status_code=403, detail="forbidden: not allowed to read target")
-
-
 def _elided_names(claims: dict, names) -> list[dict]:
     """Fully-qualified dataset names as `[{"dataset", "visible"}]`, elided per name.
 
@@ -2968,324 +3022,6 @@ def _elided_names(claims: dict, names) -> list[dict]:
         visible = _may_read(claims, name)
         entries.append({"dataset": name if visible else None, "visible": visible})
     return entries
-
-
-def _producer_fields(claims: dict, produced_by) -> dict:
-    """`produced_by` and `producer_visible` for one snapshot.
-
-    The stored value is `task:<workspace.collection.name>` or `view:<...>`,
-    and it is the name behind the prefix that READ is checked on. A hand-run
-    statement has no producer at all, and that is a state rather than an
-    elision (PROVENANCE_DESIGN.md S2.5), so both fields come back null there:
-    a client can then tell "nobody declared" from "someone you may not know
-    about", which is `produced_by` null beside `producer_visible` false.
-    """
-    if not produced_by:
-        return {"produced_by": None, "producer_visible": None}
-    text = str(produced_by)
-    _, _, name = text.partition(":")
-    visible = _may_read(claims, name or text)
-    return {"produced_by": text if visible else None, "producer_visible": visible}
-
-
-def _open_workspace(workstream: str):
-    """A catalog handle on one workspace, built the way `dataset_metadata` builds its own."""
-    return OpteryxCatalog(
-        workstream,
-        firestore_project=GCP_PROJECT_ID,
-        firestore_database=_firestore_database(),
-        gcs_bucket=_bucket_name(),
-    )
-
-
-class _SourceSnapshots:
-    """Which snapshots of a source dataset are still live, one history load
-    per source for the life of one `$lineage` answer.
-
-    A receipt names a version and does not pin it (PROVENANCE_DESIGN.md
-    S2.1): the snapshot it names can have expired since, and the row owes the
-    reader that fact. Liveness is membership in a history load, which keeps
-    only the live snapshots - the catalog's by-id fetch refuses a tombstone
-    too (opteryx-catalog 0.4.144), but membership answers every row of a
-    source from ONE read where by-id would be one per distinct version.
-    Loaded once per distinct source rather than per row, because a table
-    refreshed hourly from the same two sources names them on every one of
-    its snapshots.
-    """
-
-    def __init__(self) -> None:
-        self._live: dict[str, set | None] = {}
-
-    def __call__(self, relation: str, snapshot_id) -> bool | None:
-        if snapshot_id is None:
-            # The source had no commits when it was read (S3): there is no
-            # snapshot whose liveness could be asked about.
-            return None
-        if relation not in self._live:
-            self._live[relation] = self._load(relation)
-        live = self._live[relation]
-        if live is None:
-            return None
-        try:
-            return int(snapshot_id) in live
-        except (TypeError, ValueError):
-            return None
-
-    @staticmethod
-    def _load(relation: str) -> set | None:
-        workspace, _, relative = relation.partition(".")
-        try:
-            dataset = _open_workspace(workspace).load_dataset(relative, load_history=True)
-            return {
-                int(snapshot.snapshot_id)
-                for snapshot in dataset.snapshots()
-                if getattr(snapshot, "snapshot_id", None) is not None
-            }
-        except Exception as exc:  # noqa: BLE001 - catalog boundary
-            # A source that has been dropped is a definite answer - nothing of
-            # it is live - and is told apart by name the way the
-            # materialized-view path does, because the type is the catalog's
-            # own. Anything else is a read that did not answer, and null is
-            # the honest report of that rather than a guess either way.
-            if type(exc).__name__ == "DatasetNotFound":
-                return set()
-            logger.warning(f"Could not read the history of {relation} for source_exists: {exc}")
-            return None
-
-
-@router.get(
-    "/{workstream}/$lineage",
-    summary="What each committed version of a dataset was built from",
-    description=(
-        "The receipts (PROVENANCE_DESIGN.md): for every live snapshot of `target`, which "
-        "versions of which other datasets the statement that produced it read, newest "
-        "snapshot first, one row per (snapshot, source). Three states are told apart: a "
-        "snapshot with no receipt gives ONE row with `recorded` false and the source columns "
-        "null (pre-feature history, which cannot be backfilled); a snapshot that read no "
-        "catalog relation gives one row with `recorded` true and the source columns null; "
-        "otherwise each source is a row. A source the caller cannot read still comes back, "
-        "with `source_dataset` and `source_exists` null and `visible` false. `source_exists` "
-        "says whether the version read is still live - a receipt does not pin what it names. "
-        "`sources` and `sources_complete` are the dataset's standing list, as on its "
-        "`$metadata` document."
-    ),
-    responses={
-        200: {"description": "The receipts, in `value`; the standing list in `sources`"},
-        400: {"description": "`target` missing, not fully qualified, or in another workspace than the path"},
-        401: {"description": "Missing or invalid authentication"},
-        403: {"description": "Forbidden: no read access to the target"},
-        404: {"description": "Target not found in the catalog"},
-    },
-)
-def lineage(
-    request: Request,
-    response: Response,
-    workstream: str,
-    target: str = Query(
-        ...,
-        description=(
-            "The fully-qualified `workspace.collection.dataset` whose receipts are wanted. "
-            "Must be in the workspace named in the path."
-        ),
-    ),
-) -> Any:
-    """The receipts of one dataset, per snapshot, with each name elided per grant.
-
-    The same path shape and gate as `$inbound-edges`, for the other half of
-    the same question: that route says what is WIRED to write the target,
-    this one says what its commits actually READ, and from which versions.
-    One history load of the target, plus one per distinct source named for
-    `source_exists` (see `_SourceSnapshots`).
-    """
-    response.headers["OData-Version"] = "4.0"
-
-    claims = getattr(request.state, "claims", {}) or {}
-    _require_provenance_target(claims, workstream, target)
-
-    _, _, relative = target.partition(".")
-    try:
-        dataset = _open_workspace(workstream).load_dataset(relative, load_history=True)
-    except Exception as exc:
-        logger.error(f"Failed to load dataset history from catalog for {target}: {exc}")
-        raise HTTPException(status_code=404, detail="dataset not found in catalog") from exc
-
-    metadata = getattr(dataset, "metadata", None)
-    # The head is the pointer, not the newest id: a rollback moves it
-    # backwards past snapshots that stay live and listed here. `snapshot()`
-    # with no argument reads that pointer from the metadata already in hand,
-    # including the fallback for a dataset written before the pointer existed.
-    head = getattr(dataset.snapshot(), "snapshot_id", None)
-    source_exists = _SourceSnapshots()
-
-    value = []
-    snapshots = sorted(
-        dataset.snapshots(), key=lambda s: -(getattr(s, "snapshot_id", None) or 0)
-    )
-    for snapshot in snapshots:
-        base = {
-            "snapshot_id": snapshot.snapshot_id,
-            "committed_at": _iso_from_ms(getattr(snapshot, "timestamp_ms", None)),
-            "is_current": snapshot.snapshot_id == head,
-            **_producer_fields(claims, getattr(snapshot, "produced_by", None)),
-        }
-        receipt = getattr(snapshot, "read_sources", None)
-        if not receipt:
-            # The two marker states (S2.4). None is "the writer did not
-            # report", which is permanent for pre-feature history; [] is
-            # "read no catalog relation", which is a fact about the commit.
-            # Neither has a source to name or to elide, so `visible` is null
-            # rather than false - false would read as an elided name.
-            value.append(
-                {
-                    **base,
-                    "source_dataset": None,
-                    "source_snapshot_id": None,
-                    "resolved_by": None,
-                    "source_exists": None,
-                    "recorded": receipt is not None,
-                    "visible": None,
-                }
-            )
-            continue
-        # Entries are stored deduplicated and sorted on (dataset, snapshot-id)
-        # (S2.1), which is the row order the spec asks for, so they are not
-        # re-sorted here.
-        for entry in receipt:
-            name = entry.get("dataset")
-            source_snapshot_id = entry.get("snapshot-id")
-            visible = bool(name) and _may_read(claims, str(name))
-            value.append(
-                {
-                    **base,
-                    "source_dataset": str(name) if visible else None,
-                    "source_snapshot_id": source_snapshot_id,
-                    "resolved_by": entry.get("resolved-by"),
-                    # Liveness is asked only for a name the caller may see:
-                    # true or false beside a null name would still say
-                    # something about a dataset they hold no grant on.
-                    "source_exists": (
-                        source_exists(str(name), source_snapshot_id) if visible else None
-                    ),
-                    "recorded": True,
-                    "visible": visible,
-                }
-            )
-
-    body = {
-        "target": target,
-        "sources": _elided_names(claims, getattr(metadata, "sources", None)),
-        "sources_complete": bool(getattr(metadata, "sources_complete", False)),
-        "value": value,
-    }
-    return Response(
-        content=json.dumps(body).encode("utf-8"),
-        media_type="application/json",
-        headers={"OData-Version": "4.0"},
-    )
-
-
-@router.get(
-    "/{workstream}/$consumers",
-    summary="Which commits, in any workspace, read a dataset",
-    description=(
-        "The outgoing half of provenance: every live snapshot in the catalog whose receipt "
-        "names `target`, and with `snapshot` only those that read that version of it. A "
-        "trigger says what a commit fires, not what read it, and a hand-run statement fires "
-        "nothing, so the receipt on the consuming snapshot is the only record. Pre-feature "
-        "commits carry no receipt and are not consumers here even if they did read the "
-        "target; `$inbound-edges` answers from the plan for those. A consumer the caller "
-        "cannot read still comes back, with `dataset`, `workspace` and `produced_by` null "
-        "and `visible` false."
-    ),
-    responses={
-        200: {"description": "The consuming snapshots, in `value`"},
-        400: {"description": "`target` missing, not fully qualified, or in another workspace than the path"},
-        401: {"description": "Missing or invalid authentication"},
-        403: {"description": "Forbidden: no read access to the target"},
-    },
-)
-def consumers(
-    request: Request,
-    response: Response,
-    workstream: str,
-    target: str = Query(
-        ...,
-        description=(
-            "The fully-qualified `workspace.collection.dataset` whose readers are wanted. "
-            "Must be in the workspace named in the path."
-        ),
-    ),
-    snapshot: int | None = Query(
-        None,
-        description="Narrow the answer to the commits that read this snapshot of `target`.",
-    ),
-) -> Any:
-    """Who read one dataset - or one version of it - from the receipts.
-
-    ONE INDEXED QUERY behind it - see opteryx_catalog.consumers - over the
-    `snapshots` collection group, the same shape `$inbound-edges` uses over
-    `tasks`. READ on the target is the gate; each consumer is then elided on
-    its own name, and its producer on the producer's name, since either may be
-    in a workspace the caller cannot see.
-    """
-    response.headers["OData-Version"] = "4.0"
-
-    claims = getattr(request.state, "claims", {}) or {}
-    _require_provenance_target(claims, workstream, target)
-
-    from opteryx_catalog.consumers import find_consumers
-
-    client = _get_firestore_client(GCP_PROJECT_ID, _firestore_database())
-    if client is None:
-        raise HTTPException(status_code=503, detail="catalog unavailable")
-
-    rows = find_consumers(client, target, snapshot)
-
-    value = []
-    for row in rows:
-        visible = _may_read(claims, row["dataset"])
-        # The producer is named only when BOTH the consumer and the producer
-        # are readable: a task name beside an elided consumer would say what
-        # writes the thing the caller may not know about.
-        producer = _producer_fields(claims, row.get("produced_by")) if visible else None
-        value.append(
-            {
-                "dataset": row["dataset"] if visible else None,
-                "workspace": row["workspace"] if visible else None,
-                "visible": visible,
-                "snapshot_id": row["snapshot_id"],
-                "committed_at": _iso_from_ms(row["committed_at_ms"]),
-                "produced_by": producer["produced_by"] if producer else None,
-                # Which versions of the TARGET were read, and how each was
-                # chosen. About the dataset the caller already holds READ on,
-                # so never elided.
-                "source_snapshot_ids": list(row.get("source_snapshot_ids") or []),
-                "resolved_by": list(row.get("resolved_by") or []),
-            }
-        )
-
-    body = {"target": target, "snapshot": snapshot, "value": value}
-    return Response(
-        content=json.dumps(body).encode("utf-8"),
-        media_type="application/json",
-        headers={"OData-Version": "4.0"},
-    )
-
-
-def _iso_from_ms(value) -> Optional[str]:
-    """Epoch milliseconds as an ISO 8601 UTC string, the spelling every other
-    timestamp in this API carries. None stays None: a trigger that has never
-    fired has no time, and 1970 is not it."""
-    if value is None:
-        return None
-    try:
-        return (
-            dt.datetime.fromtimestamp(int(value) / 1000, tz=dt.timezone.utc)
-            .isoformat()
-            .replace("+00:00", "Z")
-        )
-    except (TypeError, ValueError, OSError):
-        return None
 
 
 __all__ = ["router"]
