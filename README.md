@@ -101,6 +101,46 @@ Response format:
 }
 ```
 
+### Snapshot / Version Access
+
+The dataset segment of the URL may carry a `@{label}` version selector, to read a point in the dataset's history instead of its current data:
+
+| Selector | Meaning |
+|---|---|
+| `dataset` (no `@`) | Current data — the default |
+| `dataset@current` | Current data, explicitly |
+| `dataset@previous` | The version of the data before this one. Maintenance operations that change no rows (compaction, statistics refresh) are skipped, so this always names a version with different data, not just a different snapshot id. |
+| `dataset@{tag}` | A named, immutable snapshot — see `Custom.Tags` in `$metadata` for the tags a dataset holds |
+| `dataset@{snapshot_id}` | A specific snapshot, by id |
+
+```bash
+# The version before this one
+curl -u username:password \
+  "https://odata.opteryx.app/api/v4/public/demo/users@previous?\$top=10"
+
+# A tagged snapshot
+curl -u username:password \
+  "https://odata.opteryx.app/api/v4/public/demo/users@release_v2?\$top=10"
+
+# A specific snapshot id
+curl -u username:password \
+  "https://odata.opteryx.app/api/v4/public/demo/users@1700000000000?\$top=10"
+
+# $metadata for a specific version -- its Custom.Snapshot.* and Custom.Tags
+# annotations describe that version rather than the current one
+curl -u username:password \
+  https://odata.opteryx.app/api/v4/public/demo/users@release_v2/\$metadata
+```
+
+An unknown tag, snapshot id, or a `@previous` on a dataset with no earlier
+version returns 404. A malformed selector (`dataset@`, or `@label` with no
+dataset name) returns 400.
+
+**Pagination note:** `@{tag}` and `@{snapshot_id}` are immutable, so paging
+(`$skip`/`$top`) through them is fully consistent. `@current` and `@previous`
+are resolved fresh on every page, so paging through them is not isolated
+against writes that land while you're paging.
+
 ### Getting Schema Information
 
 Retrieve EDMX metadata for all accessible datasets:
@@ -122,6 +162,10 @@ This returns an XML document describing EntityTypes, properties, and their data 
 | `/api/v4/$metadata` | GET | EDMX metadata document with schemas |
 | `/api/v4/{workspace}/{collection}/{dataset}` | GET | Query data from a specific dataset |
 | `/api/v4/{workspace}/{collection}/{dataset}/$metadata` | GET | Schema for a specific dataset |
+
+`{dataset}` may carry a `@{label}` version selector (`dataset@current`,
+`dataset@previous`, `dataset@{tag}`, `dataset@{snapshot_id}`) on either
+endpoint above — see [Snapshot / Version Access](#snapshot--version-access).
 
 ## Query Parameters
 
@@ -246,6 +290,11 @@ GET /api/v4/workspace/collection/dataset?$apply=groupby((region,product_type), a
 **Combined query:**
 ```
 GET /api/v4/workspace/collection/dataset?$filter=year ge 2023&$apply=groupby((status), aggregate($count as Count))&$select=status,Count
+```
+
+**Query a tagged snapshot** (see [Snapshot / Version Access](#snapshot--version-access)):
+```
+GET /api/v4/workspace/collection/dataset@release_v2?$filter=vendor eq 'Oracle'
 ```
 
 ## Known Differences from OData Specification
@@ -437,10 +486,10 @@ Error codes:
 
 | Status | `error.code` | Meaning |
 |---|---|---|
-| 400 | `BadRequest` | Malformed `$filter`, `$top` outside `0..25000`, duplicated query parameter, invalid `$apply` |
+| 400 | `BadRequest` | Malformed `$filter`, `$top` outside `0..25000`, duplicated query parameter, invalid `$apply`, or a malformed `@{label}` version selector |
 | 401 | `Unauthorized` | Missing or invalid authentication |
 | 403 | `Forbidden` | Valid auth but insufficient permissions |
-| 404 | `NotFound` | Dataset does not exist or is not accessible |
+| 404 | `NotFound` | Dataset does not exist or is not accessible, or an `@{label}` version selector names a tag, snapshot, or previous version that does not exist |
 | 500 | `InternalServerError` | Server error |
 | 501 | `Error` | `$search` or `$expand` requested — not implemented |
 | 502 | `BadGateway` | Upstream dependency returned an error |

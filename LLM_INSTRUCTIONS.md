@@ -2,6 +2,12 @@
 
 Base URL: `GET https://odata.opteryx.app/api/v4/{workspace}/{collection}/{dataset}?{params}`
 
+`{dataset}` may end in a `@{label}` version selector to read a point in the
+dataset's history instead of its current data: `@current` (the default),
+`@previous` (the version before this one), `@{tag}` (a named snapshot),
+`@{snapshot_id}` (a specific snapshot). Only add one when the user asks about
+a prior/tagged/specific version — do not invent a tag or snapshot id.
+
 ## Query Parameters
 
 - `$filter` - Filter records: comparison (`eq`, `ne`, `gt`, `ge`, `lt`, `le`), logical (`and`, `or`, `not`), string functions (`contains()`, `startswith()`, `endswith()`), date functions (`now()`, `year()`, `date()`), network functions (`in_subnet()`)
