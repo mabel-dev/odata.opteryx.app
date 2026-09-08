@@ -72,9 +72,10 @@ class FakeSnapshot:
 class FakeDataset:
     metadata = FakeMetadata()
 
-    def __init__(self, current, by_id=None):
+    def __init__(self, current, by_id=None, previous=None):
         self._current = current
         self._by_id = by_id or {}
+        self._previous = previous
 
     def schema(self):
         return FakeSchema()
@@ -86,6 +87,9 @@ class FakeDataset:
         if snapshot_id is None:
             return self._current
         return self._by_id.get(snapshot_id)
+
+    def previous_user_snapshot(self):
+        return self._previous
 
 
 class FakeView:
@@ -100,9 +104,10 @@ class FakeView:
 
 
 class FakeWorkspace:
-    def __init__(self, dataset, as_view=False):
+    def __init__(self, dataset, as_view=False, tag_map=None):
         self._dataset = dataset
         self._as_view = as_view
+        self._tag_map = tag_map or {}
 
     def load_dataset(self, identifier):
         if self._as_view:
@@ -115,15 +120,26 @@ class FakeWorkspace:
     def list_tags(self, identifier):
         return []
 
+    def resolve_tag(self, identifier, name):
+        from opteryx_catalog.exceptions import TagNotFound
+
+        if name not in self._tag_map:
+            raise TagNotFound(f"Tag not found: {name} on {identifier}")
+        return self._tag_map[name]
+
 
 @pytest.fixture
 def catalog(monkeypatch):
     """Install a catalog handle over one snapshot (plus any historical ones),
     with the dataset document -- and so the standing source list -- absent."""
 
-    def _install(current=None, by_id=None, as_view=False):
-        dataset = FakeDataset(current, by_id)
-        monkeypatch.setattr(interface, "OpteryxCatalog", lambda *a, **kw: FakeWorkspace(dataset, as_view))
+    def _install(current=None, by_id=None, as_view=False, previous=None, tag_map=None):
+        dataset = FakeDataset(current, by_id, previous)
+        monkeypatch.setattr(
+            interface,
+            "OpteryxCatalog",
+            lambda *a, **kw: FakeWorkspace(dataset, as_view, tag_map),
+        )
         monkeypatch.setattr(interface, "_get_firestore_client", lambda *a, **kw: None)
         monkeypatch.setattr(interface, "_external_catalog_stub", lambda *a, **kw: None)
         return dataset
@@ -358,6 +374,77 @@ def test_every_caller_is_owed_the_same_receipt(catalog, monkeypatch):
 
     assert granted == [{"Dataset": "ops.ingest.stdout_log", "SnapshotId": "7", "ResolvedBy": "current"}]
     assert ungranted == granted
+
+
+def test_a_tag_reports_the_receipt_of_the_snapshot_it_pins(catalog):
+    """`@{tag}` resolves through the tag to a snapshot id and then reads that
+    snapshot's document, so the receipt is the pinned version's -- the whole
+    point of asking for the tag rather than the dataset."""
+    catalog(
+        FakeSnapshot(
+            CURRENT_ID,
+            read_sources=[{"dataset": "public.raw.feed", "snapshot-id": 9, "resolved-by": "current"}],
+        ),
+        by_id={OLD_ID: FakeSnapshot(OLD_ID, read_sources=[
+            {"dataset": "public.raw.older", "snapshot-id": 2, "resolved-by": "tag"}
+        ])},
+        tag_map={"release_v2": OLD_ID},
+    )
+
+    assert _receipt_records(_render(dataset="people@release_v2")) == [
+        {"Dataset": "public.raw.older", "SnapshotId": "2", "ResolvedBy": "tag"}
+    ]
+
+
+def test_previous_reports_the_receipt_of_the_earlier_version(catalog):
+    catalog(
+        FakeSnapshot(
+            CURRENT_ID,
+            read_sources=[{"dataset": "public.raw.feed", "snapshot-id": 9, "resolved-by": "current"}],
+        ),
+        previous=FakeSnapshot(OLD_ID, read_sources=[
+            {"dataset": "public.raw.older", "snapshot-id": 2, "resolved-by": "version"}
+        ]),
+    )
+
+    assert _receipt_records(_render(dataset="people@previous")) == [
+        {"Dataset": "public.raw.older", "SnapshotId": "2", "ResolvedBy": "version"}
+    ]
+
+
+def test_current_reports_the_head_receipt_explicitly(catalog):
+    catalog(
+        FakeSnapshot(
+            CURRENT_ID,
+            read_sources=[{"dataset": "public.raw.feed", "snapshot-id": 9, "resolved-by": "current"}],
+        )
+    )
+
+    assert _receipt_records(_render(dataset="people@current")) == _receipt_records(_render())
+
+
+def test_two_tags_on_one_dataset_report_their_own_receipts(catalog, monkeypatch):
+    """One dataset, two pinned versions, two different upstream versions -- and
+    with the response cache on, neither is served the other's document."""
+    monkeypatch.setenv("ODATA_METADATA_CACHE_TTL", "60")
+    catalog(
+        FakeSnapshot(CURRENT_ID, read_sources=[]),
+        by_id={
+            OLD_ID: FakeSnapshot(OLD_ID, read_sources=[
+                {"dataset": "public.raw.feed", "snapshot-id": 111, "resolved-by": "current"}
+            ]),
+            CURRENT_ID - 5: FakeSnapshot(CURRENT_ID - 5, read_sources=[
+                {"dataset": "public.raw.feed", "snapshot-id": 222, "resolved-by": "current"}
+            ]),
+        },
+        tag_map={"release_v1": OLD_ID, "release_v2": CURRENT_ID - 5},
+    )
+
+    v1 = _receipt_records(_render(dataset="people@release_v1"))
+    v2 = _receipt_records(_render(dataset="people@release_v2"))
+
+    assert v1 == [{"Dataset": "public.raw.feed", "SnapshotId": "111", "ResolvedBy": "current"}]
+    assert v2 == [{"Dataset": "public.raw.feed", "SnapshotId": "222", "ResolvedBy": "current"}]
 
 
 if __name__ == "__main__":  # pragma: no cover
