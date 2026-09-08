@@ -89,6 +89,7 @@ def test_an_edge_from_a_readable_workspace_is_named(catalog):
             "last_fired_at": "2026-09-04T10:16:30.288000Z",
             "last_fired_status": "enqueued",
             "suspended": False,
+            "reads": None,
         }
     ]
 
@@ -130,6 +131,43 @@ def test_a_task_that_writes_the_target_is_reported_as_a_writes_edge(catalog):
     assert row["kind"] == "writes"
     assert row["source_kind"] == "task"
     assert row["last_fired_at"] is None
+
+
+def test_a_writes_edge_carries_the_task_s_declared_reads_elided_per_name(catalog):
+    """What the task reads is the hop above the edge (PROVENANCE_DESIGN.md
+    S2.3), and each name is its own grant: the task may be readable while one
+    of its inputs is not. The entry stays so the count of inputs is honest."""
+    catalog.append(
+        _edge(
+            source="platform.billing.billing_events_ingest",
+            workspace="platform",
+            source_kind="task",
+            kind="writes",
+            trigger=None,
+            reads=["ops.ingest.stdout_log", "platform.billing.raw"],
+        )
+    )
+
+    row = _call(READER)["value"][0]
+
+    assert row["visible"] is True
+    assert row["reads"] == [
+        {"dataset": None, "visible": False},
+        {"dataset": "platform.billing.raw", "visible": True},
+    ]
+
+
+def test_a_trigger_edge_declares_no_reads(catalog):
+    """A trigger says what fires, not what is read; the catalog says so with
+    None and so does the row - not an empty list, which would claim the
+    target reads nothing. A row from an older catalog carries no key at all,
+    and reads the same way."""
+    catalog.append(_edge(reads=None))
+    catalog.append(_edge(trigger="mvrefresh_events_older"))
+
+    rows = _call(READER_BOTH)["value"]
+
+    assert [row["reads"] for row in rows] == [None, None]
 
 
 def test_a_caller_without_read_on_the_target_is_refused(catalog):

@@ -144,6 +144,36 @@ def _external_catalog_stub(workstream: str, collection: str, dataset: str) -> di
         return None
     return data if data.get("external-catalog") else None
 
+def _standing_sources(workstream: str, collection: str, dataset: str) -> tuple[list[str], bool]:
+    """The dataset document's standing source list (PROVENANCE_DESIGN.md S2.2)
+    and whether it is complete, read straight from the document the way
+    `_declared_relationships` reads its subcollection.
+
+    Never fatal, like every enrichment on the metadata document: a catalog too
+    old to write the field, a dataset that is really a view or a task, or a
+    read that fails, costs the list and nothing else. All of those come back as
+    an incomplete empty list, which is the catalog's own reading of a document
+    without the field - a list nobody maintained may be missing anything.
+    """
+    try:
+        db = _get_firestore_client(database=_firestore_database())
+        if db is None:
+            return [], False
+        doc = (
+            db.collection(workstream)
+            .document(collection)
+            .collection("datasets")
+            .document(dataset)
+            .get()
+        )
+        data = (doc.to_dict() or {}) if getattr(doc, "exists", False) else {}
+    except Exception as exc:  # noqa: BLE001 - catalog boundary
+        logger.warning(f"Failed to read sources for {workstream}.{collection}.{dataset}: {exc}")
+        return [], False
+    names = [str(name) for name in data.get("sources") or []]
+    return names, bool(data.get("sources-complete", False))
+
+
 def _declared_relationships(
     workstream: str,
     collection: str,
@@ -1367,7 +1397,10 @@ def _materialized_view_runs_as(catalog, mv: dict, qualified: str | None) -> str 
         "(Custom.Description, Custom.LLMDescribed), latest-snapshot metadata "
         "(Custom.Snapshot.Id/TotalRecords/TotalDataSize/CommitMessage/Author), physical sort "
         "order (Custom.SortOrder.Column/Direction), snapshot tags (Custom.Tags.Count and "
-        "Custom.Tags, a Collection of Records with Name, SnapshotId and CreatedBy), and "
+        "Custom.Tags, a Collection of Records with Name, SnapshotId and CreatedBy), the "
+        "standing source list the current content was built from (Custom.Sources.Complete "
+        "and Custom.Sources, a Collection of Records with Dataset and Visible - Dataset is "
+        "omitted and Visible false for a source the caller cannot read), and "
         "materialized-view state (Custom.MaterializedView.*). Annotations are omitted where "
         "they do not apply to the dataset kind or are unavailable."
     ),
@@ -1405,6 +1438,14 @@ def dataset_metadata(
       * Custom.Tags: a Collection of Records, one per tag, omitted when there
         are none. Each Record carries Name, SnapshotId (the pinned snapshot,
         whose id is also its millisecond timestamp) and CreatedBy.
+      * Custom.Sources.Complete: whether the standing source list below may be
+        missing a name (the 64 cap, or a commit with no receipt). Present for
+        the same kinds as Custom.Tags.Count, and false for a dataset from
+        before receipts existed.
+      * Custom.Sources: a Collection of Records, one per dataset the current
+        content was built from, most recent first, omitted when the list is
+        empty. Each Record carries Visible and, only where the caller holds
+        READ on it, Dataset; an unreadable source keeps its place unnamed.
 
     Also includes access-control annotations:
     - Custom.Role: user's assigned role (reader, writer, admin, owner)
@@ -1534,12 +1575,29 @@ def dataset_metadata(
             for row in inbound_relationships
         )
     )
+    # The standing source list (PROVENANCE_DESIGN.md S2.2) is read here, before
+    # the cache, for the reason the relationships are: its names are elided on
+    # the caller's grants on OTHER relations (S4.4), so two callers holding the
+    # same role on this dataset can be owed different documents, and it is the
+    # visible names that tell them apart in the key. Naming the visible sources
+    # rather than the caller keeps callers who see the same thing sharing an
+    # entry. `load_dataset` reads the same document again further down; one
+    # extra document get is the price of a key that is correct, and it is the
+    # price the relationships already pay.
+    source_names, sources_complete = (
+        ([], False)
+        if is_virtual_info_schema
+        else _standing_sources(workstream, collection, dataset)
+    )
+    sources = _elided_names(claims, source_names)
+    sources_key = (tuple(entry["dataset"] or "" for entry in sources), sources_complete)
     cache_key = (
         table_name,
         assigned_role,
         assigned_policy,
         is_virtual_info_schema,
         relationship_key,
+        sources_key,
     )
     cached = metadata_cache_get(cache_key)
     if cached is not None:
@@ -2193,6 +2251,45 @@ def dataset_metadata(
                         attrib={"Property": "CreatedBy", "String": str(created_by)},
                     )
 
+    # The standing source list -- what the CURRENT content was built from
+    # (PROVENANCE_DESIGN.md S2.2) -- beside the tags and gated as they are:
+    # only a catalog-backed table can have been built from anything, and
+    # Custom.Sources.Complete is emitted even over an empty list so a client
+    # can tell "nothing on record" from "older service", the reason
+    # Custom.Tags.Count is emitted at 0. The values were read from the dataset
+    # document before the cache check (see `sources_key`) rather than off `ds`,
+    # so the document and the key it is cached under cannot disagree.
+    #
+    # A Collection of Records rather than a list of names because an elided
+    # entry has no name to give and must still occupy its place: its Record
+    # carries no Dataset and Visible is false, the same three-way reading
+    # (`dataset` null, `visible` false, entry kept) `$inbound-edges` and
+    # `$lineage` give in JSON.
+    if ds is not None and source_type in TABLE_LIKE_SOURCES:
+        ET.SubElement(
+            entity_set,
+            f"{{{NS_EDM}}}Annotation",
+            attrib={"Term": "Custom.Sources.Complete", "Bool": str(sources_complete).lower()},
+        )
+        if sources:
+            sources_annotation = ET.SubElement(
+                entity_set, f"{{{NS_EDM}}}Annotation", attrib={"Term": "Custom.Sources"}
+            )
+            sources_collection = ET.SubElement(sources_annotation, f"{{{NS_EDM}}}Collection")
+            for entry in sources:
+                record = ET.SubElement(sources_collection, f"{{{NS_EDM}}}Record")
+                if entry["dataset"] is not None:
+                    ET.SubElement(
+                        record,
+                        f"{{{NS_EDM}}}PropertyValue",
+                        attrib={"Property": "Dataset", "String": entry["dataset"]},
+                    )
+                ET.SubElement(
+                    record,
+                    f"{{{NS_EDM}}}PropertyValue",
+                    attrib={"Property": "Visible", "Bool": str(entry["visible"]).lower()},
+                )
+
     # Declared relationships, as a Collection of Records -- the same shape
     # Custom.Tags uses, and for the same reason: a client needs more than one
     # value per entry.
@@ -2784,23 +2881,7 @@ def inbound_edges(
     response.headers["OData-Version"] = "4.0"
 
     claims = getattr(request.state, "claims", {}) or {}
-
-    parts = (target or "").split(".")
-    if len(parts) < 3:
-        raise HTTPException(
-            status_code=400,
-            detail="target must be a fully-qualified workspace.collection.name",
-        )
-    if parts[0] != workstream:
-        # The path is what authorization is decided on, so a target somewhere
-        # else would be a check on one dataset guarding an answer about another.
-        raise HTTPException(
-            status_code=400,
-            detail=f"target {target} is not in workspace {workstream}",
-        )
-
-    if not _may_read(claims, target):
-        raise HTTPException(status_code=403, detail="forbidden: not allowed to read target")
+    _require_provenance_target(claims, workstream, target)
 
     from opteryx_catalog.inbound_edges import find_inbound_edges
 
@@ -2813,6 +2894,12 @@ def inbound_edges(
     value = []
     for row in rows:
         visible = _may_read(claims, row["source"])
+        # A task's declared read set (PROVENANCE_DESIGN.md S2.3) rides on its
+        # `writes` edge; a trigger declares nothing about what its target
+        # reads, and the catalog says so with None. Each name is elided on
+        # its own grant, not the source's: the task may be readable while one
+        # of the things it reads is not, and the reverse.
+        reads = row.get("reads")
         value.append(
             {
                 "target": row["target"],
@@ -2828,11 +2915,358 @@ def inbound_edges(
                 "last_fired_at": _iso_from_ms(row["last_fired_at_ms"]) if visible else None,
                 "last_fired_status": row["last_fired_status"] if visible else None,
                 "suspended": bool(row["suspended_at_ms"]) if visible else None,
+                "reads": _elided_names(claims, reads) if isinstance(reads, list) else None,
             }
         )
 
     return Response(
         content=json.dumps({"target": target, "value": value}).encode("utf-8"),
+        media_type="application/json",
+        headers={"OData-Version": "4.0"},
+    )
+
+
+def _require_provenance_target(claims: dict, workstream: str, target: str) -> None:
+    """The target of a provenance read, checked the way `$inbound-edges` checks it.
+
+    Three routes ask about one fully-qualified dataset from a workspace-scoped
+    path, and all three owe the same answer to the same three faults. A name
+    that is not fully qualified cannot be matched against anything stored,
+    because a bare `collection.dataset` means a different thing in every
+    workspace (400). A target outside the path's workspace would have one
+    dataset's read check guarding an answer about another, since the path is
+    what authorization is decided on (400). And a caller without READ on the
+    target is refused before the catalog is asked anything (403).
+    """
+    parts = (target or "").split(".")
+    if len(parts) < 3:
+        raise HTTPException(
+            status_code=400,
+            detail="target must be a fully-qualified workspace.collection.name",
+        )
+    if parts[0] != workstream:
+        raise HTTPException(
+            status_code=400,
+            detail=f"target {target} is not in workspace {workstream}",
+        )
+    if not _may_read(claims, target):
+        raise HTTPException(status_code=403, detail="forbidden: not allowed to read target")
+
+
+def _elided_names(claims: dict, names) -> list[dict]:
+    """Fully-qualified dataset names as `[{"dataset", "visible"}]`, elided per name.
+
+    PROVENANCE_DESIGN.md S4.4: a provenance record is stored whole and crosses
+    workspace boundaries, so every read surface tells the caller a name only
+    where they hold READ on it. The ENTRY stays either way - "something
+    upstream you cannot see" must remain sayable, and the list's length must
+    stay honest - so what is nulled is the name, never the position.
+    """
+    entries = []
+    for name in names or []:
+        name = str(name)
+        visible = _may_read(claims, name)
+        entries.append({"dataset": name if visible else None, "visible": visible})
+    return entries
+
+
+def _producer_fields(claims: dict, produced_by) -> dict:
+    """`produced_by` and `producer_visible` for one snapshot.
+
+    The stored value is `task:<workspace.collection.name>` or `view:<...>`,
+    and it is the name behind the prefix that READ is checked on. A hand-run
+    statement has no producer at all, and that is a state rather than an
+    elision (PROVENANCE_DESIGN.md S2.5), so both fields come back null there:
+    a client can then tell "nobody declared" from "someone you may not know
+    about", which is `produced_by` null beside `producer_visible` false.
+    """
+    if not produced_by:
+        return {"produced_by": None, "producer_visible": None}
+    text = str(produced_by)
+    _, _, name = text.partition(":")
+    visible = _may_read(claims, name or text)
+    return {"produced_by": text if visible else None, "producer_visible": visible}
+
+
+def _open_workspace(workstream: str):
+    """A catalog handle on one workspace, built the way `dataset_metadata` builds its own."""
+    return OpteryxCatalog(
+        workstream,
+        firestore_project=GCP_PROJECT_ID,
+        firestore_database=_firestore_database(),
+        gcs_bucket=_bucket_name(),
+    )
+
+
+class _SourceSnapshots:
+    """Which snapshots of a source dataset are still live, one history load
+    per source for the life of one `$lineage` answer.
+
+    A receipt names a version and does not pin it (PROVENANCE_DESIGN.md
+    S2.1): the snapshot it names can have expired since, and the row owes the
+    reader that fact. Liveness is membership in a history load, which keeps
+    only the live snapshots - the catalog's by-id fetch refuses a tombstone
+    too (opteryx-catalog 0.4.144), but membership answers every row of a
+    source from ONE read where by-id would be one per distinct version.
+    Loaded once per distinct source rather than per row, because a table
+    refreshed hourly from the same two sources names them on every one of
+    its snapshots.
+    """
+
+    def __init__(self) -> None:
+        self._live: dict[str, set | None] = {}
+
+    def __call__(self, relation: str, snapshot_id) -> bool | None:
+        if snapshot_id is None:
+            # The source had no commits when it was read (S3): there is no
+            # snapshot whose liveness could be asked about.
+            return None
+        if relation not in self._live:
+            self._live[relation] = self._load(relation)
+        live = self._live[relation]
+        if live is None:
+            return None
+        try:
+            return int(snapshot_id) in live
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _load(relation: str) -> set | None:
+        workspace, _, relative = relation.partition(".")
+        try:
+            dataset = _open_workspace(workspace).load_dataset(relative, load_history=True)
+            return {
+                int(snapshot.snapshot_id)
+                for snapshot in dataset.snapshots()
+                if getattr(snapshot, "snapshot_id", None) is not None
+            }
+        except Exception as exc:  # noqa: BLE001 - catalog boundary
+            # A source that has been dropped is a definite answer - nothing of
+            # it is live - and is told apart by name the way the
+            # materialized-view path does, because the type is the catalog's
+            # own. Anything else is a read that did not answer, and null is
+            # the honest report of that rather than a guess either way.
+            if type(exc).__name__ == "DatasetNotFound":
+                return set()
+            logger.warning(f"Could not read the history of {relation} for source_exists: {exc}")
+            return None
+
+
+@router.get(
+    "/{workstream}/$lineage",
+    summary="What each committed version of a dataset was built from",
+    description=(
+        "The receipts (PROVENANCE_DESIGN.md): for every live snapshot of `target`, which "
+        "versions of which other datasets the statement that produced it read, newest "
+        "snapshot first, one row per (snapshot, source). Three states are told apart: a "
+        "snapshot with no receipt gives ONE row with `recorded` false and the source columns "
+        "null (pre-feature history, which cannot be backfilled); a snapshot that read no "
+        "catalog relation gives one row with `recorded` true and the source columns null; "
+        "otherwise each source is a row. A source the caller cannot read still comes back, "
+        "with `source_dataset` and `source_exists` null and `visible` false. `source_exists` "
+        "says whether the version read is still live - a receipt does not pin what it names. "
+        "`sources` and `sources_complete` are the dataset's standing list, as on its "
+        "`$metadata` document."
+    ),
+    responses={
+        200: {"description": "The receipts, in `value`; the standing list in `sources`"},
+        400: {"description": "`target` missing, not fully qualified, or in another workspace than the path"},
+        401: {"description": "Missing or invalid authentication"},
+        403: {"description": "Forbidden: no read access to the target"},
+        404: {"description": "Target not found in the catalog"},
+    },
+)
+def lineage(
+    request: Request,
+    response: Response,
+    workstream: str,
+    target: str = Query(
+        ...,
+        description=(
+            "The fully-qualified `workspace.collection.dataset` whose receipts are wanted. "
+            "Must be in the workspace named in the path."
+        ),
+    ),
+) -> Any:
+    """The receipts of one dataset, per snapshot, with each name elided per grant.
+
+    The same path shape and gate as `$inbound-edges`, for the other half of
+    the same question: that route says what is WIRED to write the target,
+    this one says what its commits actually READ, and from which versions.
+    One history load of the target, plus one per distinct source named for
+    `source_exists` (see `_SourceSnapshots`).
+    """
+    response.headers["OData-Version"] = "4.0"
+
+    claims = getattr(request.state, "claims", {}) or {}
+    _require_provenance_target(claims, workstream, target)
+
+    _, _, relative = target.partition(".")
+    try:
+        dataset = _open_workspace(workstream).load_dataset(relative, load_history=True)
+    except Exception as exc:
+        logger.error(f"Failed to load dataset history from catalog for {target}: {exc}")
+        raise HTTPException(status_code=404, detail="dataset not found in catalog") from exc
+
+    metadata = getattr(dataset, "metadata", None)
+    # The head is the pointer, not the newest id: a rollback moves it
+    # backwards past snapshots that stay live and listed here. `snapshot()`
+    # with no argument reads that pointer from the metadata already in hand,
+    # including the fallback for a dataset written before the pointer existed.
+    head = getattr(dataset.snapshot(), "snapshot_id", None)
+    source_exists = _SourceSnapshots()
+
+    value = []
+    snapshots = sorted(
+        dataset.snapshots(), key=lambda s: -(getattr(s, "snapshot_id", None) or 0)
+    )
+    for snapshot in snapshots:
+        base = {
+            "snapshot_id": snapshot.snapshot_id,
+            "committed_at": _iso_from_ms(getattr(snapshot, "timestamp_ms", None)),
+            "is_current": snapshot.snapshot_id == head,
+            **_producer_fields(claims, getattr(snapshot, "produced_by", None)),
+        }
+        receipt = getattr(snapshot, "read_sources", None)
+        if not receipt:
+            # The two marker states (S2.4). None is "the writer did not
+            # report", which is permanent for pre-feature history; [] is
+            # "read no catalog relation", which is a fact about the commit.
+            # Neither has a source to name or to elide, so `visible` is null
+            # rather than false - false would read as an elided name.
+            value.append(
+                {
+                    **base,
+                    "source_dataset": None,
+                    "source_snapshot_id": None,
+                    "resolved_by": None,
+                    "source_exists": None,
+                    "recorded": receipt is not None,
+                    "visible": None,
+                }
+            )
+            continue
+        # Entries are stored deduplicated and sorted on (dataset, snapshot-id)
+        # (S2.1), which is the row order the spec asks for, so they are not
+        # re-sorted here.
+        for entry in receipt:
+            name = entry.get("dataset")
+            source_snapshot_id = entry.get("snapshot-id")
+            visible = bool(name) and _may_read(claims, str(name))
+            value.append(
+                {
+                    **base,
+                    "source_dataset": str(name) if visible else None,
+                    "source_snapshot_id": source_snapshot_id,
+                    "resolved_by": entry.get("resolved-by"),
+                    # Liveness is asked only for a name the caller may see:
+                    # true or false beside a null name would still say
+                    # something about a dataset they hold no grant on.
+                    "source_exists": (
+                        source_exists(str(name), source_snapshot_id) if visible else None
+                    ),
+                    "recorded": True,
+                    "visible": visible,
+                }
+            )
+
+    body = {
+        "target": target,
+        "sources": _elided_names(claims, getattr(metadata, "sources", None)),
+        "sources_complete": bool(getattr(metadata, "sources_complete", False)),
+        "value": value,
+    }
+    return Response(
+        content=json.dumps(body).encode("utf-8"),
+        media_type="application/json",
+        headers={"OData-Version": "4.0"},
+    )
+
+
+@router.get(
+    "/{workstream}/$consumers",
+    summary="Which commits, in any workspace, read a dataset",
+    description=(
+        "The outgoing half of provenance: every live snapshot in the catalog whose receipt "
+        "names `target`, and with `snapshot` only those that read that version of it. A "
+        "trigger says what a commit fires, not what read it, and a hand-run statement fires "
+        "nothing, so the receipt on the consuming snapshot is the only record. Pre-feature "
+        "commits carry no receipt and are not consumers here even if they did read the "
+        "target; `$inbound-edges` answers from the plan for those. A consumer the caller "
+        "cannot read still comes back, with `dataset`, `workspace` and `produced_by` null "
+        "and `visible` false."
+    ),
+    responses={
+        200: {"description": "The consuming snapshots, in `value`"},
+        400: {"description": "`target` missing, not fully qualified, or in another workspace than the path"},
+        401: {"description": "Missing or invalid authentication"},
+        403: {"description": "Forbidden: no read access to the target"},
+    },
+)
+def consumers(
+    request: Request,
+    response: Response,
+    workstream: str,
+    target: str = Query(
+        ...,
+        description=(
+            "The fully-qualified `workspace.collection.dataset` whose readers are wanted. "
+            "Must be in the workspace named in the path."
+        ),
+    ),
+    snapshot: int | None = Query(
+        None,
+        description="Narrow the answer to the commits that read this snapshot of `target`.",
+    ),
+) -> Any:
+    """Who read one dataset - or one version of it - from the receipts.
+
+    ONE INDEXED QUERY behind it - see opteryx_catalog.consumers - over the
+    `snapshots` collection group, the same shape `$inbound-edges` uses over
+    `tasks`. READ on the target is the gate; each consumer is then elided on
+    its own name, and its producer on the producer's name, since either may be
+    in a workspace the caller cannot see.
+    """
+    response.headers["OData-Version"] = "4.0"
+
+    claims = getattr(request.state, "claims", {}) or {}
+    _require_provenance_target(claims, workstream, target)
+
+    from opteryx_catalog.consumers import find_consumers
+
+    client = _get_firestore_client(GCP_PROJECT_ID, _firestore_database())
+    if client is None:
+        raise HTTPException(status_code=503, detail="catalog unavailable")
+
+    rows = find_consumers(client, target, snapshot)
+
+    value = []
+    for row in rows:
+        visible = _may_read(claims, row["dataset"])
+        # The producer is named only when BOTH the consumer and the producer
+        # are readable: a task name beside an elided consumer would say what
+        # writes the thing the caller may not know about.
+        producer = _producer_fields(claims, row.get("produced_by")) if visible else None
+        value.append(
+            {
+                "dataset": row["dataset"] if visible else None,
+                "workspace": row["workspace"] if visible else None,
+                "visible": visible,
+                "snapshot_id": row["snapshot_id"],
+                "committed_at": _iso_from_ms(row["committed_at_ms"]),
+                "produced_by": producer["produced_by"] if producer else None,
+                # Which versions of the TARGET were read, and how each was
+                # chosen. About the dataset the caller already holds READ on,
+                # so never elided.
+                "source_snapshot_ids": list(row.get("source_snapshot_ids") or []),
+                "resolved_by": list(row.get("resolved_by") or []),
+            }
+        )
+
+    body = {"target": target, "snapshot": snapshot, "value": value}
+    return Response(
+        content=json.dumps(body).encode("utf-8"),
         media_type="application/json",
         headers={"OData-Version": "4.0"},
     )
