@@ -78,6 +78,7 @@ class ODataLogicalPlanBuilder:
         skip: Optional[int] = None,
         expand_expr: Optional[str] = None,
         apply_expr: Optional[str] = None,
+        compute_expr: Optional[str] = None,
         count_only: bool = False,
     ) -> LogicalPlan:
         """Build a complete logical plan from OData parameters.
@@ -86,10 +87,14 @@ class ODataLogicalPlanBuilder:
         returns a single COUNT(*) aggregate (after any filters/applies).
 
         OData query evaluation order (per Data Aggregation extension §3):
-        - Scan → Expand → Apply → Filter → Select → OrderBy → Limit → Exit
+        - Scan → Expand → Apply → Compute → Filter → Select → OrderBy → Limit → Exit
 
         Note: When $apply is present, $filter applies to the aggregated output.
-        When $apply is absent, $filter applies to the input rows.
+        When $apply is absent, $filter applies to the input rows. $compute is
+        placed before $filter (and $select/$orderby, further down) so a
+        computed alias is usable by all three -- and, for the same "$derived"
+        schema reasons _pending_aggregate_columns exists for, $compute is not
+        supported combined with $apply in this version (raises ValueError).
 
         Args:
             filter_expr: OData $filter expression
@@ -99,10 +104,15 @@ class ODataLogicalPlanBuilder:
             skip: OData $skip offset value
             expand_expr: OData $expand expression (navigation properties)
             apply_expr: OData $apply expression (aggregations)
+            compute_expr: OData $compute expression (computed properties)
             count_only: If True, build a COUNT(*) aggregate plan
 
         Returns:
             A LogicalPlan ready for Opteryx optimization
+
+        Raises:
+            ValueError: `compute_expr` is set together with `apply_expr`, or
+                either expression fails to parse.
         """
         # Start with a Scan node to read the table
         self.current_step_id = self._add_scan_node()
@@ -114,6 +124,19 @@ class ODataLogicalPlanBuilder:
         # Apply aggregations from $apply
         if apply_expr:
             self.current_step_id = self._add_apply_nodes(apply_expr)
+
+        # Introduce $compute's aliased properties before anything that might
+        # reference them ($filter, $select, $orderby). Not supported combined
+        # with $apply yet: a compute referencing an aggregate alias would hit
+        # the same "$derived" schema resolution problem
+        # _pending_aggregate_columns works around for count_only/wildcard
+        # $select, and that combination hasn't been designed on purpose yet.
+        if compute_expr and compute_expr.strip():
+            if apply_expr:
+                raise ValueError(
+                    "$compute cannot be combined with $apply in this version"
+                )
+            self.current_step_id = self._add_compute_node(compute_expr)
 
         # Apply WHERE clause from $filter (after $apply if present, before if absent)
         if filter_expr:
@@ -219,6 +242,34 @@ class ODataLogicalPlanBuilder:
         filter_node.columns = [Node(node_type=NodeType.WILDCARD)]
 
         return self._add_node(filter_node)
+
+    def _add_compute_node(self, compute_expr: str) -> str:
+        """Add a Project node introducing $compute's aliased expressions.
+
+        Placed right after Scan/Expand/Apply and before Filter -- see the
+        pipeline-order note on build() -- carrying every original column
+        (wildcard) plus the new aliased expression(s), the same shape
+        Opteryx's own SQL planner uses for `SELECT *, b*c AS x FROM t`.
+
+        Args:
+            compute_expr: OData $compute expression string
+
+        Returns:
+            Step ID of the new project node, or the current step if
+            `compute_expr` parses to no clauses (blank/whitespace-only).
+        """
+        computed_nodes = self.expression_parser.parse_compute(compute_expr)
+        if not computed_nodes:
+            return self.current_step_id
+
+        project_node = LogicalPlanNode(node_type=LogicalPlanStepType.Project)
+        wildcard_node = Node(node_type=NodeType.WILDCARD)
+        wildcard_node.except_columns = None
+        project_node.columns = [wildcard_node] + computed_nodes
+        project_node.passthrough_columns = []
+        project_node.except_columns = []
+
+        return self._add_node(project_node)
 
     def _add_expand_nodes(self, expand_expr: str) -> str:
         """Add Join nodes for OData $expand (navigation properties).
@@ -485,6 +536,7 @@ def build_logical_plan(
     skip: Optional[int] = None,
     expand_expr: Optional[str] = None,
     apply_expr: Optional[str] = None,
+    compute_expr: Optional[str] = None,
 ) -> LogicalPlan:
     """Convenience function to build a logical plan from OData parameters.
 
@@ -497,6 +549,7 @@ def build_logical_plan(
         skip: OData $skip value
         expand_expr: OData $expand expression
         apply_expr: OData $apply expression
+        compute_expr: OData $compute expression
 
     Returns:
         A LogicalPlan ready for Opteryx
@@ -510,4 +563,5 @@ def build_logical_plan(
         skip=skip,
         expand_expr=expand_expr,
         apply_expr=apply_expr,
+        compute_expr=compute_expr,
     )

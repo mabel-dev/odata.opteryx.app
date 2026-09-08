@@ -741,6 +741,7 @@ def _execute_count_query(
     table_name: str,
     filter_expr: Optional[str],
     apply_expr: Optional[str],
+    compute_expr: Optional[str] = None,
     visibility_filters=None,
     version: Optional[int] = None,
     version_tag: Optional[str] = None,
@@ -753,7 +754,8 @@ def _execute_count_query(
 
     version/version_tag must match the row query's -- otherwise $count=true
     against a pinned snapshot could report a total that doesn't match the rows
-    returned alongside it.
+    returned alongside it. compute_expr must match too -- if $filter references
+    a $compute alias, the count plan needs the same alias defined to resolve it.
     """
     count_builder = ODataLogicalPlanBuilder(table_name, version=version, version_tag=version_tag)
     count_plan = count_builder.build(
@@ -763,6 +765,7 @@ def _execute_count_query(
         top=None,
         skip=None,
         apply_expr=apply_expr,
+        compute_expr=compute_expr,
         count_only=True,
     )
     count_table = _materialize_logical_plan_result(
@@ -794,6 +797,7 @@ def execute_odata_query(
     top: Optional[int] = None,
     skip: Optional[int] = None,
     apply_expr: Optional[str] = None,
+    compute_expr: Optional[str] = None,
     count_requested: bool = False,
     identity: Optional[str] = None,
     access_policies: Optional[List[dict]] = None,
@@ -819,6 +823,8 @@ def execute_odata_query(
         skip: $skip offset
         count_requested: Whether to include total count
         apply_expr: OData $apply expression
+        compute_expr: OData $compute expression (rejected together with
+            apply_expr -- see ODataLogicalPlanBuilder.build)
         version: Explicit snapshot id from a `@{label}` version selector, or None
         version_tag: Tag name (including "current") from a `@{label}` version
             selector, or None
@@ -861,6 +867,7 @@ def execute_odata_query(
             top=fetch_top,
             skip=skip,
             apply_expr=apply_expr,
+            compute_expr=compute_expr,
         )
     except ValueError as e:
         logger.error(
@@ -924,9 +931,10 @@ def execute_odata_query(
             table_name,
             filter_expr,
             apply_expr,
-            visibility_filters,
-            version,
-            version_tag,
+            compute_expr=compute_expr,
+            visibility_filters=visibility_filters,
+            version=version,
+            version_tag=version_tag,
         )
 
     try:
@@ -961,6 +969,7 @@ def execute_odata_query(
                         top=1,
                         skip=None,
                         apply_expr=apply_expr,
+                        compute_expr=compute_expr,
                     )
                     schema_table = _materialize_logical_plan_result(
                         session, schema_plan, visibility_filters=visibility_filters
@@ -1028,8 +1037,8 @@ router = APIRouter(
     summary="Query dataset rows",
     description=(
         "Retrieve data from a dataset with OData v4 query parameters ($filter, $select, $orderby, "
-        "$top, $skip, $apply, $count). Returns paginated results with total count and nextLink "
-        "for server-driven paging. "
+        "$top, $skip, $apply, $compute, $count). Returns paginated results with total count and "
+        "nextLink for server-driven paging. "
         "The dataset segment may carry a `@{label}` version selector: `dataset@current` (the "
         "default, also what a bare `dataset` means), `dataset@previous` (the most recent version "
         "of the data before this one — maintenance snapshots such as compaction that changed no "
@@ -1040,12 +1049,12 @@ router = APIRouter(
     ),
     responses={
         200: {"description": "Query succeeded; returns rows and pagination metadata"},
-        400: {"description": f"Invalid query: malformed $filter, unsupported $top value (not 0-{_DOC_MAX_TOP}), negative $skip, $skip without $orderby, invalid $count value, invalid $apply expression, OData-MaxVersion below 4.0, or a malformed @{{label}} version selector"},
+        400: {"description": f"Invalid query: malformed $filter, unsupported $top value (not 0-{_DOC_MAX_TOP}), negative $skip, $skip without $orderby, invalid $count value, invalid $apply expression, invalid $compute expression, $compute combined with $apply, OData-MaxVersion below 4.0, or a malformed @{{label}} version selector"},
         401: {"description": "Missing or invalid authentication (no bearer token or basic auth)"},
         403: {"description": "Forbidden: authenticated but no permission for dataset"},
         404: {"description": "Dataset not found, or the @{label} version selector names a tag/snapshot/previous version that does not exist"},
         406: {"description": "Accept header does not admit application/json, the only format this route returns"},
-        501: {"description": "Unsupported query feature: $search, $expand, or $compute not implemented"},
+        501: {"description": "Unsupported query feature: $search or $expand not implemented"},
     },
     dependencies=[Depends(require_acceptable(MEDIA_JSON))],
 )
@@ -1118,7 +1127,15 @@ def read_dataset(
     compute: Optional[str] = Query(
         None,
         alias="$compute",
-        description="Computed properties (not implemented; returns 501)"
+        description=(
+            "Computed properties: comma-separated '<expression> as <name>' clauses, e.g. "
+            "'price mul quantity as TotalValue'. The expression uses the same operators and "
+            "functions as $filter (add/sub/mul/div/mod, contains(), etc.), just producing a "
+            "value instead of a boolean. The new name is then usable in $select, $orderby, "
+            "and $filter on the same request, e.g. "
+            "$compute=price mul quantity as TotalValue&$filter=TotalValue gt 100. "
+            "Not supported combined with $apply in this version (400)."
+        )
     ),
     apply: Optional[str] = Query(
         None,
@@ -1153,6 +1170,7 @@ def read_dataset(
     - GET /ws/coll/data?$orderby=created desc&$skip=100 - sort and paginate
     - GET /ws/coll/data?$apply=groupby((vendor),aggregate(amount with sum as Total))
     - GET /ws/coll/data?$count=true&$top=0 - get row count only
+    - GET /ws/coll/data?$compute=price mul quantity as TotalValue&$filter=TotalValue gt 100
 
     Requires authentication via bearer token or basic auth.
     """
@@ -1182,12 +1200,6 @@ def read_dataset(
             detail="$search is not supported by this service"
         )
 
-    if compute and compute.strip():
-        raise HTTPException(
-            status_code=501,
-            detail="$compute is not supported by this service"
-        )
-
     # A blank "$expand=" asks for nothing and is allowed through; only an actual
     # navigation property is a 501.
     if any(query_params.get("$expand", [])):
@@ -1197,7 +1209,7 @@ def read_dataset(
         )
 
     # Parameters for which duplicates are disallowed
-    duplicate_sensitive = ["$top", "$apply", "$count", "$select", "$orderby", "$filter", "$skip"]
+    duplicate_sensitive = ["$top", "$apply", "$count", "$select", "$orderby", "$filter", "$skip", "$compute"]
     duplicates = [p for p in duplicate_sensitive if len(query_params.get(p, [])) > 1]
     if duplicates:
         raise HTTPException(
@@ -1295,6 +1307,7 @@ def read_dataset(
             top=top,
             skip=skip,
             apply_expr=apply,
+            compute_expr=compute,
             count_requested=want_count,
             identity=identity,
             access_policies=access_policies,
@@ -1552,8 +1565,10 @@ def _resolve_labeled_snapshot(workspace, collection: str, dataset: str, ds, labe
         "they do not apply to the dataset kind or are unavailable. "
         "The dataset segment may carry a `@{label}` version selector -- `dataset@current`, "
         "`dataset@previous`, `dataset@{tag}`, or `dataset@{snapshot_id}` -- and the "
-        "Custom.Snapshot.*, Custom.ReadSources.* and Custom.Tags annotations describe that "
-        "version rather than the current one."
+        "Custom.Snapshot.* and Custom.ReadSources.* annotations describe that version "
+        "rather than the current one. Custom.Tags and Custom.Sources do NOT: a tag is a "
+        "pin on the dataset and the source list is a property of its current content, so "
+        "both are the same on every version's document."
     ),
     responses={
         200: {"description": "EDMX metadata document returned as XML"},

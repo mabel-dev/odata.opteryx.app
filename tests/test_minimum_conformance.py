@@ -220,11 +220,12 @@ class TestItem6Extensibility:
 
 
 class TestItem7SystemQueryOptions:
-    """$search, $expand and $compute are recognized and rejected loudly.
-    See test_unsupported_options.py for the full matrix (empty-value
+    """$search and $expand are recognized and rejected loudly (501).
+    $compute is fully implemented -- see test_compute_execution.py. See
+    test_unsupported_options.py for the $search/$expand matrix (empty-value
     admitted, combined with other options, error format, etc.)."""
 
-    @pytest.mark.parametrize("option", ["$search", "$expand", "$compute"])
+    @pytest.mark.parametrize("option", ["$search", "$expand"])
     def test_unsupported_option_returns_501_not_silence(self, client, option):
         response = client.get(f"/api/v4/public/demo/users?{option}=x")
         assert response.status_code == 501
@@ -232,7 +233,7 @@ class TestItem7SystemQueryOptions:
 
     @pytest.mark.parametrize(
         "option",
-        ["$filter", "$select", "$orderby", "$top", "$skip", "$count", "$apply"],
+        ["$filter", "$select", "$orderby", "$top", "$skip", "$count", "$apply", "$compute"],
     )
     def test_recognized_option_is_not_dropped_silently(self, client, option):
         # A recognized option must influence request handling somehow -- at

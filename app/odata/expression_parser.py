@@ -6,6 +6,7 @@ OData query strings into normalized, parsed representations that the
 ODataLogicalPlanBuilder can use.
 """
 
+import re
 import sys
 import threading
 from pathlib import Path
@@ -39,6 +40,95 @@ def _get_lexer_and_parser():
         _thread_local.lexer = lexer
         _thread_local.parser = parser
         return lexer, parser
+
+
+# A CSDL-legal alias name (also matches a plain OData identifier): starts with
+# a letter or underscore, then letters/digits/underscores.
+_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _split_top_level(text: str, sep: str) -> List[str]:
+    """Split `text` on `sep`, ignoring any occurrence inside `()` or a quoted
+    string literal ('...' or "...").
+
+    Used for $compute's comma-separated clause list, where a clause's own
+    expression can itself contain commas inside a function call, e.g.
+    `concat(a, b) as ab, price mul qty as total`.
+    """
+    parts = []
+    depth = 0
+    quote = None
+    start = 0
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if quote is not None:
+            if ch == quote:
+                quote = None
+        elif ch in ("'", '"'):
+            quote = ch
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        elif depth == 0 and text.startswith(sep, i):
+            parts.append(text[start:i])
+            i += len(sep)
+            start = i
+            continue
+        i += 1
+    parts.append(text[start:])
+    return parts
+
+
+def _split_trailing_alias(clause: str) -> Tuple[str, Optional[str]]:
+    """Split one $compute clause into `(expression, alias)` on its trailing,
+    top-level, whole-word `as`.
+
+    Returns `(clause, None)` if no such `as` is found -- the caller turns
+    that into the "expected '<expr> as <name>'" error, since $compute has no
+    other valid clause shape.
+    """
+    depth = 0
+    quote = None
+    n = len(clause)
+    last_as = None
+    i = 0
+    while i < n:
+        ch = clause[i]
+        if quote is not None:
+            if ch == quote:
+                quote = None
+            i += 1
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+            i += 1
+            continue
+        if ch == "(":
+            depth += 1
+            i += 1
+            continue
+        if ch == ")":
+            depth -= 1
+            i += 1
+            continue
+        if depth == 0 and clause[i : i + 2].lower() == "as":
+            before_ok = i == 0 or clause[i - 1].isspace()
+            after_ok = i + 2 == n or clause[i + 2].isspace()
+            if before_ok and after_ok:
+                last_as = i
+        i += 1
+
+    if last_as is None:
+        return clause, None
+
+    expr_text = clause[:last_as].strip()
+    alias = clause[last_as + 2 :].strip()
+    if not expr_text or not alias:
+        return clause, None
+    return expr_text, alias
 
 
 class ODataExpressionParser:
@@ -163,6 +253,67 @@ class ODataExpressionParser:
                 )
 
         return None
+
+    def parse_compute(self, compute_expr: str) -> List[Node]:
+        """Parse an OData $compute expression into aliased Opteryx expression nodes.
+
+        Args:
+            compute_expr: comma-separated `<expression> as <alias>` clauses,
+                e.g. "price mul quantity as TotalValue, price sub cost as Margin"
+
+        Returns:
+            A list of expression Nodes, each with `.alias` set to its
+            requested name, in the order the caller wrote them. Empty list
+            for an empty/blank input.
+
+        Each clause's expression half uses the same grammar $filter does
+        (`common_expr`, which already produces plain value nodes for
+        arithmetic and function calls -- $compute is the first caller to use
+        that outside a boolean context). Only the trailing `as <alias>` is
+        new parsing.
+
+        Raises:
+            ValueError: a clause has no trailing `as <name>`, an alias is not
+                a valid identifier, an alias is reused within the same
+                $compute, or the expression half fails to parse.
+        """
+        if not compute_expr or not compute_expr.strip():
+            return []
+
+        computed_nodes: List[Node] = []
+        seen_aliases = set()
+        for raw_clause in _split_top_level(compute_expr, ","):
+            clause = raw_clause.strip()
+            if not clause:
+                continue
+
+            expr_text, alias = _split_trailing_alias(clause)
+            if alias is None:
+                raise ValueError(
+                    f"Invalid $compute clause '{clause}': expected '<expression> as <name>'"
+                )
+            if not _IDENTIFIER_RE.match(alias):
+                raise ValueError(
+                    f"Invalid $compute alias '{alias}': must be a valid identifier"
+                )
+            if alias in seen_aliases:
+                raise ValueError(f"$compute defines '{alias}' more than once")
+            seen_aliases.add(alias)
+
+            try:
+                ast = self.parser.parse(self.lexer.tokenize(expr_text))
+                node = ast.to_opteryx_node()
+            except FunctionCallException as e:
+                raise ValueError(str(e)) from e
+            except Exception as e:
+                raise ValueError(
+                    f"Failed to parse $compute expression '{expr_text}': {e}"
+                ) from e
+
+            node.alias = alias
+            computed_nodes.append(node)
+
+        return computed_nodes
 
     def parse_orderby(self, orderby_expr: str) -> List[Tuple[str, str]]:
         """Parse OData $orderby expression into column/direction tuples.

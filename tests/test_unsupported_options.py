@@ -1,4 +1,10 @@
-"""Tests for rejecting unsupported OData query options ($search, $expand, $compute)."""
+"""Tests for rejecting unsupported OData query options ($search, $expand).
+
+$compute was rejected here too until it shipped -- see
+tests/test_compute_execution.py for its real coverage, and
+tests/test_minimum_conformance.py::TestItem7SystemQueryOptions for why it
+moved out of the "unsupported" list.
+"""
 class TestSearchRejection:
     """Test that $search queries are rejected with 501."""
 
@@ -110,44 +116,6 @@ class TestExpandRejection:
         assert "message" in data["error"]
 
 
-class TestComputeRejection:
-    """Test that $compute queries are rejected with 501.
-
-    Unlike $search/$expand, $compute was never a recognized FastAPI query
-    parameter at all -- an unbound query param is silently dropped rather
-    than erroring, which is exactly the "silently ignore unsupported
-    functionality" behaviour OData minimal conformance (13.1.1 item 7)
-    forbids. These tests guard against that regressing back to silent.
-    """
-
-    def test_compute_with_value_rejected(self, client):
-        """$compute=Amount mul 2 as Doubled should return 501 Not Implemented."""
-        response = client.get(
-            "/api/v4/public/demo/users?$compute=id mul 2 as DoubledId"
-        )
-        assert response.status_code == 501
-        data = response.json()
-        assert "error" in data
-        assert "$compute" in data["error"]["message"]
-
-    def test_compute_empty_allowed(self, client):
-        """$compute= with empty value should not trigger rejection."""
-        response = client.get(
-            "/api/v4/public/demo/users?$compute=&$top=1"
-        )
-        assert response.status_code != 501
-
-    def test_compute_error_format(self, client):
-        """Error response should be valid OData format."""
-        response = client.get(
-            "/api/v4/public/demo/users?$compute=id mul 2 as DoubledId"
-        )
-        assert response.status_code == 501
-        assert response.headers.get("OData-Version") == "4.0"
-        data = response.json()
-        assert "error" in data
-        assert "code" in data["error"]
-        assert "message" in data["error"]
 
 
 class TestSupportedOptionsStillWork:
@@ -186,6 +154,16 @@ class TestSupportedOptionsStillWork:
         """$count alone should not be rejected."""
         response = client.get(
             "/api/v4/public/demo/users?$count=true&$top=10"
+        )
+        assert response.status_code != 501
+
+    def test_compute_still_works(self, client):
+        """$compute alone should not be rejected -- see test_compute_execution.py
+        for its actual behaviour; $planets has no HTTP route to reach with a
+        real identity, so this only pins "not summarily 501'd" the way the
+        others above do."""
+        response = client.get(
+            "/api/v4/public/demo/users?$compute=id mul 2 as DoubledId&$top=10"
         )
         assert response.status_code != 501
 

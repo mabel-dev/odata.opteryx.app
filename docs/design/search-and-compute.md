@@ -1,9 +1,14 @@
 # Design: `$search` and `$compute`
 
-**Status:** draft, no code written. Both options currently return `501 Not
-Implemented` (deliberately — see [tests/test_unsupported_options.py](../../tests/test_unsupported_options.py)
+**Status:** `$compute` is implemented (2026-09-08) as designed in §2 below,
+including the v1 scope decision to reject it combined with `$apply`. See
+[expression_parser.py](../../app/odata/expression_parser.py)'s `parse_compute`,
+[odata_to_logical_plan.py](../../app/odata/odata_to_logical_plan.py)'s
+`_add_compute_node`, and [tests/test_compute_execution.py](../../tests/test_compute_execution.py).
+`$search` is still draft/not started — it still returns `501 Not Implemented`
+(deliberately — see [tests/test_unsupported_options.py](../../tests/test_unsupported_options.py)
 and [tests/test_minimum_conformance.py](../../tests/test_minimum_conformance.py),
-item 7). This document is the design to replace those 501s with real support.
+item 7). §1 below is the design to replace that 501 with real support.
 
 **Repos involved:** `odata.opteryx` (this repo) for both features; `opteryx-core`
 only if we choose to build the Phase 2 native `$search` primitive described
@@ -288,21 +293,39 @@ in `interface.py`. This is the cheaper of the two features to build.
 
 ## 3. Rollout / test impact
 
-Both features currently have tests asserting `501`:
+`$compute` — done, as it played out:
 
-- `tests/test_unsupported_options.py::TestSearchRejection` and
-  `TestComputeRejection` assert `$search=...`/`$compute=...` → `501`. These
-  become "→ 200 with correct results" tests once each ships, with a new
-  class added for the rejected/edge cases (`$search` containing `"`,
-  `$compute` combined with `$apply`, `$search` against a dataset with no
-  allowlisted columns).
-- `tests/test_minimum_conformance.py::TestItem7SystemQueryOptions` and
-  `TestItem12ExpandIsANotYetMetShould` reference `$search`/`$compute` as the
-  "recognized and rejected" examples for item 7. Once one ships, its
-  parametrized case moves out of the "still 501" list; item 7's overall
-  conformance claim (parse-or-501) is unaffected either way.
+- `tests/test_unsupported_options.py`: the old `TestComputeRejection` class
+  (asserting blanket `501`) is gone; `$compute` moved into
+  `TestSupportedOptionsStillWork` alongside the other real options.
+- `tests/test_minimum_conformance.py::TestItem7SystemQueryOptions`: `$compute`
+  moved out of the `501`-parametrized list into the
+  "recognized and not dropped silently" one.
+- New `tests/test_compute_execution.py`: `parse_compute` unit coverage,
+  pipeline-placement coverage (alias usable in `$select`/`$orderby`/`$filter`/
+  `$count`), and the `$compute` + `$apply` → `ValueError`/400 rejection —
+  all run through `execute_odata_query` against the built-in `$planets`
+  dataset, no catalog needed.
 
-## 4. Summary of decisions needed before implementation starts
+`$search` — still to do:
+
+- `tests/test_unsupported_options.py::TestSearchRejection` asserts
+  `$search=...` → `501`. Becomes "→ 200 with correct results" once it ships,
+  with a new class for the rejected/edge cases (`$search` containing `"`, a
+  dataset whose string-column count exceeds the cap).
+- `tests/test_minimum_conformance.py::TestItem7SystemQueryOptions` still
+  lists `$search` as a "recognized and rejected" example for item 7 — moves
+  out of that list once it ships; item 7's overall conformance claim
+  (parse-or-501) is unaffected either way.
+
+## 4. Summary of decisions
+
+Resolved (as implemented):
+
+4. `$compute` + `$apply`: rejected with `400` (`ValueError` from
+   `ODataLogicalPlanBuilder.build`) for v1, not supported yet.
+
+Still open, needed before `$search` implementation starts:
 
 1. `$search` matching scope: whitespace/implicit-AND only for v1 — confirm.
 2. `$search` column scope: every `Edm.String` column with a per-dataset
@@ -312,7 +335,5 @@ Both features currently have tests asserting `501`:
    work; not a v1 dependency).
 3. `$search` quoted/boolean syntax sent by a client: reject with `400`
    (recommended) vs. silently degrade.
-4. `$compute` + `$apply`: reject with `400` for v1 (recommended) vs. attempt
-   to support immediately.
 5. Whether Phase 2 (native `opteryx-core` search primitive) is worth
    scoping now or genuinely deferred until Phase 1 proves insufficient.
