@@ -56,24 +56,38 @@ means adding a schema lookup to that path that isn't there now.
 **Decision needed:** "every column typed as `Edm.String`" vs. an explicit
 per-dataset allowlist of searchable columns.
 
-- *Every string column* is zero-config but has two costs: (a) performance —
-  cost scales with `rows × string-columns`, and a wide table with many text
-  columns pays for all of them on every `$search` query; (b) exposure — a text
-  column nobody intended to be "searchable" (an internal notes field, a raw
-  log line) becomes reachable via a keyword guess, which is a different
-  access-control surface than `$filter`'s "you must already know the exact
-  column and exact value."
-- *Explicit allowlist* (e.g. a `Custom.Searchable` annotation on eligible
-  columns, set via catalog metadata) avoids both costs but requires a config
-  surface and a default of "nothing is searchable until opted in" — meaning
-  `$search` would keep 501-ing (or more correctly, return `0` results, or a
-  clear "not enabled for this dataset" error) for any dataset that hasn't
-  opted in.
+**There is currently no config surface for the allowlist option.** Checked
+opteryx-catalog's column schema
+(`SchemaColumn` in `opteryx_catalog/catalog/dataset.py:270-288`) — it carries
+only `name`, `type`, `element_type`, `precision`, `scale`, `nullable`, `id`.
+No description field, no arbitrary flags, nothing an allowlist could hang off
+today. "An explicit allowlist" is therefore not "add a check" — it's a new
+`SchemaColumn.searchable: bool` field (or equivalent), a migration for
+existing catalog entries, and some way for a workspace owner to actually set
+it (there's no admin surface for per-column config at all right now; compare
+to `Custom.Description`, which is dataset-level, sourced from
+`ds.metadata.description`, not per-column — see
+[interface.py:2716](../../app/routes/v4/interface.py)).
 
-**Recommendation:** start with the allowlist, defaulting to empty (i.e.
-`$search` is enabled per-dataset, not service-wide, from day one). This keeps
-the rollout incremental and avoids a surprise performance/exposure regression
-on every existing dataset the day this ships.
+- *Every string column* (type-derived, zero new schema) has two costs:
+  (a) performance — cost scales with `rows × string-columns`, and a wide
+  table with many text columns pays for all of them on every `$search` query;
+  (b) exposure — a text column nobody intended to be "searchable" (an
+  internal notes field, a raw log line) becomes reachable via a keyword
+  guess, a different access-control surface than `$filter`'s "you must
+  already know the exact column and exact value."
+- *Explicit allowlist* avoids both costs but is real, separate engineering:
+  a catalog schema field, a migration, and an opt-in UI/API path that doesn't
+  exist yet — a project of its own, not a detail of this one.
+
+**Revised recommendation:** ship v1 as type-derived (every `Edm.String`
+column, via the schema lookup added in this feature anyway), with a hard cap
+on the number of columns searched per dataset (e.g. skip `$search` support —
+`400`, not silently partial — on any dataset whose string-column count
+exceeds a configured ceiling) as the cheap mitigation for both the
+performance and exposure concerns until a real per-column opt-in surface
+exists. Treat the allowlist as a separate, later piece of work gated on that
+catalog schema addition, not a v1 dependency.
 
 ### 1.4 Phase 1 — OData-layer only, no `opteryx-core` change
 
@@ -291,8 +305,11 @@ Both features currently have tests asserting `501`:
 ## 4. Summary of decisions needed before implementation starts
 
 1. `$search` matching scope: whitespace/implicit-AND only for v1 — confirm.
-2. `$search` column scope: per-dataset explicit allowlist (recommended) vs.
-   every `Edm.String` column.
+2. `$search` column scope: every `Edm.String` column with a per-dataset
+   column-count cap (recommended for v1 — no catalog schema change needed)
+   vs. a per-dataset explicit allowlist (requires adding a `searchable` field
+   to opteryx-catalog's `SchemaColumn` plus a way to set it — real, separate
+   work; not a v1 dependency).
 3. `$search` quoted/boolean syntax sent by a client: reject with `400`
    (recommended) vs. silently degrade.
 4. `$compute` + `$apply`: reject with `400` for v1 (recommended) vs. attempt
