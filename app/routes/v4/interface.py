@@ -1542,14 +1542,18 @@ def _resolve_labeled_snapshot(workspace, collection: str, dataset: str, ds, labe
         "order (Custom.SortOrder.Column/Direction), snapshot tags (Custom.Tags.Count and "
         "Custom.Tags, a Collection of Records with Name, SnapshotId and CreatedBy), the "
         "standing source list the current content was built from (Custom.Sources.Complete "
-        "and Custom.Sources, a Collection of Records with Dataset and Visible - Dataset is "
-        "omitted and Visible false for a source the caller cannot read), and "
+        "and Custom.Sources, a Collection of Records with Dataset), the commit "
+        "receipt of the snapshot described (Custom.ReadSources.Reported, "
+        "Custom.ReadSources.Truncated and Custom.ReadSources, a Collection of Records "
+        "with Dataset, SnapshotId and ResolvedBy). Both name every source, including "
+        "datasets the caller holds no grant on - a name is not readable data, and "
+        "provenance that cannot be followed is not provenance. Also "
         "materialized-view state (Custom.MaterializedView.*). Annotations are omitted where "
         "they do not apply to the dataset kind or are unavailable. "
         "The dataset segment may carry a `@{label}` version selector -- `dataset@current`, "
         "`dataset@previous`, `dataset@{tag}`, or `dataset@{snapshot_id}` -- and the "
-        "Custom.Snapshot.* and Custom.Tags annotations describe that version rather than "
-        "the current one."
+        "Custom.Snapshot.*, Custom.ReadSources.* and Custom.Tags annotations describe that "
+        "version rather than the current one."
     ),
     responses={
         200: {"description": "EDMX metadata document returned as XML"},
@@ -1594,8 +1598,20 @@ def dataset_metadata(
         before receipts existed.
       * Custom.Sources: a Collection of Records, one per dataset the current
         content was built from, most recent first, omitted when the list is
-        empty. Each Record carries Visible and, only where the caller holds
-        READ on it, Dataset; an unreadable source keeps its place unnamed.
+        empty. Each Record carries Dataset. Every source is named, including
+        one in a workspace the caller holds no grant on -- the name is a
+        citation, and reading the dataset behind it still needs a grant.
+      * Custom.ReadSources.Reported: whether the commit that produced the
+        snapshot this document describes reported what it read. False means
+        nothing is on record; it is not "read nothing", which is an empty
+        receipt with Reported true.
+      * Custom.ReadSources.Truncated: whether the receipt hit its 256-entry
+        cap. Emitted only when Reported is true.
+      * Custom.ReadSources: a Collection of Records, one per (dataset,
+        snapshot) that commit read, omitted when the receipt is empty. Each
+        Record carries Dataset, SnapshotId and ResolvedBy (how the version was
+        chosen: current, version, previous, tag or date). Named in full for
+        every caller, as Custom.Sources is.
 
     Also includes access-control annotations:
     - Custom.Role: user's assigned role (reader, writer, admin, owner)
@@ -1735,23 +1751,30 @@ def dataset_metadata(
         )
     )
     # The standing source list (PROVENANCE_DESIGN.md S2.2) is read here, before
-    # the cache, for the reason the relationships are: its names are elided on
-    # the caller's grants on OTHER relations (S4.4), so two callers holding the
-    # same role on this dataset can be owed different documents, and it is the
-    # visible names that tell them apart in the key. Naming the visible sources
-    # rather than the caller keeps callers who see the same thing sharing an
-    # entry. `load_dataset` reads the same document again further down; one
-    # extra document get is the price of a key that is correct, and it is the
-    # price the relationships already pay.
+    # the cache, because it is part of the key: the document is rebuilt when
+    # the list changes rather than serving a provenance record the catalog has
+    # already moved past. It costs nothing to key on -- the read happens on
+    # every request either way, since `load_dataset` reads the same document
+    # again further down.
+    #
+    # Unlike the relationships above it does NOT vary by caller. Provenance
+    # names its sources whether or not the caller can read them (see
+    # `Custom.Sources` below), so every caller of this dataset is owed the same
+    # list and they share one cache entry.
+    #
+    # The `@{label}` selector IS in the key: `dataset@{old snapshot}` and the
+    # bare name are different documents -- different receipt, different
+    # Custom.Snapshot.* -- under one dataset name.
     source_names, sources_complete = (
         ([], False)
         if is_virtual_info_schema
         else _standing_sources(workstream, collection, dataset)
     )
-    sources = _elided_names(claims, source_names)
-    sources_key = (tuple(entry["dataset"] or "" for entry in sources), sources_complete)
+    sources = [str(name) for name in source_names]
+    sources_key = (tuple(sources), sources_complete)
     cache_key = (
         table_name,
+        label,
         assigned_role,
         assigned_policy,
         is_virtual_info_schema,
@@ -1788,6 +1811,11 @@ def dataset_metadata(
     # Custom.Tags.Count annotation below is emitted only for the kinds that
     # can, so a client can still tell those two apart.
     tags = []
+    # The commit receipt of the snapshot this document describes -- see the
+    # renderer below. None for everything that has no snapshot to carry one: a
+    # view, a virtual table, an external projection, and a materialized view
+    # that has never been refreshed.
+    receipt = None
 
     # A projection of a customer's own catalog, not a dataset this catalog
     # owns. Checked before the catalog path because that path cannot answer
@@ -2172,6 +2200,31 @@ def dataset_metadata(
             except Exception:
                 # Be defensive: missing or failing snapshot should not break metadata
                 pass
+
+            # THE RECEIPT (PROVENANCE_DESIGN.md S2.1): the (dataset, snapshot)
+            # pairs the statement that produced THIS snapshot read, taken off
+            # the snapshot the `@{label}` selector resolved to -- so
+            # `dataset@{id}` reports what that version was built from, not what
+            # the current one was.
+            #
+            # It answers a different question from the standing source list
+            # rendered beside it, which is why both are here: the list names
+            # every dataset whose data is in the current content, at no
+            # particular version; the receipt names the exact versions ONE
+            # commit read, which is what re-deriving its output needs.
+            #
+            # A receipt of `None` is a writer that did not report (or one older
+            # than receipts), which is why "reported" is sent separately: `[]`
+            # is the honest receipt of a statement that read no catalog
+            # relation -- an upload, a literal INSERT, a compaction -- and a
+            # client must not read that as "unknown".
+            if snapshot is not None:
+                entries = getattr(snapshot, "read_sources", None)
+                receipt = {
+                    "reported": entries is not None,
+                    "truncated": bool(getattr(snapshot, "read_sources_truncated", False)),
+                    "entries": _receipt_entries(entries),
+                }
         except HTTPException:
             # re-raise HTTP exceptions as-is
             raise
@@ -2436,10 +2489,19 @@ def dataset_metadata(
     # document before the cache check (see `sources_key`) rather than off `ds`,
     # so the document and the key it is cached under cannot disagree.
     #
-    # A Collection of Records rather than a list of names because an elided
-    # entry has no name to give and must still occupy its place: its Record
-    # carries no Dataset and Visible is false, the same three-way reading
-    # (`dataset` null, `visible` false, entry kept) `$lineage` gives in JSON.
+    # EVERY SOURCE IS NAMED, whether or not the caller can read it. A source
+    # list is a citation list: it records what this data was built from, and a
+    # citation the reader lacks a subscription to is still a citation. Withheld
+    # names were tried (an entry kept, its name nulled) and are not a weaker
+    # version of this record, they are a different one -- provenance nobody can
+    # follow, which is the only thing provenance is for.
+    #
+    # What that discloses is the NAME of a dataset in a workspace the caller
+    # may hold no grant on, and nothing else: no schema, no statistics, no
+    # rows. Reading it needs a grant like anything else.
+    #
+    # A Collection of Records rather than a list of names so the shape matches
+    # Custom.ReadSources below, which has more than a name per entry.
     if ds is not None and source_type in TABLE_LIKE_SOURCES:
         ET.SubElement(
             entity_set,
@@ -2451,19 +2513,74 @@ def dataset_metadata(
                 entity_set, f"{{{NS_EDM}}}Annotation", attrib={"Term": "Custom.Sources"}
             )
             sources_collection = ET.SubElement(sources_annotation, f"{{{NS_EDM}}}Collection")
-            for entry in sources:
+            for name in sources:
                 record = ET.SubElement(sources_collection, f"{{{NS_EDM}}}Record")
-                if entry["dataset"] is not None:
-                    ET.SubElement(
-                        record,
-                        f"{{{NS_EDM}}}PropertyValue",
-                        attrib={"Property": "Dataset", "String": entry["dataset"]},
-                    )
                 ET.SubElement(
                     record,
                     f"{{{NS_EDM}}}PropertyValue",
-                    attrib={"Property": "Visible", "Bool": str(entry["visible"]).lower()},
+                    attrib={"Property": "Dataset", "String": name},
                 )
+
+    # The receipt for the snapshot this document describes -- the exact
+    # versions the commit that produced it read (PROVENANCE_DESIGN.md S2.1).
+    #
+    # Custom.ReadSources.Reported is emitted even over an empty receipt, for
+    # the reason Custom.Sources.Complete is: `[]` (the statement read no
+    # catalog relation) and "the writer said nothing" are different facts, and
+    # only the first is something a client may act on. Truncated rides with it
+    # so a client that sees MAX_READ_SOURCES entries knows whether there were
+    # more.
+    #
+    # Named in full for every caller, on the same reading Custom.Sources above
+    # is: a receipt that cannot be followed to the version it names is not a
+    # receipt. The version and how it was chosen go with the name for the same
+    # reason -- they are what re-deriving the output needs, and a name without
+    # them only says that something happened.
+    if receipt is not None and source_type in TABLE_LIKE_SOURCES:
+        ET.SubElement(
+            entity_set,
+            f"{{{NS_EDM}}}Annotation",
+            attrib={"Term": "Custom.ReadSources.Reported", "Bool": str(receipt["reported"]).lower()},
+        )
+        if receipt["reported"]:
+            ET.SubElement(
+                entity_set,
+                f"{{{NS_EDM}}}Annotation",
+                attrib={
+                    "Term": "Custom.ReadSources.Truncated",
+                    "Bool": str(receipt["truncated"]).lower(),
+                },
+            )
+        if receipt["entries"]:
+            read_sources_annotation = ET.SubElement(
+                entity_set, f"{{{NS_EDM}}}Annotation", attrib={"Term": "Custom.ReadSources"}
+            )
+            read_sources_collection = ET.SubElement(
+                read_sources_annotation, f"{{{NS_EDM}}}Collection"
+            )
+            for entry in receipt["entries"]:
+                record = ET.SubElement(read_sources_collection, f"{{{NS_EDM}}}Record")
+                ET.SubElement(
+                    record,
+                    f"{{{NS_EDM}}}PropertyValue",
+                    attrib={"Property": "Dataset", "String": entry["dataset"]},
+                )
+                if entry["snapshot_id"] is not None:
+                    # String, like Custom.Snapshot.Id and unlike Custom.Tags'
+                    # SnapshotId: a snapshot id is a millisecond timestamp that
+                    # fits a JS number today, and this document is read by
+                    # browsers.
+                    ET.SubElement(
+                        record,
+                        f"{{{NS_EDM}}}PropertyValue",
+                        attrib={"Property": "SnapshotId", "String": str(entry["snapshot_id"])},
+                    )
+                if entry["resolved_by"] is not None:
+                    ET.SubElement(
+                        record,
+                        f"{{{NS_EDM}}}PropertyValue",
+                        attrib={"Property": "ResolvedBy", "String": entry["resolved_by"]},
+                    )
 
     # Declared relationships, as a Collection of Records -- the same shape
     # Custom.Tags uses, and for the same reason: a client needs more than one
@@ -2983,45 +3100,40 @@ def dataset_metadata(
     return metadata_response(xml, etag, headers, if_none_match)
 
 
-def _may_read(claims: dict, relation: str) -> bool:
-    """Whether the caller may read one fully-qualified relation.
+def _receipt_entries(entries) -> list[dict]:
+    """A snapshot's receipt as `[{"dataset", "snapshot_id", "resolved_by"}]`.
 
-    The same three rungs the dataset endpoints climb, in the same order:
-    `personal.<identity>.*` is the caller's own, `public.*` is readable by
-    anyone, and everything else needs a read grant matched against the WHOLE
-    relation name - not its workspace, which would let a grant on one dataset
-    disclose every dataset beside it.
+    Every entry is named -- see the Custom.ReadSources renderer for why -- so
+    this normalizes rather than filters: it accepts the stored hyphenated keys
+    and the underscored spelling a library caller may pass, and coerces the
+    snapshot id to an int.
+
+    An entry that is not a `{dataset: str, ...}` map is DROPPED. Catalog
+    documents are not schema-enforced, and an entry with no name cites nothing;
+    rendering it as a Record with no Dataset would put a hole in a list whose
+    whole claim is that it has none.
     """
-    from app.auth.permissions import get_access_policies_from_claims
-    from app.auth.permissions import read_grant_for_relation
-
-    parts = relation.split(".")
-    if len(parts) < 3:
-        return False
-    workstream, collection = parts[0], parts[1]
-    if workstream == "personal":
-        identity = claims.get("identity")
-        return bool(identity) and collection == identity
-    if workstream == "public":
-        return True
-    return read_grant_for_relation(get_access_policies_from_claims(claims), relation) is not None
-
-
-def _elided_names(claims: dict, names) -> list[dict]:
-    """Fully-qualified dataset names as `[{"dataset", "visible"}]`, elided per name.
-
-    PROVENANCE_DESIGN.md S4.4: a provenance record is stored whole and crosses
-    workspace boundaries, so every read surface tells the caller a name only
-    where they hold READ on it. The ENTRY stays either way - "something
-    upstream you cannot see" must remain sayable, and the list's length must
-    stay honest - so what is nulled is the name, never the position.
-    """
-    entries = []
-    for name in names or []:
-        name = str(name)
-        visible = _may_read(claims, name)
-        entries.append({"dataset": name if visible else None, "visible": visible})
-    return entries
+    normalized = []
+    for entry in entries or []:
+        if not isinstance(entry, dict):
+            continue
+        dataset = entry.get("dataset")
+        if not isinstance(dataset, str) or not dataset:
+            continue
+        snapshot_id = entry.get("snapshot-id", entry.get("snapshot_id"))
+        try:
+            snapshot_id = None if snapshot_id is None else int(snapshot_id)
+        except (TypeError, ValueError):
+            snapshot_id = None
+        resolved_by = entry.get("resolved-by", entry.get("resolved_by"))
+        normalized.append(
+            {
+                "dataset": dataset,
+                "snapshot_id": snapshot_id,
+                "resolved_by": str(resolved_by) if resolved_by else None,
+            }
+        )
+    return normalized
 
 
 __all__ = ["router"]

@@ -126,8 +126,9 @@ curl -u username:password \
 curl -u username:password \
   "https://odata.opteryx.app/api/v4/public/demo/users@1700000000000?\$top=10"
 
-# $metadata for a specific version -- its Custom.Snapshot.* and Custom.Tags
-# annotations describe that version rather than the current one
+# $metadata for a specific version -- its Custom.Snapshot.*,
+# Custom.ReadSources.* and Custom.Tags annotations describe that version
+# rather than the current one
 curl -u username:password \
   https://odata.opteryx.app/api/v4/public/demo/users@release_v2/\$metadata
 ```

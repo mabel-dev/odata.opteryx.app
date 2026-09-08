@@ -1,11 +1,11 @@
 """Per-dataset `$metadata` reports the standing source list a dataset was built from.
 
 `sources` lives on the dataset document (PROVENANCE_DESIGN.md S2.2) and names
-datasets in OTHER workspaces, so the annotation is the first thing on this
-document whose content depends on the caller's grants beyond this dataset.
-What is pinned here, beside the shape, is that: a name the caller cannot read
-is elided and its entry kept, and a document rendered for one caller is never
-served from the cache to another who may see less.
+datasets in OTHER workspaces. Every one of them is named, to every caller: the
+list is a citation list, and a citation the reader holds no subscription to is
+still a citation. What is pinned here, beside the shape, is that -- the
+annotation does not depend on the caller's grants, and one rendering serves
+them all.
 """
 
 import xml.etree.ElementTree as ET
@@ -173,41 +173,39 @@ def _source_records(content):
     return None
 
 
-def test_a_readable_source_list_is_reported_in_order_with_its_completeness(catalog):
+def test_the_source_list_is_reported_in_order_with_its_completeness(catalog):
     catalog({"sources": ["ops.ingest.stdout_log", "public.raw.feed"], "sources-complete": True})
 
     content = _render(OPS_READER)
 
     assert _annotations(content)["Custom.Sources.Complete"] == "true"
     assert _source_records(content) == [
-        {"Dataset": "ops.ingest.stdout_log", "Visible": "true"},
-        {"Dataset": "public.raw.feed", "Visible": "true"},
+        {"Dataset": "ops.ingest.stdout_log"},
+        {"Dataset": "public.raw.feed"},
     ]
 
 
-def test_a_source_the_caller_cannot_read_keeps_its_place_unnamed(catalog):
-    """The list's length is a fact about the dataset; the name is what is withheld."""
+def test_a_source_the_caller_cannot_read_is_named_anyway(catalog):
+    """A citation, not an access grant: the caller holds nothing on `ops.*` and
+    is still told what this data came from. Reading that dataset needs a grant
+    like anything else -- the name carries no schema, no statistics, no rows."""
     catalog({"sources": ["ops.ingest.stdout_log", "public.raw.feed"], "sources-complete": True})
 
     records = _source_records(_render())
 
     assert records == [
-        {"Visible": "false"},
-        {"Dataset": "public.raw.feed", "Visible": "true"},
+        {"Dataset": "ops.ingest.stdout_log"},
+        {"Dataset": "public.raw.feed"},
     ]
 
 
-def test_a_document_rendered_for_one_caller_is_not_served_to_one_who_sees_less(catalog):
-    """Both callers hold the same public-read on THIS dataset, which is all the
-    cache key used to carry; the first's document would have named the second
-    a source they hold no grant on."""
+def test_every_caller_is_owed_the_same_list(catalog):
+    """What the data was built from is a fact about the data, so the annotation
+    is the same for a caller who can read the source and one who cannot -- and
+    the two share a cache entry rather than needing to be told apart."""
     catalog({"sources": ["ops.ingest.stdout_log"], "sources-complete": True})
 
-    named = _source_records(_render(OPS_READER))
-    elided = _source_records(_render())
-
-    assert named == [{"Dataset": "ops.ingest.stdout_log", "Visible": "true"}]
-    assert elided == [{"Visible": "false"}]
+    assert _source_records(_render(OPS_READER)) == _source_records(_render())
 
 
 def test_an_empty_list_reports_completeness_and_no_collection(catalog):
