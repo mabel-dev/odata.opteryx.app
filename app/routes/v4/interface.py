@@ -38,6 +38,7 @@ sys.path.insert(
 import base64
 import datetime as dt
 import decimal
+import hashlib
 import json
 import time
 import traceback
@@ -95,10 +96,9 @@ from app.routes.v4.metadata_cache import clear_describe_cache
 from app.routes.v4.metadata_cache import clear_metadata_cache
 from app.routes.v4.metadata_cache import describe_cache_get
 from app.routes.v4.metadata_cache import describe_cache_put
-from app.routes.v4.metadata_cache import etag_for
 from app.routes.v4.metadata_cache import metadata_cache_get
 from app.routes.v4.metadata_cache import metadata_cache_put
-from app.routes.v4.metadata_cache import metadata_response
+from app.routes.v4.metadata_cache import xml_response
 
 logger = get_logger()
 
@@ -196,6 +196,50 @@ def _standing_sources(workstream: str, collection: str, dataset: str) -> tuple[l
         return [], False
     names = [str(name) for name in data.get("sources") or []]
     return names, bool(data.get("sources-complete", False))
+
+
+def _policy_fingerprint(access_policies_list) -> str:
+    """Stable digest of the caller's policy set, for the metadata cache key.
+
+    The document now carries a per-source `Visible` flag, and the RECEIPT's
+    sources are not known until after the cache is consulted -- so unlike the
+    standing list, whose verdicts ARE in the key by name, there is nothing
+    finer than the policy set to key those flags on. Two callers with matching
+    policies see the same flags everywhere and may share an entry; anyone else
+    gets their own.
+
+    Digested rather than carried whole so the key stays small and hashable
+    whatever shape the policy documents take.
+    """
+    try:
+        encoded = json.dumps(access_policies_list or [], sort_keys=True, default=str)
+    except Exception:  # noqa: BLE001 - a policy document is not schema-enforced
+        encoded = repr(access_policies_list)
+    return hashlib.blake2b(encoded.encode("utf-8"), digest_size=16).hexdigest()
+
+
+def _source_is_readable(name: str, access_policies_list) -> bool:
+    """Whether the caller holds a read grant on a source named in provenance.
+
+    Provenance NAMES every source (S4.4 as reversed on 2026-09-09) -- a name is
+    a citation, not access -- but a reader still needs to know which of those
+    names they can follow. This is the flag that says so, emitted as `Visible`
+    beside the name on Custom.Sources and Custom.ReadSources.
+
+    Pure local matching: `read_grant_for_relation` runs the same fnmatch over
+    the caller's policy patterns that the query path uses, so a list of 64
+    sources costs 64 pattern matches and no catalog round trip.
+
+    A name that is not fully qualified cannot be matched against a pattern that
+    always is, so it is reported unreadable rather than assumed either way -- a
+    grant that does not demonstrably cover a name must not be claimed to.
+    """
+    from app.auth.permissions import read_grant_for_relation
+
+    fq = str(name or "")
+    if fq.count(".") < 2:
+        return False
+    return read_grant_for_relation(access_policies_list, fq) is not None
 
 
 def _declared_relationships(
@@ -1557,12 +1601,14 @@ def _resolve_labeled_snapshot(workspace, collection: str, dataset: str, ds, labe
         "order (Custom.SortOrder.Column/Direction), snapshot tags (Custom.Tags.Count and "
         "Custom.Tags, a Collection of Records with Name, SnapshotId and CreatedBy), the "
         "standing source list the current content was built from (Custom.Sources.Complete "
-        "and Custom.Sources, a Collection of Records with Dataset), the commit "
+        "and Custom.Sources, a Collection of Records with Dataset and Visible), the commit "
         "receipt of the snapshot described (Custom.ReadSources.Reported, "
         "Custom.ReadSources.Truncated and Custom.ReadSources, a Collection of Records "
-        "with Dataset, SnapshotId and ResolvedBy). Both name every source, including "
+        "with Dataset, SnapshotId, ResolvedBy and Visible). Both name every source, including "
         "datasets the caller holds no grant on - a name is not readable data, and "
-        "provenance that cannot be followed is not provenance. Also "
+        "provenance that cannot be followed is not provenance - and Visible says which "
+        "of those names the caller may actually read, so a client can decline to offer "
+        "a link that would 403 rather than withholding the citation. Also "
         "materialized-view state (Custom.MaterializedView.*). Annotations are omitted where "
         "they do not apply to the dataset kind or are unavailable. "
         "The dataset segment may carry a `@{label}` version selector -- `dataset@current`, "
@@ -1745,7 +1791,15 @@ def dataset_metadata(
 
     # Everything the document's content depends on is now known, so a cached
     # rendering can be served without touching the catalog at all.
-    if_none_match = request.headers.get("if-none-match")
+    #
+    # NO ETag on this document (decision 2026-09-09). The service-wide $metadata
+    # is polled -- Power BI refetches it on every refresh -- and a validator
+    # earns its keep there. This one is opened a handful of times a session from
+    # the Studio UI, so revalidation saved little, and tying the document's
+    # identity to a hash of its bytes constrains what may go IN it: anything
+    # that changes when a DIFFERENT dataset changes (a downstream consumer list,
+    # say) would churn the validator for reasons that have nothing to do with
+    # the version being described. See metadata_cache.xml_response.
     # Relationships are resolved BEFORE the cache is consulted because they are
     # part of the key. Two callers can hold the same role on THIS dataset and
     # differ in what they may read on the far side of a relationship, and a key
@@ -1782,10 +1836,19 @@ def dataset_metadata(
     # every request either way, since `load_dataset` reads the same document
     # again further down.
     #
-    # Unlike the relationships above it does NOT vary by caller. Provenance
-    # names its sources whether or not the caller can read them (see
-    # `Custom.Sources` below), so every caller of this dataset is owed the same
-    # list and they share one cache entry.
+    # The NAMES do not vary by caller -- provenance names its sources whether
+    # or not the caller can read them (see `Custom.Sources` below) -- but the
+    # `Visible` flag beside each one does, so the readability verdict goes in
+    # the key too. Keying on the verdict rather than on the caller keeps every
+    # caller who can follow the same subset of sources on one entry, which is
+    # the shape `relationship_key` above uses for the same reason.
+    #
+    # The RECEIPT's names are not known until the snapshot is loaded further
+    # down, and they can name datasets the standing list does not (an older
+    # version read something the current content no longer carries). Its flags
+    # therefore cannot be keyed on what is known here, which is why
+    # `policy_fingerprint` is in the key as well: it is the only thing that
+    # bounds what the receipt's flags can say.
     #
     # The `@{label}` selector IS in the key: `dataset@{old snapshot}` and the
     # bare name are different documents -- different receipt, different
@@ -1796,7 +1859,11 @@ def dataset_metadata(
         else _standing_sources(workstream, collection, dataset)
     )
     sources = [str(name) for name in source_names]
-    sources_key = (tuple(sources), sources_complete)
+    source_readable = {name: _source_is_readable(name, access_policies_list) for name in sources}
+    sources_key = (
+        tuple((name, source_readable[name]) for name in sources),
+        sources_complete,
+    )
     cache_key = (
         table_name,
         label,
@@ -1805,11 +1872,14 @@ def dataset_metadata(
         is_virtual_info_schema,
         relationship_key,
         sources_key,
+        _policy_fingerprint(access_policies_list),
     )
     cached = metadata_cache_get(cache_key)
     if cached is not None:
-        cached_etag, cached_xml, cached_headers = cached
-        return metadata_response(cached_xml, cached_etag, cached_headers, if_none_match)
+        # The stored validator is unused here; the cache is shared with the
+        # service-wide document, which still carries one.
+        _, cached_xml, cached_headers = cached
+        return xml_response(cached_xml, cached_headers)
 
     # Try to get enriched metadata from catalog
     col_names = []
@@ -2532,7 +2602,9 @@ def dataset_metadata(
     #
     # What that discloses is the NAME of a dataset in a workspace the caller
     # may hold no grant on, and nothing else: no schema, no statistics, no
-    # rows. Reading it needs a grant like anything else.
+    # rows. Reading it needs a grant like anything else -- and `Visible` beside
+    # the name says whether this caller holds one, so a client can mark the
+    # entry as a dead end instead of offering a link into a 403.
     #
     # A Collection of Records rather than a list of names so the shape matches
     # Custom.ReadSources below, which has more than a name per entry.
@@ -2554,6 +2626,19 @@ def dataset_metadata(
                     f"{{{NS_EDM}}}PropertyValue",
                     attrib={"Property": "Dataset", "String": name},
                 )
+                # Whether the caller can FOLLOW the name, beside the name
+                # itself. Not the elision this field used to be: the name is
+                # there either way, and a client that ignores the flag still
+                # renders a complete and truthful list. It exists so a client
+                # can decline to offer a link that would 403, and say why.
+                ET.SubElement(
+                    record,
+                    f"{{{NS_EDM}}}PropertyValue",
+                    attrib={
+                        "Property": "Visible",
+                        "Bool": str(source_readable.get(name, False)).lower(),
+                    },
+                )
 
     # The receipt for the snapshot this document describes -- the exact
     # versions the commit that produced it read (PROVENANCE_DESIGN.md S2.1).
@@ -2567,7 +2652,7 @@ def dataset_metadata(
     #
     # Named in full for every caller, on the same reading Custom.Sources above
     # is: a receipt that cannot be followed to the version it names is not a
-    # receipt. The version and how it was chosen go with the name for the same
+    # receipt. `Visible` rides along for the same reason it does there. The version and how it was chosen go with the name for the same
     # reason -- they are what re-deriving the output needs, and a name without
     # them only says that something happened.
     if receipt is not None and source_type in TABLE_LIKE_SOURCES:
@@ -2598,6 +2683,21 @@ def dataset_metadata(
                     record,
                     f"{{{NS_EDM}}}PropertyValue",
                     attrib={"Property": "Dataset", "String": entry["dataset"]},
+                )
+                # As on Custom.Sources above: can the caller follow this name.
+                # Computed here rather than looked up in `source_readable` --
+                # a receipt for an older version can name a dataset the
+                # current standing list no longer carries, so there is no
+                # entry to look up.
+                ET.SubElement(
+                    record,
+                    f"{{{NS_EDM}}}PropertyValue",
+                    attrib={
+                        "Property": "Visible",
+                        "Bool": str(
+                            _source_is_readable(entry["dataset"], access_policies_list)
+                        ).lower(),
+                    },
                 )
                 if entry["snapshot_id"] is not None:
                     # String, like Custom.Snapshot.Id and unlike Custom.Tags'
@@ -3143,9 +3243,8 @@ def dataset_metadata(
     # was assembled; carry them onto the response actually returned (and into the
     # cache, so a hit reproduces them).
     headers = dict(response.headers)
-    etag = etag_for(xml)
-    metadata_cache_put(cache_key, etag, xml, headers)
-    return metadata_response(xml, etag, headers, if_none_match)
+    metadata_cache_put(cache_key, "", xml, headers)
+    return xml_response(xml, headers)
 
 
 def _receipt_entries(entries) -> list[dict]:

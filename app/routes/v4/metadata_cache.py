@@ -4,11 +4,14 @@ Three things live here: ETag validators, the opt-in whole-response cache, and
 the column-statistics cache (documented at its own definition below, because it
 makes a different trade from the other two).
 
-OData clients refetch $metadata constantly -- Power BI does so on every refresh,
-and the web UI does so every time a details panel is opened. Two savings apply,
-and only one is on by default:
+OData clients refetch the SERVICE-wide $metadata constantly -- Power BI does so
+on every refresh. The PER-DATASET document is not polled that way: it is read a
+handful of times a session by the Studio UI, so it carries no validator at all
+(`xml_response`, decision 2026-09-09) and only the response cache applies to it.
+Two savings apply to the service-wide document, and only one is on by default:
 
- - ETag / If-None-Match (always on): the document is rebuilt fresh on every
+ - ETag / If-None-Match (the service-wide document only -- the per-dataset one
+   carries no validator, see `xml_response`): the document is rebuilt fresh on every
    request -- these endpoints' entire job is to report what exists *now*, and a
    dataset can be dropped or altered between requests, so there is no way to
    know the previous answer is still correct without asking the catalog again.
@@ -28,7 +31,7 @@ document, the caller's identity and policy set for the service-wide one -- and
 are namespaced by a leading tag so the two key spaces cannot collide.
 
 An ETag is only useful if identical inputs render identical bytes, on every
-replica. Callers must therefore build their document from a deterministically
+replica. Validator-carrying callers must therefore build their document from a deterministically
 ordered dataset list; a Firestore stream order or a set iteration order is
 neither stable across processes nor guaranteed stable within one.
 """
@@ -152,8 +155,25 @@ def etag_matches(if_none_match: str | None, etag: str) -> bool:
     return False
 
 
+def xml_response(xml: str, headers: dict) -> Response:
+    """Serve an EDMX document unconditionally, with no validator.
+
+    The per-dataset document uses this rather than `metadata_response`: it is
+    opened a handful of times a session from the Studio UI (a details panel, a
+    reference popover, a manage page) rather than polled, so a validator bought
+    little and made the document's identity depend on things -- anything later
+    folded into it that changes when OTHER datasets change -- that have nothing
+    to do with the version being described. Decision 2026-09-09.
+    """
+    return Response(content=xml, media_type="application/xml", headers=dict(headers))
+
+
 def metadata_response(xml: str, etag: str, headers: dict, if_none_match: str | None) -> Response:
-    """Serve an EDMX document, or a 304 when the client already holds this version."""
+    """Serve an EDMX document, or a 304 when the client already holds this version.
+
+    The SERVICE-wide document only. OData clients refetch that one constantly --
+    Power BI on every refresh -- which is what the validator is for.
+    """
     headers = {**headers, "ETag": etag}
     if etag_matches(if_none_match, etag):
         # A 304 carries no body, so media_type would be misleading here.
@@ -172,4 +192,5 @@ __all__ = [
     "metadata_cache_put",
     "metadata_cache_ttl",
     "metadata_response",
+    "xml_response",
 ]

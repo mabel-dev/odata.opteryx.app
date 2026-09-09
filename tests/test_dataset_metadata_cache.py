@@ -1,9 +1,14 @@
-"""Tests for $metadata ETag / If-None-Match handling and the EDMX response cache.
+"""Tests for the per-dataset $metadata response cache, and for its ABSENT validator.
 
-OData clients refetch $metadata constantly, so the endpoint emits an ETag (letting
-a client that already holds the document skip the transfer and the XML parse) and
-caches the rendered document briefly (letting the server skip the catalog round
-trips that build it).
+This document carries no ETag (decision 2026-09-09): it is opened a handful of
+times a session from the Studio UI rather than polled, so revalidation bought
+little, and a validator over its bytes would constrain what may go in it -- a
+downstream consumer list changes when a DIFFERENT dataset commits, and would
+churn a hash that is supposed to identify this version. The SERVICE-wide
+document still carries one; see tests/test_service_metadata_catalog_traffic.py.
+
+What survives is the opt-in whole-response cache, which skips the catalog round
+trips that build the document for ODATA_METADATA_CACHE_TTL seconds.
 """
 
 import pytest
@@ -69,56 +74,23 @@ def _get(headers=None):
     )
 
 
-def test_response_carries_an_etag(catalog_calls):
+def test_response_carries_no_etag(catalog_calls):
     res = _get()
 
     assert res.status_code == 200
-    assert res.headers["etag"].startswith('"')
+    assert "etag" not in {name.lower() for name in res.headers}
     assert b"Edmx" in res.body
 
 
-def test_etag_is_stable_across_requests(catalog_calls):
-    assert _get().headers["etag"] == _get().headers["etag"]
+def test_if_none_match_is_ignored(catalog_calls):
+    """No validator is issued, so nothing a client sends can be honoured -- and a
+    conditional request must get the document, never an empty 304 it cannot fill
+    from a cache it was never allowed to populate."""
+    for header in ('"anything"', "*", 'W/"anything"'):
+        res = _get({"if-none-match": header})
 
-
-def test_matching_if_none_match_returns_304(catalog_calls):
-    etag = _get().headers["etag"]
-
-    res = _get({"if-none-match": etag})
-
-    assert res.status_code == 304
-    assert res.body == b""
-    # The ETag must be repeated on a 304 so the client can keep revalidating.
-    assert res.headers["etag"] == etag
-
-
-def test_non_matching_if_none_match_returns_the_document(catalog_calls):
-    res = _get({"if-none-match": '"not-the-current-version"'})
-
-    assert res.status_code == 200
-    assert b"Edmx" in res.body
-
-
-def test_wildcard_if_none_match_returns_304(catalog_calls):
-    res = _get({"if-none-match": "*"})
-
-    assert res.status_code == 304
-
-
-def test_weak_validator_is_matched(catalog_calls):
-    etag = _get().headers["etag"]
-
-    res = _get({"if-none-match": f"W/{etag}"})
-
-    assert res.status_code == 304
-
-
-def test_etag_from_a_list_of_validators_is_matched(catalog_calls):
-    etag = _get().headers["etag"]
-
-    res = _get({"if-none-match": f'"other", {etag}, "another"'})
-
-    assert res.status_code == 304
+        assert res.status_code == 200, header
+        assert b"Edmx" in res.body
 
 
 def test_default_ttl_is_zero_so_every_request_hits_the_catalog(catalog_calls):
@@ -133,19 +105,6 @@ def test_default_ttl_is_zero_so_every_request_hits_the_catalog(catalog_calls):
     assert len(catalog_calls) == 2, "each request must re-check the catalog by default"
 
 
-def test_304_saves_the_transfer_even_with_caching_off(catalog_calls):
-    """The catalog is still queried (content might have changed), but if the
-    freshly-rebuilt document is unchanged, the client still gets a 304 -- the
-    transfer and its own parse are saved even though the server did the work.
-    """
-    etag = _get().headers["etag"]
-    assert len(catalog_calls) == 1
-
-    res = _get({"if-none-match": etag})
-    assert res.status_code == 304
-    assert len(catalog_calls) == 2, "content is still freshly checked, just not re-sent"
-
-
 def test_repeat_request_is_served_without_touching_the_catalog(catalog_calls, monkeypatch):
     monkeypatch.setenv("ODATA_METADATA_CACHE_TTL", "60")
     _get()
@@ -153,15 +112,6 @@ def test_repeat_request_is_served_without_touching_the_catalog(catalog_calls, mo
 
     _get()
     assert len(catalog_calls) == 1, "second request should have been served from cache"
-
-
-def test_304_is_served_without_touching_the_catalog(catalog_calls, monkeypatch):
-    monkeypatch.setenv("ODATA_METADATA_CACHE_TTL", "60")
-    etag = _get().headers["etag"]
-    assert len(catalog_calls) == 1
-
-    assert _get({"if-none-match": etag}).status_code == 304
-    assert len(catalog_calls) == 1
 
 
 def test_cached_response_keeps_its_headers(catalog_calls):
@@ -172,15 +122,14 @@ def test_cached_response_keeps_its_headers(catalog_calls):
     assert cached.headers["odata-version"] == "4.0"
 
 
-def test_ttl_zero_disables_caching_but_keeps_etags(catalog_calls, monkeypatch):
+def test_ttl_zero_disables_caching(catalog_calls, monkeypatch):
     monkeypatch.setenv("ODATA_METADATA_CACHE_TTL", "0")
 
     first = _get()
     second = _get()
 
     assert len(catalog_calls) == 2
-    # Same inputs still produce the same validator, so conditional requests work.
-    assert first.headers["etag"] == second.headers["etag"]
+    assert first.body == second.body
 
 
 def test_cache_expires(catalog_calls, monkeypatch):
@@ -195,10 +144,11 @@ def test_cache_expires(catalog_calls, monkeypatch):
     assert len(catalog_calls) == 2
 
 
-def test_changed_metadata_produces_a_new_etag(catalog_calls, monkeypatch):
-    """A dataset whose schema changed must not keep serving the old validator."""
+def test_changed_metadata_is_served_immediately(catalog_calls, monkeypatch):
+    """With the cache off, a schema change shows up on the very next request --
+    the property the missing validator must not cost us."""
     monkeypatch.setenv("ODATA_METADATA_CACHE_TTL", "0")
-    before = _get().headers["etag"]
+    before = _get().body
 
     class WiderDataset(FakeDataset):
         def __init__(self):
@@ -224,4 +174,4 @@ def test_changed_metadata_produces_a_new_etag(catalog_calls, monkeypatch):
         )(),
     )
 
-    assert _get().headers["etag"] != before
+    assert _get().body != before

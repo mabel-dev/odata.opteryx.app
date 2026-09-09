@@ -10,6 +10,11 @@ What is pinned here is that difference -- the receipt follows the `@{label}`
 selector to the snapshot the caller asked for -- along with the three-way
 reading of `Reported` (nothing on record / read nothing / read these), and that
 every entry is named to every caller, as `Custom.Sources` names every source.
+
+`Visible` beside each name is the one caller-dependent part: it says whether
+this caller can follow the citation, never whether they are told about it.
+`_receipt_records` drops it so the shape assertions stay about the receipt;
+the tests that are about the flag read it with `_receipt_visibility`.
 """
 
 import xml.etree.ElementTree as ET
@@ -164,7 +169,7 @@ def _annotations(content):
     }
 
 
-def _receipt_records(content):
+def _all_receipt_records(content):
     """The Custom.ReadSources Collection, as a list of {property: value} dicts."""
     root = ET.fromstring(content)
     for annotation in root.iter(f"{{{EDM}}}Annotation"):
@@ -178,6 +183,22 @@ def _receipt_records(content):
             for record in annotation.iter(f"{{{EDM}}}Record")
         ]
     return None
+
+
+def _receipt_records(content):
+    """The receipt without its per-caller flag -- what one commit read."""
+    records = _all_receipt_records(content)
+    if records is None:
+        return None
+    return [{k: v for k, v in record.items() if k != "Visible"} for record in records]
+
+
+def _receipt_visibility(content):
+    """`[(dataset, visible)]` -- which of the names this caller may follow."""
+    records = _all_receipt_records(content)
+    if records is None:
+        return None
+    return [(record.get("Dataset"), record.get("Visible")) for record in records]
 
 
 def test_a_readable_receipt_reports_each_version_it_read(catalog):
@@ -356,9 +377,11 @@ def test_a_labeled_document_is_not_served_from_the_cache_to_an_unlabeled_read(ca
     assert old == [{"Dataset": "public.raw.older", "SnapshotId": "2", "ResolvedBy": "version"}]
 
 
-def test_every_caller_is_owed_the_same_receipt(catalog, monkeypatch):
-    """The two callers differ only in their grants on `ops.*`, which the receipt
-    does not consult -- so the cached document serves both, and correctly."""
+def test_every_caller_is_owed_the_same_names(catalog, monkeypatch):
+    """The two callers differ only in their grants on `ops.*`. The receipt they
+    are told is identical; only the flag saying whether they can follow it
+    differs -- and the cache must not hand one of them the other's flag, which
+    is what `_policy_fingerprint` is in the cache key for."""
     monkeypatch.setenv("ODATA_METADATA_CACHE_TTL", "60")
     catalog(
         FakeSnapshot(
@@ -369,11 +392,30 @@ def test_every_caller_is_owed_the_same_receipt(catalog, monkeypatch):
         )
     )
 
-    granted = _receipt_records(_render(OPS_READER))
-    ungranted = _receipt_records(_render())
+    granted = _render(OPS_READER)
+    ungranted = _render()
 
-    assert granted == [{"Dataset": "ops.ingest.stdout_log", "SnapshotId": "7", "ResolvedBy": "current"}]
-    assert ungranted == granted
+    expected = [{"Dataset": "ops.ingest.stdout_log", "SnapshotId": "7", "ResolvedBy": "current"}]
+    assert _receipt_records(granted) == expected
+    assert _receipt_records(ungranted) == expected
+    assert _receipt_visibility(granted) == [("ops.ingest.stdout_log", "true")]
+    assert _receipt_visibility(ungranted) == [("ops.ingest.stdout_log", "false")]
+
+
+def test_a_source_only_an_older_version_read_still_carries_a_flag(catalog):
+    """The receipt can name a dataset the standing list no longer carries, so
+    its flag cannot be looked up there -- it is computed per entry."""
+    catalog(
+        FakeSnapshot(
+            CURRENT_ID,
+            read_sources=[
+                {"dataset": "ops.retired.feed", "snapshot-id": 3, "resolved-by": "version"}
+            ],
+        )
+    )
+
+    assert _receipt_visibility(_render(OPS_READER)) == [("ops.retired.feed", "true")]
+    assert _receipt_visibility(_render()) == [("ops.retired.feed", "false")]
 
 
 def test_a_tag_reports_the_receipt_of_the_snapshot_it_pins(catalog):

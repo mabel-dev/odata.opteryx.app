@@ -3,9 +3,13 @@
 `sources` lives on the dataset document (PROVENANCE_DESIGN.md S2.2) and names
 datasets in OTHER workspaces. Every one of them is named, to every caller: the
 list is a citation list, and a citation the reader holds no subscription to is
-still a citation. What is pinned here, beside the shape, is that -- the
-annotation does not depend on the caller's grants, and one rendering serves
-them all.
+still a citation. What is pinned here, beside the shape, is that -- the NAMES
+do not depend on the caller's grants.
+
+Beside each name is `Visible`, which does: it says whether this caller can
+follow the citation. That is the whole of the caller-dependence, and it is
+additive -- a client that ignores the flag still renders a complete and
+truthful list.
 """
 
 import xml.etree.ElementTree as ET
@@ -180,8 +184,8 @@ def test_the_source_list_is_reported_in_order_with_its_completeness(catalog):
 
     assert _annotations(content)["Custom.Sources.Complete"] == "true"
     assert _source_records(content) == [
-        {"Dataset": "ops.ingest.stdout_log"},
-        {"Dataset": "public.raw.feed"},
+        {"Dataset": "ops.ingest.stdout_log", "Visible": "true"},
+        {"Dataset": "public.raw.feed", "Visible": "false"},
     ]
 
 
@@ -193,19 +197,53 @@ def test_a_source_the_caller_cannot_read_is_named_anyway(catalog):
 
     records = _source_records(_render())
 
-    assert records == [
-        {"Dataset": "ops.ingest.stdout_log"},
-        {"Dataset": "public.raw.feed"},
+    assert [record["Dataset"] for record in records] == [
+        "ops.ingest.stdout_log",
+        "public.raw.feed",
     ]
+    # Named, and marked as a name this caller cannot follow. Both of them:
+    # the second is in a workspace they hold nothing on either.
+    assert [record["Visible"] for record in records] == ["false", "false"]
 
 
-def test_every_caller_is_owed_the_same_list(catalog):
-    """What the data was built from is a fact about the data, so the annotation
-    is the same for a caller who can read the source and one who cannot -- and
-    the two share a cache entry rather than needing to be told apart."""
+def test_every_caller_is_owed_the_same_names(catalog):
+    """What the data was built from is a fact about the data, so the NAMES are
+    the same for a caller who can read the source and one who cannot. Only the
+    flag beside them differs."""
     catalog({"sources": ["ops.ingest.stdout_log"], "sources-complete": True})
 
-    assert _source_records(_render(OPS_READER)) == _source_records(_render())
+    reader = _source_records(_render(OPS_READER))
+    stranger = _source_records(_render())
+
+    assert [r["Dataset"] for r in reader] == [r["Dataset"] for r in stranger]
+    assert reader[0]["Visible"] == "true"
+    assert stranger[0]["Visible"] == "false"
+
+
+def test_visibility_follows_the_pattern_not_the_workspace(catalog):
+    """The grant is matched against the whole fully-qualified name, the way the
+    query path matches it. A grant on one collection does not light up a
+    sibling collection in the same workspace."""
+    catalog(
+        {
+            "sources": ["ops.ingest.stdout_log", "ops.secret.ledger"],
+            "sources-complete": True,
+        }
+    )
+
+    records = _source_records(_render([{"pattern": "ops.ingest.*", "role": "reader"}]))
+
+    assert [r["Visible"] for r in records] == ["true", "false"]
+
+
+def test_a_name_that_is_not_fully_qualified_is_not_claimed_readable(catalog):
+    """A pattern is always three parts, so a two-part name cannot be shown to
+    match one. Reported unreadable rather than assumed either way."""
+    catalog({"sources": ["ingest.stdout_log"], "sources-complete": True})
+
+    records = _source_records(_render([{"pattern": "*", "role": "reader"}]))
+
+    assert records == [{"Dataset": "ingest.stdout_log", "Visible": "false"}]
 
 
 def test_an_empty_list_reports_completeness_and_no_collection(catalog):
