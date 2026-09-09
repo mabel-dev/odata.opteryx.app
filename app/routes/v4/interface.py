@@ -218,28 +218,83 @@ def _policy_fingerprint(access_policies_list) -> str:
     return hashlib.blake2b(encoded.encode("utf-8"), digest_size=16).hexdigest()
 
 
-def _source_is_readable(name: str, access_policies_list) -> bool:
-    """Whether the caller holds a read grant on a source named in provenance.
+def _source_is_readable(name: str, identity: str | None, access_policies_list) -> bool:
+    """Whether the caller may read a dataset named in provenance.
 
-    Provenance NAMES every source (S4.4 as reversed on 2026-09-09) -- a name is
-    a citation, not access -- but a reader still needs to know which of those
-    names they can follow. This is the flag that says so, emitted as `Visible`
-    beside the name on Custom.Sources and Custom.ReadSources.
+    Provenance NAMES every dataset it cites -- a name is a citation, not access
+    -- but a reader still needs to know which of those names they can follow.
+    This is the flag that says so, emitted as `Visible` beside the name on
+    Custom.Sources, Custom.ReadSources and Custom.Consumers.
 
-    Pure local matching: `read_grant_for_relation` runs the same fnmatch over
-    the caller's policy patterns that the query path uses, so a list of 64
-    sources costs 64 pattern matches and no catalog round trip.
+    Answered by `_can_read_relation`, the same ladder the route applies to the
+    dataset it was ASKED about -- so a dataset in `public`, or in the caller's
+    own `personal` workspace, is readable here for the reason it is readable
+    there. Matching only the policy patterns called both of those a dead end.
+    No catalog round trip either way: the ladder is local.
 
-    A name that is not fully qualified cannot be matched against a pattern that
-    always is, so it is reported unreadable rather than assumed either way -- a
-    grant that does not demonstrably cover a name must not be claimed to.
+    A name that is not three parts cannot be resolved to a relation, so it is
+    reported unreadable rather than assumed either way -- a grant that does not
+    demonstrably cover a name must not be claimed to.
     """
-    from app.auth.permissions import read_grant_for_relation
-
-    fq = str(name or "")
-    if fq.count(".") < 2:
+    parts = str(name or "").split(".")
+    if len(parts) < 3:
         return False
-    return read_grant_for_relation(access_policies_list, fq) is not None
+    return _can_read_relation(parts[0], parts[1], ".".join(parts[2:]), identity, access_policies_list)
+
+
+def _policy_fingerprint(access_policies_list) -> str:
+    """Stable digest of the caller's policy set, for the metadata cache key.
+
+    The document carries per-name `Visible` flags. The standing list's names
+    are known before the cache is consulted and their verdicts go in the key
+    by name; the RECEIPT's and the CONSUMERS' are not, so there is nothing
+    finer than the policy set to key those on. Two callers with matching
+    policies see the same flags everywhere and may share an entry.
+    """
+    try:
+        encoded = json.dumps(access_policies_list or [], sort_keys=True, default=str)
+    except Exception:  # noqa: BLE001 - a policy document is not schema-enforced
+        encoded = repr(access_policies_list)
+    return hashlib.blake2b(encoded.encode("utf-8"), digest_size=16).hexdigest()
+
+
+# The 64 the catalog caps a consumer list at (impact.MAX_SOURCES). Named here
+# so the annotation's prose and the query agree.
+_CONSUMER_CAP = 64
+
+
+def _consumers_of(dataset_fq: str, snapshot_id, source_type: str) -> dict | None:
+    """Who READ this version of this dataset -- the downstream half.
+
+    The only question the dataset's own documents cannot answer: `sources` and
+    `read-sources` both look upwards. `impact.find_readers` answers it from the
+    `read-source-keys` index on every snapshot in the catalog, narrowed to the
+    version this document describes, which is what makes it a TAINT answer --
+    not "who uses this table" but "who consumed the bad version".
+
+    Answers CROSS WORKSPACE. A consumer in a workspace the caller cannot read
+    is named like any other, with `Visible` false beside it; see impact.py's
+    module docstring for why an impact answer that will not say who is
+    affected does not answer the question.
+
+    Never fatal, like every enrichment on this document: no snapshot, a kind
+    that cannot have consumers, or a failed query costs the annotation and
+    nothing else -- and it is OMITTED rather than sent empty, because "nobody
+    read this version" and "we could not look" are different facts and only
+    the first is something a client may act on.
+    """
+    if snapshot_id is None or source_type not in TABLE_LIKE_SOURCES:
+        return None
+    try:
+        db = _get_firestore_client(database=_firestore_database())
+        if db is None:
+            return None
+        from opteryx_catalog.impact import find_readers
+
+        return find_readers(db, dataset_fq, snapshot_id=int(snapshot_id), limit=_CONSUMER_CAP)
+    except Exception as exc:  # noqa: BLE001 - catalog boundary
+        logger.warning(f"Failed to read consumers for {dataset_fq}: {exc}")
+        return None
 
 
 def _declared_relationships(
@@ -1604,7 +1659,11 @@ def _resolve_labeled_snapshot(workspace, collection: str, dataset: str, ds, labe
         "and Custom.Sources, a Collection of Records with Dataset and Visible), the commit "
         "receipt of the snapshot described (Custom.ReadSources.Reported, "
         "Custom.ReadSources.Truncated and Custom.ReadSources, a Collection of Records "
-        "with Dataset, SnapshotId, ResolvedBy and Visible). Both name every source, including "
+        "with Dataset, SnapshotId, ResolvedBy and Visible), and who READ that version "
+        "(Custom.Consumers.Truncated and Custom.Consumers, a Collection of Records with "
+        "Dataset, Visible, SnapshotId - the consumer's own version - Commits and ProducedBy; "
+        "omitted entirely, flag included, when the lookup could not run, so an empty "
+        "Collection beside the flag means nothing read it). Both name every source, including "
         "datasets the caller holds no grant on - a name is not readable data, and "
         "provenance that cannot be followed is not provenance - and Visible says which "
         "of those names the caller may actually read, so a client can decline to offer "
@@ -1859,7 +1918,9 @@ def dataset_metadata(
         else _standing_sources(workstream, collection, dataset)
     )
     sources = [str(name) for name in source_names]
-    source_readable = {name: _source_is_readable(name, access_policies_list) for name in sources}
+    source_readable = {
+        name: _source_is_readable(name, identity, access_policies_list) for name in sources
+    }
     sources_key = (
         tuple((name, source_readable[name]) for name in sources),
         sources_complete,
@@ -2337,6 +2398,16 @@ def dataset_metadata(
             logger.error(f"Failed to load metadata from catalog: {e}\n{tb_str}")
             raise
 
+    # Who read the version this document describes. Asked AFTER the snapshot is
+    # resolved, so `dataset@{id}` reports the consumers of THAT version rather
+    # than of the head -- which is the whole point of putting it here rather
+    # than on a route that would have to be told the version separately.
+    consumers = _consumers_of(
+        table_name,
+        (snapshot_info or {}).get("snapshot_id"),
+        source_type,
+    )
+
     # Build EDMX XML with annotations using ElementTree
     NS_EDMX = "http://docs.oasis-open.org/odata/ns/edmx"
     NS_EDM = "http://docs.oasis-open.org/odata/ns/edm"
@@ -2695,7 +2766,7 @@ def dataset_metadata(
                     attrib={
                         "Property": "Visible",
                         "Bool": str(
-                            _source_is_readable(entry["dataset"], access_policies_list)
+                            _source_is_readable(entry["dataset"], identity, access_policies_list)
                         ).lower(),
                     },
                 )
@@ -2714,6 +2785,89 @@ def dataset_metadata(
                         record,
                         f"{{{NS_EDM}}}PropertyValue",
                         attrib={"Property": "ResolvedBy", "String": entry["resolved_by"]},
+                    )
+
+    # WHO READ THIS VERSION -- the downstream half, and the only question the
+    # dataset's own documents cannot answer (S2.1 and S2.2 both look upwards).
+    #
+    # It lives HERE, on the version's own document, rather than behind a route
+    # of its own. It is a fact about the version this document describes, it
+    # follows the same `@{label}` selector Custom.ReadSources.* follows, and
+    # this document is Studio's -- opened a handful of times a session, not
+    # polled like the service-wide one, and carrying no validator for a
+    # cross-dataset answer to churn.
+    #
+    # Named in full for every caller, as the two records above are, with
+    # Visible saying who can follow the name. Cross-workspace by design: an
+    # impact answer that will not say who is affected does not answer the
+    # question it was asked.
+    #
+    # Truncated rides beside it so a client seeing the cap knows the list is
+    # short. OMITTED ENTIRELY when the lookup could not run -- "nobody read
+    # this version" and "we could not look" are different facts, and only the
+    # Truncated flag's presence says which one an empty Collection is.
+    if consumers is not None:
+        ET.SubElement(
+            entity_set,
+            f"{{{NS_EDM}}}Annotation",
+            attrib={
+                "Term": "Custom.Consumers.Truncated",
+                "Bool": str(bool(consumers.get("truncated"))).lower(),
+            },
+        )
+        rows = consumers.get("consumers") or []
+        if rows:
+            consumers_annotation = ET.SubElement(
+                entity_set, f"{{{NS_EDM}}}Annotation", attrib={"Term": "Custom.Consumers"}
+            )
+            consumers_collection = ET.SubElement(
+                consumers_annotation, f"{{{NS_EDM}}}Collection"
+            )
+            for row in rows:
+                record = ET.SubElement(consumers_collection, f"{{{NS_EDM}}}Record")
+                ET.SubElement(
+                    record,
+                    f"{{{NS_EDM}}}PropertyValue",
+                    attrib={"Property": "Dataset", "String": str(row.get("dataset"))},
+                )
+                ET.SubElement(
+                    record,
+                    f"{{{NS_EDM}}}PropertyValue",
+                    attrib={
+                        "Property": "Visible",
+                        "Bool": str(
+                            _source_is_readable(
+                                row.get("dataset"), identity, access_policies_list
+                            )
+                        ).lower(),
+                    },
+                )
+                # The consumer's OWN version -- the most recent of its commits
+                # that read this one. String for the reason Custom.Snapshot.Id
+                # is: a millisecond timestamp read by browsers.
+                if row.get("latest_snapshot_id") is not None:
+                    ET.SubElement(
+                        record,
+                        f"{{{NS_EDM}}}PropertyValue",
+                        attrib={
+                            "Property": "SnapshotId",
+                            "String": str(row["latest_snapshot_id"]),
+                        },
+                    )
+                # How many of its commits read this version. One row per
+                # consuming DATASET, not per commit (impact.find_readers folds
+                # them), so this is what the folding would otherwise lose.
+                if row.get("commits") is not None:
+                    ET.SubElement(
+                        record,
+                        f"{{{NS_EDM}}}PropertyValue",
+                        attrib={"Property": "Commits", "Int": str(int(row["commits"]))},
+                    )
+                if row.get("produced_by"):
+                    ET.SubElement(
+                        record,
+                        f"{{{NS_EDM}}}PropertyValue",
+                        attrib={"Property": "ProducedBy", "String": str(row["produced_by"])},
                     )
 
     # Declared relationships, as a Collection of Records -- the same shape

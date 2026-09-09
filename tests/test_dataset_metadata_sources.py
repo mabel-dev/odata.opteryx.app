@@ -178,14 +178,14 @@ def _source_records(content):
 
 
 def test_the_source_list_is_reported_in_order_with_its_completeness(catalog):
-    catalog({"sources": ["ops.ingest.stdout_log", "public.raw.feed"], "sources-complete": True})
+    catalog({"sources": ["ops.ingest.stdout_log", "sales.raw.feed"], "sources-complete": True})
 
     content = _render(OPS_READER)
 
     assert _annotations(content)["Custom.Sources.Complete"] == "true"
     assert _source_records(content) == [
         {"Dataset": "ops.ingest.stdout_log", "Visible": "true"},
-        {"Dataset": "public.raw.feed", "Visible": "false"},
+        {"Dataset": "sales.raw.feed", "Visible": "false"},
     ]
 
 
@@ -193,17 +193,42 @@ def test_a_source_the_caller_cannot_read_is_named_anyway(catalog):
     """A citation, not an access grant: the caller holds nothing on `ops.*` and
     is still told what this data came from. Reading that dataset needs a grant
     like anything else -- the name carries no schema, no statistics, no rows."""
-    catalog({"sources": ["ops.ingest.stdout_log", "public.raw.feed"], "sources-complete": True})
+    catalog({"sources": ["ops.ingest.stdout_log", "sales.raw.feed"], "sources-complete": True})
 
     records = _source_records(_render())
 
     assert [record["Dataset"] for record in records] == [
         "ops.ingest.stdout_log",
-        "public.raw.feed",
+        "sales.raw.feed",
     ]
     # Named, and marked as a name this caller cannot follow. Both of them:
     # the second is in a workspace they hold nothing on either.
     assert [record["Visible"] for record in records] == ["false", "false"]
+
+
+def test_a_public_source_is_readable_without_a_policy(catalog):
+    """Visibility is the same ladder the route applies to the dataset it was
+    asked about (`_can_read_relation`), not a bare pattern match -- so `public`
+    is readable to a caller holding no policy at all, and saying otherwise
+    marks a link that works as a dead end."""
+    catalog({"sources": ["public.open.reference"], "sources-complete": True})
+
+    assert _source_records(_render()) == [
+        {"Dataset": "public.open.reference", "Visible": "true"}
+    ]
+
+
+def test_a_personal_source_is_readable_only_by_its_owner(catalog):
+    """The other rung a pattern match would miss: your own personal workspace
+    is yours, and somebody else's is not."""
+    catalog(
+        {
+            "sources": ["personal.test-user.scratch", "personal.someone-else.scratch"],
+            "sources-complete": True,
+        }
+    )
+
+    assert [r["Visible"] for r in _source_records(_render())] == ["true", "false"]
 
 
 def test_every_caller_is_owed_the_same_names(catalog):
