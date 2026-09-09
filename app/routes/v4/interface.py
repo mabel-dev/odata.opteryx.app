@@ -1551,7 +1551,9 @@ def _resolve_labeled_snapshot(workspace, collection: str, dataset: str, ds, labe
         "IPv4 columns), the source type name (Custom.OriginalType, Custom.SourceType), the "
         "caller's access (Custom.Role, Custom.Policy), dataset and column descriptions "
         "(Custom.Description, Custom.LLMDescribed), latest-snapshot metadata "
-        "(Custom.Snapshot.Id/TotalRecords/TotalDataSize/CommitMessage/Author), physical sort "
+        "(Custom.Snapshot.Id/TotalRecords/TotalDataSize/CommitMessage/Author/ProducedBy, the "
+        "last naming what made the commit as `kind:name` -- the segment after the colon is a "
+        "catalog object for `task` and `view`, and a channel for `upload`), physical sort "
         "order (Custom.SortOrder.Column/Direction), snapshot tags (Custom.Tags.Count and "
         "Custom.Tags, a Collection of Records with Name, SnapshotId and CreatedBy), the "
         "standing source list the current content was built from (Custom.Sources.Complete "
@@ -1599,6 +1601,14 @@ def dataset_metadata(
       * Custom.OriginalType: source database type (for mapped types like DECIMAL→Edm.Double)
       * Custom.Snapshot.TotalRecords: row count at last snapshot (table only)
       * Custom.Snapshot.Author: author of the last snapshot commit (table only)
+      * Custom.Snapshot.ProducedBy: what made the commit, as `kind:name` --
+        `task:<workspace.collection.name>`, `view:<workspace.collection.name>`
+        or `upload:<channel>`. The segment after the colon is a catalog object
+        for `task` and `view`, and a CHANNEL (`api`, `web`, `gcs-logs`) for
+        `upload`, so anything resolving it must branch on the kind first.
+        Omitted when the commit was a statement run by hand, which is a state
+        and not a missing record. Named in full for every caller, as
+        Custom.Sources is.
       * Custom.SortOrder.Column/Custom.SortOrder.Direction: the column the
         underlying storage is physically sorted by, if any (table only)
       * Custom.Tags.Count: how many snapshot tags the dataset holds, 0 included.
@@ -2212,6 +2222,15 @@ def dataset_metadata(
                     snapshot_author = getattr(snapshot, "author", None)
                     if snapshot_author:
                         snapshot_info["author"] = str(snapshot_author)
+                    # WHAT MADE this commit (PROVENANCE_DESIGN.md S2.5), as
+                    # `kind:name`. Absent is a STATE here and not a gap in the
+                    # record -- it is a statement somebody ran by hand, made by
+                    # no registered thing -- so nothing is collected for it and
+                    # no annotation is emitted below. `author` is not a
+                    # substitute: it is the identity the run executed as.
+                    produced_by = getattr(snapshot, "produced_by", None)
+                    if produced_by:
+                        snapshot_info["produced_by"] = str(produced_by)
             except Exception:
                 # Be defensive: missing or failing snapshot should not break metadata
                 pass
@@ -2797,6 +2816,20 @@ def dataset_metadata(
                         attrib={
                             "Term": "Custom.Snapshot.Author",
                             "String": snapshot_info["author"],
+                        },
+                    )
+                # Emitted verbatim, `kind:name` intact: the kind is what
+                # decides what the name means (a catalog object for task and
+                # view, a channel for upload), so splitting them here would
+                # hand a client a name it cannot interpret. Named in full for
+                # every caller, as Custom.Sources and Custom.ReadSources are.
+                if "produced_by" in snapshot_info:
+                    ET.SubElement(
+                        entity_set,
+                        f"{{{NS_EDM}}}Annotation",
+                        attrib={
+                            "Term": "Custom.Snapshot.ProducedBy",
+                            "String": snapshot_info["produced_by"],
                         },
                     )
 
