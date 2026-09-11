@@ -304,3 +304,92 @@ def test_both_metadata_implementations_agree_on_the_same_stub(stubbed):
     # endpoint); two of them agreeing is not enough.
     assert md._source_type_from_doc(STUB, "datasets") == "ExternalTable"
     assert _annotations(per_dataset)["Custom.SourceType"] == "ExternalTable"
+
+
+# --- projected statistics -----------------------------------------------------
+# This branch used to annotate no statistics at all, on the reasoning that "the
+# projection deliberately does not read the external catalog's manifests". That
+# became untrue when control.opteryx's workspace refresh started WRITING one --
+# row counts, null counts, sizes and bounds collected from the source -- into
+# the workspace's GCS metadata/ prefix and recording its path on the stub as
+# `manifest-list`. Nothing read it, so a PostgreSQL-bound workspace's columns
+# showed their types in the Studio and nothing else.
+
+
+STUB_WITH_MANIFEST = dict(STUB, **{"manifest-list": "gs://bucket/metadata/people-stats.parquet"})
+
+DESCRIBED = {
+    "id": {"min": 1, "max": 9, "null_count": 0, "cardinality": 9, "cardinality_is_exact": True},
+    # Text bounds are ordinal PREFIXES, carried in their own channel -- see
+    # test_text_bound_prefix_annotations.
+    "name": {"min": None, "max": None, "min_display": "Earth", "max_display": "Venus"},
+    "score": {"min": 0.5, "max": 99.5, "null_count": 2},
+}
+
+
+def _catalog_serving(description, seen):
+    """An OpteryxCatalog whose one dataset describes itself as `description`."""
+
+    class FakeDataset:
+        def describe(self):
+            return description
+
+    class FakeCatalog:
+        def __init__(self, workstream, **kwargs):
+            seen.append(workstream)
+
+        def load_dataset(self, path):
+            seen.append(path)
+            return FakeDataset()
+
+    return FakeCatalog
+
+
+def test_a_stub_with_no_manifest_still_costs_no_catalog_handle(stubbed):
+    """The promise this branch is built on. `stubbed` fails the test if a
+    catalog handle is constructed, so this asserts it by passing at all."""
+    stubbed(STUB)
+    content, _ = _render()
+    annotations = _annotations(content)
+    assert "Custom.Statistics.Min" not in annotations
+    assert list(_properties(content)) == ["id", "name", "score"]
+
+
+def test_projected_statistics_are_annotated(stubbed, monkeypatch):
+    stubbed(STUB_WITH_MANIFEST)
+    seen: list = []
+    monkeypatch.setattr(interface, "OpteryxCatalog", _catalog_serving(DESCRIBED, seen))
+
+    content, _ = _render()
+    root = ET.fromstring(content)
+    by_column = {
+        element.get("Name"): {
+            annotation.get("Term"): annotation.get("String") or annotation.get("Int")
+            for annotation in element.iter(f"{{{EDM}}}Annotation")
+        }
+        for element in root.iter(f"{{{EDM}}}Property")
+    }
+
+    assert by_column["id"]["Custom.Statistics.Min"] == "1"
+    assert by_column["id"]["Custom.Statistics.Max"] == "9"
+    assert by_column["score"]["Custom.Statistics.NullCount"] == "2"
+    assert by_column["name"]["Custom.Statistics.MinPrefix"] == "Earth"
+    assert by_column["name"]["Custom.Statistics.MaxPrefix"] == "Venus"
+    # The manifest is read for THIS dataset, once.
+    assert seen == ["public", "interop_ns.people"]
+
+
+def test_an_unreadable_manifest_costs_the_statistics_and_nothing_else(stubbed, monkeypatch):
+    """Best effort, like every other enrichment here. A refresh that wrote a
+    pointer to a manifest that has since gone must not 500 the column view."""
+    stubbed(STUB_WITH_MANIFEST)
+
+    class Exploding:
+        def __init__(self, *args, **kwargs):
+            raise RuntimeError("bucket unreachable")
+
+    monkeypatch.setattr(interface, "OpteryxCatalog", Exploding)
+
+    content, _ = _render()
+    assert list(_properties(content)) == ["id", "name", "score"]
+    assert "Custom.Statistics.Min" not in _annotations(content)

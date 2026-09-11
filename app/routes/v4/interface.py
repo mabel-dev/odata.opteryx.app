@@ -173,6 +173,67 @@ def _external_catalog_stub(workstream: str, collection: str, dataset: str) -> di
         return None
     return data if data.get("external-catalog") else None
 
+def _merge_column_statistics(col_metadata: dict, description) -> None:
+    """Fold a `describe()` result into the per-column metadata the renderer reads.
+
+    Shared by the native path and the external-catalog stub path. It was inline
+    on the native path only, which is how a bound workspace came to advertise
+    its columns with no statistics at all while the native one showed them.
+    """
+    if not description or not isinstance(description, dict):
+        return
+    for col_name, stats in description.items():
+        if col_name not in col_metadata or not isinstance(stats, dict):
+            continue
+        meta = col_metadata[col_name]
+        meta.update(stats)
+        # A column the manifest computed no bounds for carries the int64
+        # sentinel, not a null. Newer catalog wheels drop it in `describe()`
+        # itself; this stays for the ones that don't, at the single point stats
+        # enter, so nothing downstream mistakes -9223372036854775808 for a real
+        # bound.
+        meta["min"] = usable_bound(meta.get("min"))
+        meta["max"] = usable_bound(meta.get("max"))
+
+
+def _stub_column_statistics(workstream: str, collection: str, dataset: str, stub: dict):
+    """`describe()` for an external-catalog stub, or None if it has no manifest.
+
+    This branch used to annotate no statistics at all, on the reasoning that
+    "the projection deliberately does not read the external catalog's
+    manifests, so there are no bounds to annotate". That stopped being true
+    when control.opteryx's workspace refresh began WRITING one - a Parquet
+    manifest in the workspace's own GCS metadata/ prefix, holding the row
+    counts, null counts, sizes and bounds it collected from the source (for
+    PostgreSQL, `pg_stats` plus an optional ANALYZE) - and recording its path
+    on the stub document as `manifest-list`. The bounds exist; nothing read
+    them, so a bound workspace's columns showed their types and nothing else.
+
+    Gated on that pointer, so a stub written before the manifest existed, or
+    one whose table could not be read at refresh time, costs exactly what it
+    cost before: no catalog handle, no GCS fetch. Only a stub that has
+    statistics pays to fetch them.
+
+    Best effort, like every other enrichment on this endpoint: a manifest that
+    cannot be read costs the document its statistics, never its columns.
+    """
+    if not stub.get("manifest-list"):
+        return None
+    try:
+        workspace = OpteryxCatalog(
+            workstream,
+            firestore_project=GCP_PROJECT_ID,
+            firestore_database=_firestore_database(),
+            gcs_bucket=_bucket_name(),
+        )
+        return workspace.load_dataset(f"{collection}.{dataset}").describe()
+    except Exception as exc:
+        logger.warning(
+            f"Could not read projected statistics for {workstream}.{collection}.{dataset}: {exc}"
+        )
+        return None
+
+
 def _standing_sources(workstream: str, collection: str, dataset: str) -> tuple[list[str], bool]:
     """The dataset document's standing source list (PROVENANCE_DESIGN.md S2.2)
     and whether it is complete, read straight from the document the way
@@ -1673,7 +1734,8 @@ def _resolve_labeled_snapshot(workspace, collection: str, dataset: str, ds, labe
     description=(
         "Returns OData $metadata (EDMX) for a single dataset, including column types and "
         "nullability, plus custom annotations carrying column statistics "
-        "(Custom.Statistics.Min/Max, DistinctValueCount, NullCount, Distribution, and CIDR for "
+        "(Custom.Statistics.Min/Max, Min/MaxPrefix for text columns, DistinctValueCount, "
+        "NullCount, Distribution, and CIDR for "
         "IPv4 columns), the source type name (Custom.OriginalType, Custom.SourceType), the "
         "caller's access (Custom.Role, Custom.Policy), dataset and column descriptions "
         "(Custom.Description, Custom.LLMDescribed), latest-snapshot metadata "
@@ -1728,6 +1790,10 @@ def dataset_metadata(
     - EntitySet declaration for this dataset
     - Custom annotations for statistics:
       * Custom.Statistics.Min/Max: min/max column values (if available)
+      * Custom.Statistics.MinPrefix/MaxPrefix: the leading characters of a TEXT
+        column's bounds. Text has no Min/Max because its manifest bound is an
+        ordinal key over the value's first bytes, which recovers a prefix and not
+        the value -- and a prefix is not an upper bound.
       * Custom.Statistics.DistinctValueCount: cardinality (exact or estimated)
       * Custom.Statistics.Distribution: histogram of value distribution
       * Custom.OriginalType: source database type (for mapped types like DECIMAL→Edm.Double)
@@ -2069,8 +2135,13 @@ def dataset_metadata(
                 "not been projected yet; refresh the workspace's dataset list",
             )
 
-        # No per-column min/max: the projection deliberately does not read the
-        # external catalog's manifests, so there are no bounds to annotate.
+        # Per-column statistics, when the workspace refresh wrote a manifest
+        # for this table. See `_stub_column_statistics` for why this is not the
+        # free-of-charge branch it reads like.
+        _merge_column_statistics(
+            col_metadata, _stub_column_statistics(workstream, collection, dataset, stub)
+        )
+
         sort_order_column = None
         sort_order_ascending = True
         try:
@@ -2335,20 +2406,8 @@ def dataset_metadata(
                 except Exception:
                     sort_order_column = None
 
-            # Get statistics from description (min/max, cardinality, distribution)
-            if description and isinstance(description, dict):
-                for col_name, stats in description.items():
-                    if col_name in col_metadata and isinstance(stats, dict):
-                        # Add stats to metadata and normalize naming
-                        meta = col_metadata[col_name]
-                        meta.update(stats)
-                        # A column the manifest computed no bounds for carries
-                        # the int64 sentinel, not a null, and describe() passes
-                        # it straight through -- drop it here, at the single
-                        # point stats enter, so nothing downstream mistakes
-                        # -9223372036854775808 for a real bound.
-                        meta["min"] = usable_bound(meta.get("min"))
-                        meta["max"] = usable_bound(meta.get("max"))
+            # Statistics from describe(): min/max, cardinality, distribution.
+            _merge_column_statistics(col_metadata, description)
 
             # Get snapshot for last modified info only for tables (views typically don't expose snapshot)
             last_ts_ms = None
@@ -2524,6 +2583,24 @@ def dataset_metadata(
                 f"{{{NS_EDM}}}Annotation",
                 attrib={"Term": "Custom.Statistics.Max", "String": str(stat_max)},
             )
+
+        # A text column has no Min/Max, and cannot: its manifest bound is an
+        # ordinal key built from the value's leading bytes, so it recovers a
+        # PREFIX. A prefix is a sound lower bound and an unsound upper one, so
+        # publishing it as Min/Max would state as the maximum a string that is
+        # not in the column. These terms are named for what they are, and a
+        # client that does not know them ignores them rather than reading a
+        # prefix as a value -- which is why this is not Min/Max with a flag.
+        for term, value in (
+            ("Custom.Statistics.MinPrefix", meta.get("min_display")),
+            ("Custom.Statistics.MaxPrefix", meta.get("max_display")),
+        ):
+            if value:
+                ET.SubElement(
+                    prop,
+                    f"{{{NS_EDM}}}Annotation",
+                    attrib={"Term": term, "String": str(value)},
+                )
 
         # Only for address columns, and only when both bounds are real: a
         # block computed from one bound would claim a range the data does not
