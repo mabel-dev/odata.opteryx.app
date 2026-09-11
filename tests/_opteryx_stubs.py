@@ -45,7 +45,6 @@ _STUBBED_NAMES = [
     "opteryx_access.adapters",
     "opteryx_access.adapters.firestore",
     "opteryx_catalog",
-    "opteryx_catalog.binding",
     "opteryx_catalog.catalog",
     "opteryx_catalog.catalog.sort_order",
     "opteryx_catalog.catalog.dataset",
@@ -155,14 +154,6 @@ def _build_stubs():
     utils = types.ModuleType("opteryx.utils")
     utils.random_string = lambda *args, **kwargs: "stub"
     stubs["opteryx.utils"] = utils
-
-    # `app.catalog_resolver` reads a workspace's `catalog` block on every
-    # resolution. Stubbed to "no binding", which resolves natively - exactly
-    # what these tests exercised before the resolver existed - so they neither
-    # reach Firestore nor depend on a real workspace document.
-    binding = types.ModuleType("opteryx_catalog.binding")
-    binding.read_catalog_binding = lambda client, workspace: None
-    stubs["opteryx_catalog.binding"] = binding
 
     catalog = _package("opteryx_catalog")
     catalog.OpteryxCatalog = type("OpteryxCatalog", (), {"load_dataset": lambda self, path: None})
