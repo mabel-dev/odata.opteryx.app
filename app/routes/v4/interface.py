@@ -64,7 +64,12 @@ try:
 except ImportError:  # pragma: no cover
     OpteryxConnector = type("OpteryxConnector", (), {})
 
+from opteryx.connectors import set_workspace_resolver
+from opteryx.connectors import set_workspace_settings_resolver
 from opteryx_catalog import OpteryxCatalog
+
+from app.catalog_resolver import resolve_workspace
+from app.catalog_resolver import resolve_workspace_settings
 from opteryx_shared_services.logging import get_logger
 
 from app.auth.deps import require_authentication
@@ -597,6 +602,28 @@ def register_default_connector() -> None:
 
 
 register_default_connector()
+
+# Slot 2 of opteryx-core's resolution chain, consulted BEFORE the default
+# registered above. A workspace bound to a customer's own catalog (Iceberg, a
+# PostgreSQL server) resolves through here; one with no binding falls through to
+# that default exactly as it always did.
+#
+# This service already ADVERTISES bound workspaces - `$metadata` and the service
+# document are built from the stub dataset documents a catalog refresh projects
+# - so without this it listed a bound workspace's tables with their columns and
+# then served nothing when a client read the entity set, because every workspace
+# resolved to the native catalog whatever its binding said.
+#
+# Installed once at import, like jobs' and the worker's: the resolver captures
+# no configuration, re-reading it per call, so there is nothing here to go
+# stale. See app/catalog_resolver.py, and keep the three in step.
+set_workspace_resolver(resolve_workspace)
+
+# The settings axis - which catalog holds a workspace's properties and
+# lifecycle - is ALWAYS the native one, whatever the data is bound to.
+# opteryx-core refuses a data resolver installed without a settings resolver,
+# so these two go together.
+set_workspace_settings_resolver(resolve_workspace_settings)
 
 # opteryx-core permits everything on its own -- access control belongs to a
 # deployment, not to the engine. This is the deployment, so it installs the

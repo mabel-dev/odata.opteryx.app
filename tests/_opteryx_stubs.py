@@ -31,6 +31,8 @@ from pathlib import Path
 _STUBBED_NAMES = [
     "opteryx",
     "opteryx.connectors",
+    "opteryx.connectors.mabel_connector",
+    "opteryx.connectors.postgres_connector",
     "opteryx.constants",
     "opteryx.expression",
     "opteryx.models",
@@ -43,6 +45,7 @@ _STUBBED_NAMES = [
     "opteryx_access.adapters",
     "opteryx_access.adapters.firestore",
     "opteryx_catalog",
+    "opteryx_catalog.binding",
     "opteryx_catalog.catalog",
     "opteryx_catalog.catalog.sort_order",
     "opteryx_catalog.catalog.dataset",
@@ -107,7 +110,23 @@ def _build_stubs():
 
     connectors = types.ModuleType("opteryx.connectors")
     connectors.OpteryxConnector = type("OpteryxConnector", (), {})
+    # `app.catalog_resolver` installs itself into opteryx-core's resolution
+    # chain at import, so these have to exist for the app to import at all.
+    # No-ops here: what the resolver RESOLVES is covered by its own tests, and
+    # a stub that actually registered would leak one test's connector into the
+    # next.
+    connectors.set_workspace_resolver = lambda *a, **k: None
+    connectors.set_workspace_settings_resolver = lambda *a, **k: None
+    connectors.Resolution = type("Resolution", (), {})
     stubs["opteryx.connectors"] = connectors
+
+    mabel_connector = types.ModuleType("opteryx.connectors.mabel_connector")
+    mabel_connector.create_gcs_mabel_connector = lambda *a, **k: None
+    stubs["opteryx.connectors.mabel_connector"] = mabel_connector
+
+    postgres_connector = types.ModuleType("opteryx.connectors.postgres_connector")
+    postgres_connector.PostgresConnector = type("PostgresConnector", (), {})
+    stubs["opteryx.connectors.postgres_connector"] = postgres_connector
 
     constants = types.ModuleType("opteryx.constants")
     constants.ResultType = type("ResultType", (), {"TABULAR": "TABULAR"})
@@ -136,6 +155,14 @@ def _build_stubs():
     utils = types.ModuleType("opteryx.utils")
     utils.random_string = lambda *args, **kwargs: "stub"
     stubs["opteryx.utils"] = utils
+
+    # `app.catalog_resolver` reads a workspace's `catalog` block on every
+    # resolution. Stubbed to "no binding", which resolves natively - exactly
+    # what these tests exercised before the resolver existed - so they neither
+    # reach Firestore nor depend on a real workspace document.
+    binding = types.ModuleType("opteryx_catalog.binding")
+    binding.read_catalog_binding = lambda client, workspace: None
+    stubs["opteryx_catalog.binding"] = binding
 
     catalog = _package("opteryx_catalog")
     catalog.OpteryxCatalog = type("OpteryxCatalog", (), {"load_dataset": lambda self, path: None})
