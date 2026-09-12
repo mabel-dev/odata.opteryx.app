@@ -96,6 +96,7 @@ from app.odata.virtual_datasets import TASK_DESCRIPTION
 from app.odata.virtual_datasets import VIRTUAL_INFORMATION_SCHEMA_DESCRIPTIONS
 from app.odata.virtual_datasets import VIRTUAL_INFORMATION_SCHEMA_TABLES
 from app.odata.virtual_datasets import is_virtual_information_schema
+from app.odata.xml_safety import sanitize_xml_tree
 from app.routes.v4.errors import describe_type_mismatch
 from app.routes.v4.metadata_cache import clear_describe_cache
 from app.routes.v4.metadata_cache import clear_metadata_cache
@@ -3492,8 +3493,11 @@ def dataset_metadata(
         except Exception:
             pass
 
-    # Serialize to XML string
-    xml_str = ET.tostring(edmx, encoding="unicode", method="xml")
+    # Serialize to XML string. The tree is swept for characters XML cannot
+    # carry FIRST: a column's text-bound prefixes are the leading bytes of
+    # real stored values, and one control byte among them would make this
+    # whole document unparseable (app/odata/xml_safety.py says more).
+    xml_str = ET.tostring(sanitize_xml_tree(edmx), encoding="unicode", method="xml")
     xml_declaration = '<?xml version="1.0" encoding="UTF-8"?>\n'
     xml = xml_declaration + xml_str
 

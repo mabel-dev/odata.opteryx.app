@@ -24,6 +24,7 @@ from app.core import _get_firestore_client
 from opteryx_shared_services.logging import get_logger
 from app.odata.content_negotiation import MEDIA_XML, require_acceptable
 from app.odata.edm_types import ORIGINAL_TYPE_TERM, RESOURCE_TERM, EdmProperty, edm_property
+from app.odata.xml_safety import sanitize_xml_tree
 from app.odata.virtual_datasets import (
     TASK_DEFINITION_COLUMNS,
     VIRTUAL_INFORMATION_SCHEMA_TABLES,
@@ -1183,8 +1184,11 @@ def get_edmx_metadata(request: Request) -> Any:
                 # If conversion fails, skip adding annotation
                 pass
 
-    # Convert to XML string
-    xml_str = ET.tostring(edmx, encoding="unicode", method="xml")
+    # Convert to XML string. Swept first for characters XML cannot carry --
+    # see app/odata/xml_safety.py. This document names datasets and columns
+    # rather than quoting their contents, so it is the less exposed of the
+    # two, but it is built from the same catalog strings.
+    xml_str = ET.tostring(sanitize_xml_tree(edmx), encoding="unicode", method="xml")
 
     # Add XML declaration
     xml_declaration = '<?xml version="1.0" encoding="UTF-8"?>\n'
