@@ -154,10 +154,11 @@ class DatasetInfo:
     """Information about a dataset accessible to the user.
 
     Everything here comes out of the catalog document the listing query already
-    streamed. The last three fields are what let the EDMX document be built
+    streamed. The last four fields are what let the EDMX document be built
     without going back to the catalog for a second look at the same document:
-    `schema_id` and `doc_ref` locate the one thing the listing does not carry
-    (the column list), and `inline_schema` means even that is already in hand.
+    the column list is the one thing the listing does not carry, and these say
+    where it is -- `schema_id` in the `schemas` subcollection, `statement_id` in
+    the `statement` subcollection, or `inline_schema` when it is already in hand.
     """
 
     def __init__(
@@ -169,6 +170,7 @@ class DatasetInfo:
         source: str = "Table",
         last_modified_ms: int | None = None,
         schema_id: str | None = None,
+        statement_id: str | None = None,
         inline_schema: list | None = None,
         doc_ref=None,
     ):
@@ -180,11 +182,18 @@ class DatasetInfo:
         self.last_modified_ms = last_modified_ms
         #: `current-schema-id`: names the doc in the `schemas` subcollection.
         self.schema_id = schema_id
-        #: Some documents carry their columns inline instead -- always, for a
-        #: view, whose schema is stored on the view document itself.
+        #: `statement-id`: names the doc in the `statement` subcollection. A
+        #: view's columns belong to the STATEMENT that produces them, not to the
+        #: view -- each statement version has its own shape, and the view's is
+        #: whichever one its current statement has.
+        self.statement_id = statement_id
+        #: Columns carried ON the document, with no subcollection to read. This
+        #: is how an EXTERNAL catalog describes a dataset it owns (see
+        #: opteryx-catalog's stub_projection): it has no `schemas` subcollection
+        #: here to point at, so the projection carries the columns itself.
         self.inline_schema = inline_schema
-        #: The Firestore reference this document came from, so the schema
-        #: subcollection can be addressed without reconstructing a path.
+        #: The Firestore reference this document came from, so the schema or
+        #: statement subcollection can be addressed without reconstructing a path.
         self.doc_ref = doc_ref
 
 
@@ -304,6 +313,7 @@ def _query_collection_group(
                         source=source_type,
                         last_modified_ms=last_modified,
                         schema_id=data.get("current-schema-id"),
+                        statement_id=data.get("statement-id"),
                         inline_schema=data.get("schema"),
                         doc_ref=doc.reference,
                     )
@@ -342,6 +352,7 @@ def _get_personal_datasets(db, identity: str) -> list[DatasetInfo]:
                         source=_source_type_from_doc(data, "datasets"),
                         last_modified_ms=data.get("timestamp-ms"),
                         schema_id=data.get("current-schema-id"),
+                        statement_id=data.get("statement-id"),
                         inline_schema=data.get("schema"),
                         doc_ref=doc.reference,
                     )
@@ -370,8 +381,8 @@ def _get_tasks(db, workspace_ids: set[str], limit: int = 1000) -> list[DatasetIn
     documents, so reusing that query would have listed no tasks at all while
     looking like a workspace simply has none.
 
-    A task has no schema document to fetch, so `schema_id`/`inline_schema`/
-    `doc_ref` are all left unset: `_facts_for` answers for it from the fixed
+    A task has no schema document to fetch, so `schema_id`/`statement_id`/
+    `inline_schema`/`doc_ref` are all left unset: `_facts_for` answers for it from the fixed
     TASK_DEFINITION_COLUMNS without a read.
     """
     if not workspace_ids:
@@ -655,11 +666,14 @@ def _facts_for(db, datasets: list[DatasetInfo]) -> dict[str, _DatasetFacts]:
     """Resolve every dataset's columns and last-modified time, keyed by resource.
 
     The listing query that produced `datasets` has already read each catalog
-    document in full, so the timestamp needs no further lookup and neither do
-    the columns of anything carrying its schema inline (a view always does).
-    What is left is one `schemas/{current-schema-id}` document per remaining
-    dataset -- immutable, addressable, and independent of one another, so they
-    are fetched with Firestore's batched read rather than one at a time.
+    document in full, so the timestamp needs no further lookup, and neither do
+    the columns of anything carrying them inline (an external catalog's stub).
+    What is left is ONE subcollection document per remaining relation --
+    `schemas/{current-schema-id}` for a dataset, `statement/{statement-id}` for
+    a view, whose columns belong to the statement that produces them and not to
+    the view. Both are immutable, addressable, and independent of one another,
+    so they are fetched with Firestore's batched read rather than one at a time;
+    a view costs one more entry in that batch, not a round trip of its own.
 
     This is why the endpoint no longer opens an OpteryxCatalog: `load_dataset`
     would re-read the very document the listing just streamed, behind a handle
@@ -689,15 +703,25 @@ def _facts_for(db, datasets: list[DatasetInfo]) -> dict[str, _DatasetFacts]:
             )
             continue
 
-        # `current-schema-id` wins over an inline `schema` when both are
-        # present, matching SimpleDataset.schema(): it resolves the current
-        # schema id first and only falls back to the inline copy when there
-        # isn't one. Preferring the inline copy would serve a stale schema to
-        # any dataset that still carries one from before it had schema
-        # documents.
-        if dataset.schema_id and dataset.doc_ref is not None:
+        # Where this relation's columns are, in the order they take precedence:
+        #
+        #   `current-schema-id` -> `schemas/{id}`, a native dataset's own answer.
+        #   `statement-id`      -> `statement/{id}`, a VIEW's columns, which
+        #                          belong to the statement that produces them.
+        #   inline              -> already in hand.
+        #
+        # The id wins over an inline copy, matching SimpleDataset.schema(): a
+        # dataset may still carry one from before it had schema documents, and
+        # serving that would be stale. An external catalog's stub is the case
+        # with only the inline copy - it has no subcollection here to point at.
+        subcollection, document_id = (
+            ("schemas", dataset.schema_id)
+            if dataset.schema_id
+            else ("statement", dataset.statement_id)
+        )
+        if document_id and dataset.doc_ref is not None:
             try:
-                ref = dataset.doc_ref.collection("schemas").document(str(dataset.schema_id))
+                ref = dataset.doc_ref.collection(subcollection).document(str(document_id))
             except Exception as exc:
                 logger.warning(f"Cannot address schema of {dataset.resource}: {exc}")
                 facts[dataset.resource] = _NO_FACTS

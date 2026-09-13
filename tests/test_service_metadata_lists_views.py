@@ -23,10 +23,23 @@ class FakeSubcollection:
         self.parent = FakeParentDoc(parent_id)
 
 
+class FakeSubcollectionRef:
+    """The `statement`/`schemas` subcollection hanging off a document."""
+
+    def __init__(self, path):
+        self.path = path
+
+    def document(self, doc_id):
+        return FakeDocRef("ns", f"{self.path}/{doc_id}")
+
+
 class FakeDocRef:
     def __init__(self, parent_id, path):
         self.parent = FakeSubcollection(parent_id)
         self.path = path
+
+    def collection(self, name):
+        return FakeSubcollectionRef(f"{self.path}/{name}")
 
 
 class FakeDoc:
@@ -67,10 +80,11 @@ VIEW_DOC = {
     "name": "recent_orders",
     "workspace": "public",
     "namespace": "ns",
-    # A view carries its columns on its own document (opteryx_catalog
-    # _build_view reads `schema` straight off it), so nothing further is needed
-    # to describe one.
-    "schema": [{"name": "order_id", "type": "INTEGER"}],
+    # A view's columns belong to the STATEMENT that produces them, not to the
+    # view: each statement version has its own shape, and the view's is
+    # whichever one its current statement has. The view document names that
+    # statement and nothing more.
+    "statement-id": "1700000000000",
 }
 
 TABLE_DOC = {
@@ -105,12 +119,41 @@ def test_a_view_is_listed_and_labelled_as_one():
     assert by_resource["public.ns.orders"].source == "Table"
 
 
-def test_a_views_columns_come_off_its_own_document():
-    """No schema subcollection to chase, so the batched read has nothing to do
-    for it -- passing a db that would fail if used proves that."""
+def test_a_views_columns_are_read_from_its_statement():
+    """The columns are fetched from `statement/{statement-id}`, in the same
+    batched read that resolves a dataset's schema document -- one more entry in
+    a batch the listing already performs, not a round trip of its own."""
     db = FakeFirestore({"views": [FakeDoc("recent_orders", VIEW_DOC, "views")]})
+    [view] = metadata._get_workspace_datasets(db, {"public"})
+
+    statement_path = "public/ns/views/recent_orders/statement/1700000000000"
+    read = []
+
+    def fake_read(_db, refs):
+        read.extend(ref.path for ref in refs)
+        return {
+            statement_path: metadata._columns_from_stored(
+                [{"name": "order_id", "type": "INTEGER"}]
+            )
+        }
+
+    original, metadata._read_schema_documents = metadata._read_schema_documents, fake_read
+    try:
+        facts = metadata._facts_for(None, [view])
+    finally:
+        metadata._read_schema_documents = original
+
+    assert read == [statement_path]
+    assert [column.name for column in facts["public.ns.recent_orders"].columns] == ["order_id"]
+
+
+def test_a_view_whose_statement_is_unknown_declares_no_columns():
+    """A view document written before schemas were recorded names no statement
+    this can read columns from. It declares none rather than inventing them -
+    the caller then drops it from the document."""
+    db = FakeFirestore({"views": [FakeDoc("recent_orders", {**VIEW_DOC, "statement-id": None}, "views")]})
     [view] = metadata._get_workspace_datasets(db, {"public"})
 
     facts = metadata._facts_for(None, [view])
 
-    assert [column.name for column in facts["public.ns.recent_orders"].columns] == ["order_id"]
+    assert facts["public.ns.recent_orders"].columns == []

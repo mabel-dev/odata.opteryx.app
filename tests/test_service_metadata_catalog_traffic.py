@@ -87,24 +87,31 @@ def _dataset(
     collection="ns",
     source="Table",
     schema_id=SCHEMA_ID,
-    inline_schema=None,
+    statement_id=None,
 ):
     """A DatasetInfo as the listing query would have produced it.
 
-    When `db` is given, the schema document it points at is registered there, so
-    the batched read finds it.
+    A dataset's columns live in `schemas/{current-schema-id}`; a view's live in
+    `statement/{statement-id}`, because they belong to the statement that
+    produces them. Pass `statement_id` to build a view. When `db` is given, the
+    document either one points at is registered there, so the batched read finds
+    it.
     """
-    path = f"{workspace}/{collection}/datasets/{name}"
-    if db is not None and schema_id and inline_schema is None:
-        db.documents[f"{path}/schemas/{schema_id}"] = {"columns": COLUMNS}
+    subcollection = "views" if statement_id else "datasets"
+    path = f"{workspace}/{collection}/{subcollection}/{name}"
+    if db is not None:
+        if statement_id:
+            db.documents[f"{path}/statement/{statement_id}"] = {"columns": COLUMNS}
+        elif schema_id:
+            db.documents[f"{path}/schemas/{schema_id}"] = {"columns": COLUMNS}
     return metadata.DatasetInfo(
         resource=f"{workspace}.{collection}.{name}",
         workspace=workspace,
         collection=collection,
         name=name,
         source=source,
-        schema_id=None if inline_schema else schema_id,
-        inline_schema=inline_schema,
+        schema_id=None if statement_id else schema_id,
+        statement_id=statement_id,
         doc_ref=FakeRef(path),
     )
 
@@ -151,34 +158,58 @@ def test_the_catalog_document_itself_is_never_re_read(monkeypatch, db):
     assert db.documents_read == ["public/ns/datasets/t/schemas/s1"]
 
 
-def test_an_inline_schema_costs_no_read_at_all(monkeypatch, db):
-    """A view stores its columns on its own document, so the listing has them."""
-    view = _dataset("v", db, source="View", inline_schema=COLUMNS)
+def test_a_views_columns_are_read_from_its_statement(monkeypatch, db):
+    """A view's columns belong to the statement that produces them, so they are
+    read from `statement/{statement-id}` -- in the SAME batch as every dataset's
+    schema document, so a view costs one more entry in a read already being
+    made, not a round trip of its own."""
+    view = _dataset("v", db, source="View", statement_id="1700000000000")
+
+    body = _body(_get(monkeypatch, [view, _dataset("t", db)]))
+
+    assert len(db.batches) == 1, "a view must not cost a read of its own"
+    assert sorted(db.batches[0]) == [
+        "public/ns/datasets/t/schemas/s1",
+        "public/ns/views/v/statement/1700000000000",
+    ]
+    assert 'EntitySet Name="public_ns_v"' in body
+    assert 'Property Name="id"' in body
+
+
+def test_a_view_naming_no_statement_declares_no_columns(monkeypatch, db):
+    """A view document written before columns were recorded names no statement
+    to read them from. It declares none rather than inventing them, and the
+    builder then leaves it out of the document entirely."""
+    view = _dataset("v", db, source="View", schema_id=None, statement_id=None)
 
     body = _body(_get(monkeypatch, [view]))
 
     assert db.batches == []
-    assert 'EntitySet Name="public_ns_v"' in body
+    assert "public_ns_v" not in body
 
 
-def test_a_current_schema_id_wins_over_an_inline_schema(monkeypatch, db):
-    """Both can be present on one document; the id names the current schema and
-    the inline copy may predate it, so serving the inline one would be stale."""
+def test_a_schema_id_wins_when_a_document_carries_both_ids(monkeypatch, db):
+    """A document should carry one id or the other, never both. If one ever
+    does, `current-schema-id` is the dataset's own answer and wins - resolving
+    it as a view would read a statement that is not what this relation is."""
     dataset = metadata.DatasetInfo(
         resource="public.ns.t",
         workspace="public",
         collection="ns",
         name="t",
         schema_id=SCHEMA_ID,
-        inline_schema=[{"name": "stale_column", "type": "VARCHAR"}],
+        statement_id="1700000000000",
         doc_ref=FakeRef("public/ns/datasets/t"),
     )
     db.documents[f"public/ns/datasets/t/schemas/{SCHEMA_ID}"] = {"columns": COLUMNS}
+    db.documents["public/ns/datasets/t/statement/1700000000000"] = {
+        "columns": [{"name": "wrong_column", "type": "VARCHAR"}]
+    }
 
     body = _body(_get(monkeypatch, [dataset]))
 
     assert 'Property Name="id"' in body
-    assert "stale_column" not in body
+    assert "wrong_column" not in body
 
 
 def test_virtual_datasets_are_never_read(monkeypatch, db):
