@@ -2348,13 +2348,22 @@ def dataset_metadata(
                     }
             else:
                 # Two kinds legitimately have no schema, and neither is an error.
-                # A view's catalog object may simply not carry one. A materialized
-                # view has none until its first refresh runs: CREATE MATERIALIZED
-                # VIEW registers the dataset, its SQL, its sources and its trigger,
-                # and the refresh is what produces the schema and first snapshot --
-                # so a freshly created MV sits in exactly this state, and 404ing it
-                # made its details page unreachable for the whole window between
-                # creation and first refresh.
+                #
+                # A view whose CURRENT statement was registered before columns
+                # were recorded carries none -- a view's columns belong to the
+                # statement that produces them, and `View.schema()` answers None
+                # when that statement has no `columns`. This used to be EVERY
+                # view: `CatalogView` had no `schema()` at all, so the probe
+                # above answered False for all of them and every view in the
+                # service was described as one string column called `id`.
+                #
+                # A materialized view has none until its first refresh runs:
+                # CREATE MATERIALIZED VIEW registers the dataset, its SQL, its
+                # sources and its trigger, and the refresh is what produces the
+                # schema and first snapshot -- so a freshly created MV sits in
+                # exactly this state, and 404ing it made its details page
+                # unreachable for the whole window between creation and first
+                # refresh.
                 #
                 # Both get a single-column placeholder so the EDMX stays
                 # structurally valid (an EntitySet's EntityType needs a key).
