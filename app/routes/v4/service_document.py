@@ -461,6 +461,43 @@ def _get_tasks(db, workspace_ids: set[str], limit: int = 1000) -> list[DatasetIn
     return results
 
 
+def _starred_workspaces(db, workspace_ids: set[str], identity: str) -> list[str]:
+    """Which of `workspace_ids` the caller has starred, for `Custom.Favourites`.
+
+    Delegated to `opteryx_catalog.favourites.starred_workspaces`, which is N
+    direct document lookups in one batched `get_all()` over paths already
+    known from the policies claim -- NOT a collection-group query, so it
+    needs no index and cannot fail the silent way the `tasks` listing above
+    can. The library also owns the two guards that matter and must live in
+    exactly one place: it keys on the caller's concrete identity and refuses
+    the wildcard principal outright (a wildcard star would be every user's
+    star at once), and it fails CLOSED to an empty list.
+
+    A second batched round trip rather than refs appended to the one
+    `_drop_soft_deleted_workspaces` issues, deliberately: merging them means
+    re-implementing that read here, and with it the wildcard guard the
+    library exists to hold once. One more batched read over a workspace set
+    that is already in hand is the cheaper of the two mistakes.
+
+    Imported lazily: the module ships in opteryx-catalog >= 0.4.165, and an
+    older installed release must cost the caller their stars, not their
+    service document. Every failure is an empty list for the same reason --
+    the tree falls back to alphabetical, which is what it did before this
+    feature existed, and never to another principal's list.
+    """
+    if not identity or not workspace_ids:
+        return []
+    try:
+        from opteryx_catalog import favourites
+    except ImportError:
+        return []
+    try:
+        return favourites.starred_workspaces(db, sorted(workspace_ids), identity)
+    except Exception as exc:
+        logger.debug(f"Favourites unavailable for this service document: {type(exc)} {exc}")
+        return []
+
+
 def _drop_soft_deleted_workspaces(db, workspace_ids: set[str]) -> set[str]:
     """Filter out workspaces that no longer really exist, so their datasets
     never reach the collection-group query below in the first place.
@@ -624,6 +661,12 @@ def get_service_document(
             detail="dependent service unavailable: firestore",
         )
 
+    # None for an anonymous caller (nobody to have starred anything), so the
+    # annotation is omitted rather than emitted empty -- a client that sees
+    # no annotation keeps whatever it already knew, and an anonymous session
+    # has nothing to correct it with.
+    starred_workspaces = None
+
     if identity is None:
         # Anonymous callers (no Authorization header at all — see
         # app.auth.deps.require_authentication) only ever see the
@@ -660,6 +703,15 @@ def get_service_document(
         workspace_ids = _drop_soft_deleted_workspaces(
             db, accessible_workstreams(access_policies_list) | {"public"}
         )
+
+        # The caller's stars, over the same set of workspaces just resolved
+        # plus `personal`, which is starrable but never in `workspace_ids`
+        # (that set is built from policy-bearing workstreams). Surfaced as a
+        # document-level annotation, not as entries in `value`: the service
+        # document has no workspace entity to carry a flag, and inventing one
+        # would be exactly the "entry a client has to know to skip" the tasks
+        # listing refuses to be.
+        starred_workspaces = _starred_workspaces(db, workspace_ids | {"personal"}, identity)
 
         # Collect all datasets
         all_datasets: list[DatasetInfo] = []
@@ -756,10 +808,17 @@ def get_service_document(
             }
         )
 
-    return {
+    document = {
         "@odata.context": "/api/v4/$metadata",
         "value": entity_sets,
     }
+    # Present for every authenticated caller, EMPTY included: an empty list is
+    # a real answer ("nothing starred") and lets a client discard stars it
+    # remembered from another device the caller has since unstarred on. Only
+    # an anonymous document leaves it out.
+    if starred_workspaces is not None:
+        document["Custom.Favourites"] = starred_workspaces
+    return document
 
 
 __all__ = ["router"]
