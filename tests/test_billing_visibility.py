@@ -19,6 +19,7 @@ from app.auth.permissions import (
     AUTHENTICATED_READ_RELATIONS,
     BILLING_NAMESPACE,
     DATA_ADMIN_ENTITLEMENT,
+    PLATFORM_USAGE_RELATIONS,
     access_policies_for_query,
     billing_account_from_claims,
     entitlements_from_claims,
@@ -207,9 +208,37 @@ def test_the_actor_breakdown_is_not_granted_to_anonymous_data_admin_claims():
     assert access_policies_for_query(claims) == []
 
 
-def test_both_breakdowns_are_covered_by_the_row_level_filter():
+def test_the_unpriced_usage_views_are_not_granted_to_ordinary_callers():
+    """They carry every account's rows before attribution, which is the whole
+    reason platform-health reads them. A tenant gets the charge views."""
+    granted = [p["pattern"] for p in access_policies_for_query({"identity": "u", "policies": []})]
+    for relation in PLATFORM_USAGE_RELATIONS:
+        assert relation not in granted
+
+
+def test_the_unpriced_usage_views_are_granted_to_data_admin():
+    """Without this the storage card on platform-health is refused outright -
+    the relation exists and the caller is exempt from the row filter, but
+    nothing names it in their policies."""
+    claims = {"identity": "u", "policies": [], "entitlement": DATA_ADMIN_ENTITLEMENT}
+    granted = [p["pattern"] for p in access_policies_for_query(claims)]
+    for relation in PLATFORM_USAGE_RELATIONS:
+        assert relation in granted
+
+
+def test_every_grant_is_covered_by_the_row_level_filter():
     """A granted relation outside the filtered namespace would be served
     unfiltered - every account's rows, silently. This is the assertion that
-    catches a breakdown added to the grant but living outside platform.billing.*."""
-    for relation in list(AUTHENTICATED_READ_RELATIONS) + [ACTOR_BREAKDOWN_RELATION]:
+    catches a relation added to any grant but living outside platform.billing.*.
+
+    It covers the data_admin grants too, even though a data_admin is exempt from
+    the filter: the exemption is a property of the CALLER, and the day one of
+    these is handed to someone who is not exempt, the pattern is what stands
+    between them and another account's rows."""
+    everything = (
+        list(AUTHENTICATED_READ_RELATIONS)
+        + [ACTOR_BREAKDOWN_RELATION]
+        + list(PLATFORM_USAGE_RELATIONS)
+    )
+    for relation in everything:
         assert fnmatchcase(relation, BILLING_NAMESPACE), relation

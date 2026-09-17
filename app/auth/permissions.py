@@ -156,6 +156,26 @@ AUTHENTICATED_READ_RELATIONS = (
 # belongs in this change.
 ACTOR_BREAKDOWN_RELATION = "platform.billing.charges_daily_by_actor"
 
+# The UNPRICED usage layer, gated on `data_admin` for the same reason the actor
+# breakdown is: it is platform-wide and it is nobody's invoice.
+#
+# `charges_daily` drops usage it cannot attribute to an account. That is
+# deliberate — NOTE 3 in xb500.opteryx's platform_billing_relations.sql: a gap
+# someone has to explain must surface as a missing row, never silently become
+# £0. Right for an invoice, wrong for an operator dashboard, which needs to see
+# that usage precisely BECAUSE it is unattributed. These two views are the same
+# numbers before that drop, and they are what platform-health reads; the billing
+# surfaces go on reading the charge views.
+#
+# NOT added to AUTHENTICATED_READ_RELATIONS: they carry every account's rows and
+# are no tenant's business. A data_admin is already exempt from the row filter,
+# so this widens which relations an admin may name — not what any account can
+# learn about another.
+PLATFORM_USAGE_RELATIONS = (
+    "platform.billing.usage_daily",
+    "platform.billing.usage_hourly",
+)
+
 
 def access_policies_for_query(claims: Dict[str, Any]) -> List[Dict[str, str]]:
     """Access policies for executing a query, including authenticated-read grants.
@@ -179,6 +199,9 @@ def access_policies_for_query(claims: Dict[str, Any]) -> List[Dict[str, str]]:
         # ordinary member of a shared billing account cannot read who ran what.
         if DATA_ADMIN_ENTITLEMENT in entitlements_from_claims(claims):
             policies.append({"pattern": ACTOR_BREAKDOWN_RELATION, "role": "reader"})
+            policies.extend(
+                {"pattern": r, "role": "reader"} for r in PLATFORM_USAGE_RELATIONS
+            )
 
     return policies
 
