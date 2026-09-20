@@ -235,6 +235,112 @@ def _stub_column_statistics(workstream: str, collection: str, dataset: str, stub
         return None
 
 
+def _fork_relationship(workstream: str, collection: str, dataset: str) -> dict | None:
+    """What this dataset was forked from, and how far it has diverged.
+
+    `None` for a dataset nobody cloned, which is nearly all of them - the
+    absence is the common case and the caller emits no annotation for it.
+
+    TWO READS, and only when the first says there is something to say. The
+    dataset document carries the fork block; the UPSTREAM's document carries
+    the sequence number the "behind" figure is measured against, and that second
+    read is skipped entirely for a dataset that is not a fork.
+
+    REVISIONS ARE UPPER BOUNDS. A sequence number advances on every commit,
+    maintenance included, so a difference of 3 may be three inserts or two
+    compactions and a statistics refresh. Anything rendering these must say "at
+    most"; zero is exact, and is the answer that matters.
+
+    Never fatal, like every enrichment on this document: a catalog too old to
+    carry the block, or a read that fails, costs the annotation and nothing
+    else.
+    """
+    try:
+        db = _get_firestore_client(database=_firestore_database())
+        if db is None:
+            return None
+        doc = (
+            db.collection(workstream)
+            .document(collection)
+            .collection("datasets")
+            .document(dataset)
+            .get()
+        )
+        data = (doc.to_dict() or {}) if getattr(doc, "exists", False) else {}
+        fork = data.get("fork")
+        if not isinstance(fork, dict):
+            return None
+        source = fork.get("source") or {}
+        target = fork.get("target") or {}
+        upstream = source.get("dataset")
+        if not upstream:
+            return None
+
+        # This side's divergence needs nothing but the two numbers already in
+        # hand: the head's sequence against the anchor the last sync wrote.
+        current = data.get("current-snapshot-id")
+        ahead = 0
+        if current is not None:
+            snap = (
+                db.collection(workstream)
+                .document(collection)
+                .collection("datasets")
+                .document(dataset)
+                .collection("snapshots")
+                .document(str(current))
+                .get()
+            )
+            snap_data = (snap.to_dict() or {}) if getattr(snap, "exists", False) else {}
+            ahead = max(
+                0,
+                int(snap_data.get("sequence-number") or 0)
+                - int(target.get("sequence-number") or 0),
+            )
+
+        behind = 0
+        parts = str(upstream).split(".")
+        if len(parts) == 3:
+            up_doc = (
+                db.collection(parts[0])
+                .document(parts[1])
+                .collection("datasets")
+                .document(parts[2])
+                .get()
+            )
+            up_data = (up_doc.to_dict() or {}) if getattr(up_doc, "exists", False) else {}
+            up_current = up_data.get("current-snapshot-id")
+            if up_current is not None:
+                up_snap = (
+                    db.collection(parts[0])
+                    .document(parts[1])
+                    .collection("datasets")
+                    .document(parts[2])
+                    .collection("snapshots")
+                    .document(str(up_current))
+                    .get()
+                )
+                up_snap_data = (
+                    (up_snap.to_dict() or {}) if getattr(up_snap, "exists", False) else {}
+                )
+                behind = max(
+                    0,
+                    int(up_snap_data.get("sequence-number") or 0)
+                    - int(source.get("sequence-number") or 0),
+                )
+    except Exception as exc:  # noqa: BLE001 - catalog boundary
+        logger.warning(f"Failed to read fork for {workstream}.{collection}.{dataset}: {exc}")
+        return None
+
+    return {
+        "upstream": str(upstream),
+        "base_snapshot": source.get("snapshot-id"),
+        "revisions_behind": behind,
+        "revisions_ahead": ahead,
+        "last_sync_ms": target.get("last-sync-ms"),
+        "forked_by": fork.get("forked-by"),
+    }
+
+
 def _standing_sources(workstream: str, collection: str, dataset: str) -> tuple[list[str], bool]:
     """The dataset document's standing source list (PROVENANCE_DESIGN.md S2.2)
     and whether it is complete, read straight from the document the way
@@ -1745,6 +1851,11 @@ def _resolve_labeled_snapshot(workspace, collection: str, dataset: str, ds, labe
         "catalog object for `task` and `view`, and a channel for `upload`), physical sort "
         "order (Custom.SortOrder.Column/Direction), snapshot tags (Custom.Tags.Count and "
         "Custom.Tags, a Collection of Records with Name, SnapshotId and CreatedBy), the "
+        "the dataset this one was FORKED from, if any (Custom.Fork, a Record with Upstream, "
+        "RevisionsBehind, RevisionsAhead, BaseSnapshot, LastSyncMs and ForkedBy -- the two "
+        "revision figures are UPPER BOUNDS, since a sequence number advances on every commit "
+        "including maintenance, so render them as \"at most N\"; zero is exact, and the "
+        "annotation is absent entirely for a dataset nobody cloned), the "
         "standing source list the current content was built from (Custom.Sources.Complete "
         "and Custom.Sources, a Collection of Records with Dataset and Visible), the commit "
         "receipt of the snapshot described (Custom.ReadSources.Reported, "
@@ -2015,9 +2126,15 @@ def dataset_metadata(
     source_readable = {
         name: _source_is_readable(name, identity, access_policies_list) for name in sources
     }
+    # Beside the standing sources, and read from the same document. A fork's
+    # divergence moves when either side commits, so it goes in the cache key
+    # too - otherwise "at most 3 revisions behind" would keep being served
+    # after a resync made it zero.
+    fork = None if is_virtual_info_schema else _fork_relationship(workstream, collection, dataset)
     sources_key = (
         tuple((name, source_readable[name]) for name in sources),
         sources_complete,
+        tuple(sorted(fork.items())) if fork else None,
     )
     cache_key = (
         table_name,
@@ -2824,6 +2941,58 @@ def dataset_metadata(
                         "Bool": str(source_readable.get(name, False)).lower(),
                     },
                 )
+
+    # What this dataset was FORKED from (FORKS_DESIGN.md S10.2), when it was.
+    # Absent entirely for a dataset nobody cloned, which is nearly all of them -
+    # an annotation emitted empty would make every client check a field that is
+    # almost never set, where absence already says it.
+    #
+    # The upstream is NAMED whether or not the caller can read it, for the same
+    # reason Custom.Sources names every source: this is a citation, and a
+    # citation the reader lacks a grant for is still a citation. What it
+    # discloses is a name and nothing else.
+    #
+    # RevisionsBehind and RevisionsAhead are UPPER BOUNDS, not commit counts - a
+    # sequence number advances on every commit, maintenance included. A client
+    # must render them as "at most N"; zero is exact.
+    if ds is not None and fork:
+        fork_annotation = ET.SubElement(
+            entity_set, f"{{{NS_EDM}}}Annotation", attrib={"Term": "Custom.Fork"}
+        )
+        fork_record = ET.SubElement(fork_annotation, f"{{{NS_EDM}}}Record")
+        ET.SubElement(
+            fork_record,
+            f"{{{NS_EDM}}}PropertyValue",
+            attrib={"Property": "Upstream", "String": fork["upstream"]},
+        )
+        ET.SubElement(
+            fork_record,
+            f"{{{NS_EDM}}}PropertyValue",
+            attrib={"Property": "RevisionsBehind", "Int": str(fork["revisions_behind"])},
+        )
+        ET.SubElement(
+            fork_record,
+            f"{{{NS_EDM}}}PropertyValue",
+            attrib={"Property": "RevisionsAhead", "Int": str(fork["revisions_ahead"])},
+        )
+        if fork.get("base_snapshot") is not None:
+            ET.SubElement(
+                fork_record,
+                f"{{{NS_EDM}}}PropertyValue",
+                attrib={"Property": "BaseSnapshot", "String": str(fork["base_snapshot"])},
+            )
+        if fork.get("last_sync_ms") is not None:
+            ET.SubElement(
+                fork_record,
+                f"{{{NS_EDM}}}PropertyValue",
+                attrib={"Property": "LastSyncMs", "String": str(fork["last_sync_ms"])},
+            )
+        if fork.get("forked_by"):
+            ET.SubElement(
+                fork_record,
+                f"{{{NS_EDM}}}PropertyValue",
+                attrib={"Property": "ForkedBy", "String": str(fork["forked_by"])},
+            )
 
     # The receipt for the snapshot this document describes -- the exact
     # versions the commit that produced it read (PROVENANCE_DESIGN.md S2.1).
