@@ -389,7 +389,7 @@ def _get_tasks(db, workspace_ids: set[str], limit: int = 1000) -> list[DatasetIn
     results: list[DatasetInfo] = []
 
     try:
-        workspace_ids = _drop_soft_deleted_workspaces(db, workspace_ids)
+        workspace_ids = _drop_unlistable_workspaces(db, workspace_ids)
         if not workspace_ids:
             return []
 
@@ -474,7 +474,7 @@ def _starred_workspaces(db, workspace_ids: set[str], identity: str) -> list[str]
     star at once), and it fails CLOSED to an empty list.
 
     A second batched round trip rather than refs appended to the one
-    `_drop_soft_deleted_workspaces` issues, deliberately: merging them means
+    `_drop_unlistable_workspaces` issues, deliberately: merging them means
     re-implementing that read here, and with it the wildcard guard the
     library exists to hold once. One more batched read over a workspace set
     that is already in hand is the cheaper of the two mistakes.
@@ -498,9 +498,23 @@ def _starred_workspaces(db, workspace_ids: set[str], identity: str) -> list[str]
         return []
 
 
-def _drop_soft_deleted_workspaces(db, workspace_ids: set[str]) -> set[str]:
-    """Filter out workspaces that no longer really exist, so their datasets
-    never reach the collection-group query below in the first place.
+def _drop_unlistable_workspaces(db, workspace_ids: set[str]) -> set[str]:
+    """Filter out workspaces that should not be listed, so their datasets never
+    reach the collection-group query below in the first place.
+
+    TWO REASONS, one read. A workspace is dropped here when it no longer really
+    exists, and when it exists but has asked not to appear in listings
+    (`listed: false` - see opteryx_catalog's `LISTED_PROPERTY`). Both are
+    answered from the same `$properties` document this already fetches, so the
+    second costs nothing.
+
+    `listed` IS NOT A PERMISSION. An unlisted workspace is still queryable by
+    name, still appears in information_schema, and is still named in provenance
+    and fork relationships. What it is not is put in front of everyone: a
+    library namespace like `samples` holds datasets meant to be forked once,
+    and listing them would put the same forty rows in every account's catalog
+    forever. Who may READ any of it is decided by grants, in opteryx-access,
+    and nowhere else - including here.
 
     Reads each workspace's `$properties` doc directly rather than
     constructing a catalog handle per workspace, since that handle also
@@ -527,14 +541,19 @@ def _drop_soft_deleted_workspaces(db, workspace_ids: set[str]) -> set[str]:
     if not workspace_ids:
         return workspace_ids
 
-    refs = [db.collection(ws).document("$properties") for ws in workspace_ids]
     try:
+        # Building the refs is inside the guard, not before it. It reaches into
+        # `db` exactly as the read does, so a client that cannot answer raises
+        # HERE - and with the construction outside, that raise escaped the
+        # fail-open this comment promises and took the whole listing down.
+        refs = [db.collection(ws).document("$properties") for ws in workspace_ids]
         docs = db.get_all(refs)
     except Exception as exc:
         # Fail open: a Firestore hiccup here must not take the whole listing
-        # down, and the alternative (treating every workspace as deleted)
-        # would empty every caller's dataset list on a transient error.
-        logger.warning(f"Failed to read workspace properties for deletion check: {exc}")
+        # down, and the alternative (treating every workspace as deleted, or
+        # as unlisted) would empty every caller's dataset list on a transient
+        # error.
+        logger.warning(f"Failed to read workspace properties for listing check: {exc}")
         return workspace_ids
 
     gone = set()
@@ -545,7 +564,18 @@ def _drop_soft_deleted_workspaces(db, workspace_ids: set[str]) -> set[str]:
                 if workspace_id not in ("public", "personal"):
                     gone.add(workspace_id)
                 continue
-            if (doc.to_dict() or {}).get("deleted-at-ms") is not None:
+            properties = doc.to_dict() or {}
+            if properties.get("deleted-at-ms") is not None:
+                gone.add(workspace_id)
+                continue
+            # Listed unless the workspace explicitly says otherwise, and an
+            # unrecognised value reads as listed. The failure modes are not
+            # symmetric: an unlisted workspace that shows up is clutter, while
+            # a listed one that vanishes is somebody's data disappearing out of
+            # their catalog - so this fails toward the status quo, not toward
+            # hiding. Mirrors opteryx_catalog's `_guard_is_on`.
+            listed = properties.get("listed")
+            if listed is not None and not listed:
                 gone.add(workspace_id)
         except Exception:
             continue
@@ -570,7 +600,7 @@ def _get_workspace_datasets(db, workspace_ids: set[str]) -> list[DatasetInfo]:
     results = []
 
     try:
-        workspace_ids = _drop_soft_deleted_workspaces(db, workspace_ids)
+        workspace_ids = _drop_unlistable_workspaces(db, workspace_ids)
         for workspace_id in workspace_ids:
             # Query both datasets and views collection groups
             for coll in ("datasets", "views"):
@@ -700,7 +730,18 @@ def get_service_document(
         # datasets disappeared but `<workspace>.information_schema.*` kept
         # showing up regardless - an empty-looking but still-present
         # workspace folder in the tree UI.
-        workspace_ids = _drop_soft_deleted_workspaces(
+        workspace_ids = _drop_unlistable_workspaces(
+            # `public` is unioned in BY NAME because it is universally readable and
+            # nothing in the caller's policies claim says so - implicit grants are
+            # never minted into a token.
+            #
+            # `samples` is universally readable on exactly the same footing and is
+            # DELIBERATELY NOT HERE. It holds the forkable sample datasets, which
+            # are five scale factors of TPC-H: adding it would put forty datasets
+            # in the catalog tree of every account on the platform, forever, to be
+            # forked once. Readable is not the same as worth listing. Anyone can
+            # still SELECT from it or CLONE it by name - see opteryx_access's
+            # `implicit_grants`, which is where both namespaces get their read.
             db, accessible_workstreams(access_policies_list) | {"public"}
         )
 

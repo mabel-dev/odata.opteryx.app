@@ -139,6 +139,20 @@ VIRTUAL_INFORMATION_SCHEMA_TABLES: dict[str, list[EdmProperty]] = {
         _col("outcome", "VARCHAR"),
         _col("created_at", "TIMESTAMP"),
     ],
+    "forks": [
+        # Two ends, one table: a row appears whether this workspace holds the
+        # fork or the dataset it was cloned from. Both are fully qualified, and
+        # exactly one of them is local to the workspace being read.
+        _col("fork", "VARCHAR"),
+        _col("upstream", "VARCHAR"),
+        _col("base_snapshot", "VARCHAR"),
+        # UPPER BOUNDS, not counts - a sequence number advances on every
+        # commit, maintenance included. Null on a row seen from the upstream's
+        # side, where the fork's own sequence is in another workspace.
+        _col("revisions_behind", "INTEGER"),
+        _col("revisions_ahead", "INTEGER"),
+        _col("last_sync", "TIMESTAMP"),
+    ],
     "column_relationships": [
         _col("constraint_catalog", "VARCHAR"),
         _col("constraint_collection", "VARCHAR"),
@@ -278,6 +292,13 @@ VIRTUAL_INFORMATION_SCHEMA_DESCRIPTIONS: dict[str, str] = {
         "- `last_window_to` is the version the last successful run consumed to\n"
         "- `listening` is YOUR subscription to the task's outcomes, or null"
     ),
+    "forks": (
+        "Datasets created from another by CREATE TABLE ... CLONE, and the "
+        "datasets they were cloned from - one row per relationship this "
+        "workspace is an end of. `revisions_behind` and `revisions_ahead` are "
+        "upper bounds, not counts: a sequence number advances on every commit, "
+        "compaction included, so report them as \"at most N\". Zero is exact."
+    ),
     "listeners": (
         "The tasks and materialized views YOU are subscribed to for run "
         "notifications - one row per subscription, yours only. `kind` is "
@@ -332,6 +353,11 @@ VIRTUAL_INFORMATION_SCHEMA_ACTIONS: dict[str, str] = {
     # caller's own, so any reader could have some.
     "listeners": "READ",
     "column_relationships": "READ",
+    # READ, like `listeners` and not GRANT like `grants`: a fork relationship
+    # is a fact about where data came from, not about who may reach it. The
+    # engine gates each row on READ of the dataset in THIS workspace, so a row
+    # only ever names a far end beside something the caller can already see.
+    "forks": "READ",
     "schemata": "READ",
     "grants": "GRANT",
 }

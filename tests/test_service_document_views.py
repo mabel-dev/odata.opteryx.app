@@ -41,7 +41,7 @@ def test_service_document_includes_views(monkeypatch):
     # get_service_document calls this directly now (not just inside the
     # mocked _get_workspace_datasets above), so it needs a stub too or it
     # hits the real Firestore batched read against the placeholder client.
-    monkeypatch.setattr(sd, "_drop_soft_deleted_workspaces", lambda db, ids: ids)
+    monkeypatch.setattr(sd, "_drop_unlistable_workspaces", lambda db, ids: ids)
 
     # Prepare request and claims
     req = DummyRequest()
@@ -66,7 +66,7 @@ def _service_document_names(monkeypatch, policies):
     monkeypatch.setattr(sd, "_get_personal_datasets", lambda db, identity: [])
     monkeypatch.setattr(sd, "_get_workspace_datasets", lambda db, ids: [])
     monkeypatch.setattr(sd, "_get_tasks", lambda db, ids: [])
-    monkeypatch.setattr(sd, "_drop_soft_deleted_workspaces", lambda db, ids: ids)
+    monkeypatch.setattr(sd, "_drop_unlistable_workspaces", lambda db, ids: ids)
 
     req = DummyRequest()
     req.state.claims = {"identity": "tester", "policies": policies}

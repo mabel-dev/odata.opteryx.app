@@ -115,7 +115,20 @@ def test_role_allows_read_covers_read_capable_roles():
 # gated on reading what the object writes rather than on owning it - so a
 # reader can hold rows here, and it is the only table where a non-owner
 # subscriber can see what they subscribed to.
-SHAPE_TABLES = ["tables", "columns", "views", "column_relationships", "schemata", "listeners"]
+#
+# `forks` sits here for the same kind of reason: where a dataset's data came
+# from is part of its shape, not a fact about who may reach it, and the engine
+# gates each row on READ of the dataset in this workspace - so a reader holds
+# exactly the rows for the datasets they can already see.
+SHAPE_TABLES = [
+    "tables",
+    "columns",
+    "views",
+    "column_relationships",
+    "schemata",
+    "listeners",
+    "forks",
+]
 OWNER_TABLES = ["triggers", "tasks", "grants"]
 
 

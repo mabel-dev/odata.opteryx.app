@@ -952,7 +952,27 @@ def get_edmx_metadata(request: Request) -> Any:
         # Which workspaces to *fetch* from the catalog. This is a superset of what the
         # caller may see -- a policy on "opteryx.ops.findings" reaches the "opteryx"
         # workspace -- so every dataset it returns is authorized individually below.
+        # `public` is unioned in BY NAME because it is universally readable and
+        # nothing in the caller's policies claim says so - implicit grants are
+        # never minted into a token.
+        #
+        # `samples` is universally readable on exactly the same footing and is
+        # DELIBERATELY NOT HERE. It holds the forkable sample datasets, which
+        # are five scale factors of TPC-H: adding it would put forty datasets
+        # in the catalog tree of every account on the platform, forever, to be
+        # forked once. Readable is not the same as worth listing. Anyone can
+        # still SELECT from it or CLONE it by name - see opteryx_access's
+        # `implicit_grants`, which is where both namespaces get their read.
         workspace_ids = accessible_workstreams(access_policies_list) | {"public"}
+
+        # A workspace that has asked not to be listed (`listed: false`) is
+        # dropped here too, by the same function and for the same reason the
+        # service document uses it: this document and that one describe the
+        # same catalog, and a workspace present in one and absent from the
+        # other is a client being told two different things.
+        from app.routes.v4.service_document import _drop_unlistable_workspaces
+
+        workspace_ids = _drop_unlistable_workspaces(db, workspace_ids)
 
         # Collect all datasets. The personal collection and the workspace
         # collection groups are unrelated Firestore queries, so overlap them.

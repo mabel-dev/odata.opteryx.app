@@ -1,4 +1,4 @@
-"""Tests for _drop_soft_deleted_workspaces: soft-deleted workspaces must not
+"""Tests for _drop_unlistable_workspaces: soft-deleted workspaces must not
 leak their datasets into the OData service document listing (see
 _get_workspace_datasets), even though their Firestore documents are still
 there for the restore grace period.
@@ -57,7 +57,7 @@ class RaisingDb(FakeDb):
 
 def test_drops_workspace_with_deleted_at_ms_set():
     db = FakeDb({"mitre": {"deleted-at-ms": 1755000000000}, "opteryx": {"deleted-at-ms": None}})
-    result = sd._drop_soft_deleted_workspaces(db, {"mitre", "opteryx"})
+    result = sd._drop_unlistable_workspaces(db, {"mitre", "opteryx"})
     assert result == {"opteryx"}
 
 
@@ -66,7 +66,7 @@ def test_keeps_public_and_personal_with_no_properties_doc():
     # may have no $properties doc at all -- absence must not read as gone
     # for these two specifically.
     db = FakeDb({"public": None, "personal": None})
-    result = sd._drop_soft_deleted_workspaces(db, {"public", "personal"})
+    result = sd._drop_unlistable_workspaces(db, {"public", "personal"})
     assert result == {"public", "personal"}
 
 
@@ -77,23 +77,23 @@ def test_drops_a_real_workspace_with_no_properties_doc():
     # dropped) looks like: indistinguishable at the Firestore level from a
     # name that never existed, and excluded here for the same reason.
     db = FakeDb({"mitre": None, "opteryx": {"deleted-at-ms": None}})
-    result = sd._drop_soft_deleted_workspaces(db, {"mitre", "opteryx"})
+    result = sd._drop_unlistable_workspaces(db, {"mitre", "opteryx"})
     assert result == {"opteryx"}
 
 
 def test_keeps_workspace_with_deleted_at_ms_none():
     db = FakeDb({"opteryx": {"deleted-at-ms": None, "owner": "justin"}})
-    result = sd._drop_soft_deleted_workspaces(db, {"opteryx"})
+    result = sd._drop_unlistable_workspaces(db, {"opteryx"})
     assert result == {"opteryx"}
 
 
 def test_empty_input_short_circuits_without_a_firestore_call():
     db = RaisingDb({})
-    result = sd._drop_soft_deleted_workspaces(db, set())
+    result = sd._drop_unlistable_workspaces(db, set())
     assert result == set()
 
 
 def test_fails_open_on_firestore_error():
     db = RaisingDb({})
-    result = sd._drop_soft_deleted_workspaces(db, {"mitre", "opteryx"})
+    result = sd._drop_unlistable_workspaces(db, {"mitre", "opteryx"})
     assert result == {"mitre", "opteryx"}
