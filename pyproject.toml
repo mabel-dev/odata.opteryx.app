@@ -11,7 +11,7 @@ dependencies = [
     "Brotli==1.2.0",
     "cryptography==50.0.1",
     "fastapi==0.141.1",
-    "google-cloud-firestore>=2.30.0",
+    "google-cloud-firestore>=2.31.0",
     "google-cloud-secret-manager==2.30.0",
     "google-cloud-storage==3.14.1",
     "opteryx-shared-services[web,storage,secrets]>=0.2.2",
@@ -31,7 +31,7 @@ dependencies = [
     # %28default%29 and every gRPC read fails with INVALID_ARGUMENT
     # "Invalid database id %28default%29". Named databases are unaffected.
     # Remove the cap once upstream ships a fixed release.
-    "google-api-core<2.36.0",
+    "google-api-core<2.38.0",
 ]
 
 [project.optional-dependencies]
