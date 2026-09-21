@@ -9,6 +9,9 @@ AggregateTransform and the common aggregate methods (COUNT, SUM, AVG,
 MIN, MAX). The builder is intentionally small and relies on the
 `ODataLogicalPlanBuilder` to supply helper methods for filters and node
 insertion.
+
+OData's aggregate method names are NOT the engine's aggregator names, and
+where they coincide it is a coincidence -- see `_METHOD_TO_AGGREGATOR`.
 """
 
 from typing import Any
@@ -19,6 +22,35 @@ from opteryx.models import Node
 from opteryx.models.logical_column import LogicalColumn
 from opteryx.expression import NodeType
 from opteryx.planner.logical_planner import LogicalPlanNode, LogicalPlanStepType
+
+
+# OData $apply aggregate method -> Opteryx aggregator name (opteryx.operators
+# .aggregate.helpers.AGGREGATORS). Spelled out in full rather than relying on
+# `method.upper()`: four of the five happen to uppercase to the engine's own
+# name, but OData's "average" is the engine's "AVG", and uppercasing alone
+# produced an unregistered "AVERAGE" aggregator -- which surfaced as a 500,
+# not the 400 an unsupported shape earns. Anything the parser can emit must
+# have an entry here; an unmapped method is a ValueError (a 400), never a
+# mistranslation. Keys are the parser's own lowercase spellings
+# (odata_query.apply: "count", "sum", "average", "min", "max").
+_METHOD_TO_AGGREGATOR: dict = {
+    "count": "COUNT",
+    "sum": "SUM",
+    "average": "AVG",
+    "min": "MIN",
+    "max": "MAX",
+}
+
+
+def _aggregator_for(method: str) -> str:
+    """Resolve an OData aggregate method to its Opteryx aggregator name."""
+    try:
+        return _METHOD_TO_AGGREGATOR[method.lower()]
+    except KeyError:
+        raise ValueError(
+            f"Unsupported aggregate method '{method}'. "
+            f"Expected: {', '.join(sorted(_METHOD_TO_AGGREGATOR))}"
+        ) from None
 
 
 def _build_aggregate_node(func: str, prop: Optional[str], alias: str) -> Node:
@@ -76,7 +108,7 @@ class ApplyLogicalPlanBuilder:
                 aggs = []
                 if transform.aggregate:
                     for expr in transform.aggregate.expressions:
-                        func = expr.method.upper()
+                        func = _aggregator_for(expr.method)
                         prop = expr.property_path  # None for $count
                         aggs.append(_build_aggregate_node(func, prop, expr.alias))
 
@@ -95,7 +127,7 @@ class ApplyLogicalPlanBuilder:
             elif isinstance(transform, AggregateTransform):
                 aggs = []
                 for expr in transform.expressions:
-                    func = expr.method.upper()
+                    func = _aggregator_for(expr.method)
                     prop = expr.property_path
                     prop = None if prop == "$count" else prop
                     aggs.append(_build_aggregate_node(func, prop, expr.alias))

@@ -133,6 +133,14 @@ class ApplyParser:
     method := 'sum' | 'average' | 'min' | 'max'
     """
 
+    # The exhaustive set of `with <method>` spellings this parser accepts. A
+    # class constant rather than a local so that consumers which must handle
+    # every method (app.odata.apply_builder's aggregator map) can pin
+    # themselves to it, and adding a method here without teaching them fails
+    # loudly instead of reaching the engine unmapped. Excludes '$count', which
+    # has its own syntax and yields method "count".
+    VALID_METHODS = ("sum", "average", "min", "max")
+
     def __init__(self, expr: str):
         self.expr = expr.strip()
         self.pos = 0
@@ -250,10 +258,9 @@ class ApplyParser:
         method = self._parse_identifier().lower()
 
         # Validate method
-        valid_methods = ["sum", "average", "min", "max"]
-        if method not in valid_methods:
+        if method not in self.VALID_METHODS:
             raise ApplyParseError(
-                f"Invalid aggregate method '{method}'. Expected: {', '.join(valid_methods)}"
+                f"Invalid aggregate method '{method}'. Expected: {', '.join(self.VALID_METHODS)}"
             )
 
         self._skip_whitespace()
