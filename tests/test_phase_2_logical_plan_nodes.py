@@ -37,7 +37,7 @@ def test_scan_node():
         print("✗ No Scan node found in plan")
         return False
 
-    print(f"✓ Scan node found with ID: {scan_node.node_id}")
+    print(f"✓ Scan node found with ID: {node_id}")
 
     # Check relation (table name)
     if not hasattr(scan_node, "relation") or scan_node.relation != "workstream.collection.dataset":
@@ -86,7 +86,7 @@ def test_filter_node():
         print("✗ No Filter node found in plan")
         return False
 
-    print(f"✓ Filter node found with ID: {filter_node.node_id}")
+    print(f"✓ Filter node found with ID: {node_id}")
 
     # Check condition exists
     if not hasattr(filter_node, "condition") or filter_node.condition is None:
@@ -141,7 +141,7 @@ def test_order_node():
         print("✗ No Order node found in plan")
         return False
 
-    print(f"✓ Order node found with ID: {order_node.node_id}")
+    print(f"✓ Order node found with ID: {node_id}")
 
     # Check order_by list
     if not hasattr(order_node, "order_by") or not order_node.order_by:
@@ -156,7 +156,7 @@ def test_order_node():
     # Check first order clause (name asc)
     first_order = order_node.order_by[0]
     # CRITICAL: Validate this is a LogicalColumn
-    from opteryx.models.logical_column import LogicalColumn
+    from opteryx.compiled.structures.expressions import LogicalColumn
 
     if not isinstance(first_order[0], LogicalColumn):
         print(f"✗ First order column should be LogicalColumn, got {type(first_order[0]).__name__}")
@@ -204,7 +204,7 @@ def test_limit_node():
         print("✗ No Limit node found in plan")
         return False
 
-    print(f"✓ Limit node found with ID: {limit_node.node_id}")
+    print(f"✓ Limit node found with ID: {node_id}")
 
     # Check limit value
     if not hasattr(limit_node, "limit") or limit_node.limit != 100:
@@ -243,7 +243,7 @@ def test_project_node():
         print("✗ No Project node found in plan")
         return False
 
-    print(f"✓ Project node found with ID: {project_node.node_id}")
+    print(f"✓ Project node found with ID: {node_id}")
 
     # Check columns list
     if not hasattr(project_node, "columns") or not project_node.columns:
@@ -270,8 +270,8 @@ def test_project_node():
     print(f"✓ All columns are IDENTIFIER nodes: {', '.join(expected_cols)}")
 
     # Check passthrough_columns attribute (should be empty list, not None).
-    # LogicalPlanNode.__getattr__ returns None for unset attributes, so an
-    # explicit `is None` check is what catches a stale/misspelled field name.
+    # ProjectStep defaults every declared field to None, so an explicit
+    # `is None` check is what catches the builder never setting it.
     assert (
         project_node.passthrough_columns is not None
     ), "Project node passthrough_columns is None (should be [])"
@@ -305,7 +305,7 @@ def test_exit_node():
         print("✗ No Exit node found in plan")
         return False
 
-    print(f"✓ Exit node found with ID: {exit_node.node_id}")
+    print(f"✓ Exit node found with ID: {node_id}")
 
     # Check it has columns (should be wildcard)
     if not hasattr(exit_node, "columns") or not exit_node.columns:

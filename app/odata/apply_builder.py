@@ -1,7 +1,7 @@
 """Convert parsed $apply AST into Opteryx logical plan nodes.
 
 This module provides a small builder that maps the vendored $apply AST
-(`parse_apply`) into Opteryx LogicalPlanNodes by mutating the
+(`parse_apply`) into Opteryx typed plan steps by mutating the
 `ODataLogicalPlanBuilder` (adding nodes via its `_add_node` method).
 
 Only a focused subset is implemented: FilterTransform, GroupByTransform,
@@ -18,10 +18,12 @@ from typing import Any
 from typing import Optional
 
 from odata_query.apply import parse_apply, AggregateTransform, GroupByTransform, FilterTransform
-from opteryx.models import Node
-from opteryx.models.logical_column import LogicalColumn
+from opteryx.compiled.structures.expressions import Aggregator
+from opteryx.compiled.structures.expressions import LogicalColumn
+from opteryx.compiled.structures.expressions import Wildcard
+from opteryx.compiled.structures.plan_steps import AggregateAndGroupStep
+from opteryx.compiled.structures.plan_steps import AggregateStep
 from opteryx.expression import NodeType
-from opteryx.planner.logical_planner import LogicalPlanNode, LogicalPlanStepType
 
 
 # OData $apply aggregate method -> Opteryx aggregator name (opteryx.operators
@@ -53,20 +55,18 @@ def _aggregator_for(method: str) -> str:
         ) from None
 
 
-def _build_aggregate_node(func: str, prop: Optional[str], alias: str) -> Node:
-    """Build a NodeType.AGGREGATOR node for one $apply aggregate expression.
+def _build_aggregate_node(func: str, prop: Optional[str], alias: str) -> Aggregator:
+    """Build an Aggregator expression for one $apply aggregate expression.
 
     `prop` is None for COUNT(*) (OData's "$count"); every other function takes
     a single column-identifier parameter.
     """
     if prop is None:
-        parameter = Node(node_type=NodeType.WILDCARD)
+        parameter = Wildcard()
     else:
         parameter = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column=prop, source=None, alias=None)
         parameter.query_column = prop
-    agg_node = Node(node_type=NodeType.AGGREGATOR, value=func, parameters=[parameter])
-    agg_node.alias = alias
-    return agg_node
+    return Aggregator(value=func, parameters=[parameter], alias=alias)
 
 
 class ApplyLogicalPlanBuilder:
@@ -112,7 +112,7 @@ class ApplyLogicalPlanBuilder:
                         prop = expr.property_path  # None for $count
                         aggs.append(_build_aggregate_node(func, prop, expr.alias))
 
-                agg_node = LogicalPlanNode(node_type=LogicalPlanStepType.AggregateAndGroup)
+                agg_node = AggregateAndGroupStep()
                 agg_node.groups = group_cols
                 agg_node.aggregates = aggs
                 # Required by the physical planner for AggregateAndGroup nodes:
@@ -135,7 +135,7 @@ class ApplyLogicalPlanBuilder:
                 # No group by -> global aggregation; use the ungrouped "Aggregate"
                 # step type (rather than AggregateAndGroup), which doesn't
                 # require a projection.
-                agg_node = LogicalPlanNode(node_type=LogicalPlanStepType.Aggregate)
+                agg_node = AggregateStep()
                 agg_node.groups = []
                 agg_node.aggregates = aggs
                 last_step = odata_builder._add_node(agg_node)

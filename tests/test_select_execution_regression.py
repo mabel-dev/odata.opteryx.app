@@ -6,8 +6,8 @@ and can run anywhere.
 
 Guards against the regression where the OData plan builder wrote the Project
 node's passthrough columns under the pre-0.9.44 name (`order_by_columns`).
-Because LogicalPlanNode.__getattr__ returns None for unset attributes, the
-stale write was accepted silently, `passthrough_columns` stayed None, and the
+Because the (since deleted) attribute-bag LogicalPlanNode returned None for
+unset attributes, the stale write was accepted silently, `passthrough_columns` stayed None, and the
 binder raised TypeError -- surfacing as a blanket HTTP 500 on every $select.
 """
 

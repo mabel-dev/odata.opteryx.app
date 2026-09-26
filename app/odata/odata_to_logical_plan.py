@@ -12,11 +12,20 @@ The conversion flow is:
 from typing import List
 from typing import Optional
 
+from opteryx.compiled.structures.expressions import Aggregator
+from opteryx.compiled.structures.expressions import Expression
+from opteryx.compiled.structures.expressions import LogicalColumn
+from opteryx.compiled.structures.expressions import Wildcard
+from opteryx.compiled.structures.plan_steps import AggregateStep
+from opteryx.compiled.structures.plan_steps import ExitStep
+from opteryx.compiled.structures.plan_steps import FilterStep
+from opteryx.compiled.structures.plan_steps import LimitStep
+from opteryx.compiled.structures.plan_steps import OrderStep
+from opteryx.compiled.structures.plan_steps import PlanStep
+from opteryx.compiled.structures.plan_steps import ProjectStep
+from opteryx.compiled.structures.plan_steps import ScanStep
 from opteryx.expression import NodeType
-from opteryx.models import Node
-from opteryx.models.logical_column import LogicalColumn
 from opteryx.planner.logical_planner import LogicalPlan
-from opteryx.planner.logical_planner import LogicalPlanNode
 from opteryx.planner.logical_planner import LogicalPlanStepType
 from opteryx.utils import random_string
 
@@ -59,15 +68,15 @@ class ODataLogicalPlanBuilder:
         # drops the "$derived" schema (where aggregate outputs live) before
         # resolving its own wildcard, so a bare Aggregate -> Exit plan built with
         # a wildcard would lose the aggregate's columns. Referencing the aggregate
-        # Node objects directly (set here) sidesteps that lookup entirely.
-        self._pending_aggregate_columns: Optional[List[Node]] = None
+        # expressions directly (set here) sidesteps that lookup entirely.
+        self._pending_aggregate_columns: Optional[List[Expression]] = None
         # Columns an explicit (non-wildcard) $select asked for, in the order the
         # caller wrote them. Consumed by _add_exit_node. A wildcard Exit would
         # emit every column the Project node carried -- including the
         # passthrough columns that exist only to keep ORDER BY working -- so
         # Exit has to name the $select columns itself for $select to actually
         # restrict the response (OData v4.01 Part 1 §11.2.4.1).
-        self._exit_columns: Optional[List[Node]] = None
+        self._exit_columns: Optional[List[Expression]] = None
 
     def build(
         self,
@@ -179,20 +188,16 @@ class ODataLogicalPlanBuilder:
         """
         # No group by -> global aggregation; use the ungrouped "Aggregate" step
         # type (rather than AggregateAndGroup), which doesn't require a projection.
-        agg_node = LogicalPlanNode(node_type=LogicalPlanStepType.Aggregate)
-        agg_node.groups = []
-        wildcard = Node(node_type=NodeType.WILDCARD)
-        count_node = Node(node_type=NodeType.AGGREGATOR, value="COUNT", parameters=[wildcard])
-        count_node.alias = "count"
-        agg_node.aggregates = [count_node]
+        count_node = Aggregator(value="COUNT", parameters=[Wildcard()], alias="count")
+        agg_node = AggregateStep(groups=[], aggregates=[count_node])
         self._pending_aggregate_columns = [count_node]
         return self._add_node(agg_node)
 
-    def _add_node(self, node: LogicalPlanNode) -> str:
+    def _add_node(self, node: PlanStep) -> str:
         """Add a node to the plan and connect it to the previous node.
 
         Args:
-            node: The LogicalPlanNode to add
+            node: The typed plan step to add
 
         Returns:
             The step_id of the newly added node
@@ -207,12 +212,13 @@ class ODataLogicalPlanBuilder:
 
     def _add_scan_node(self) -> str:
         """Add a Scan node to read the table."""
-        scan_node = LogicalPlanNode(node_type=LogicalPlanStepType.Scan)
-        scan_node.relation = self.table_name
-        scan_node.alias = self.table_name.split(".")[-1]  # Use dataset name as alias
-        scan_node.hints = []
-        scan_node.version = self.version
-        scan_node.version_tag = self.version_tag
+        scan_node = ScanStep(
+            relation=self.table_name,
+            alias=self.table_name.split(".")[-1],  # Use dataset name as alias
+            hints=[],
+            version=self.version,
+            version_tag=self.version_tag,
+        )
         # Don't set columns - binder will populate it
 
         return self._add_node(scan_node)
@@ -229,17 +235,14 @@ class ODataLogicalPlanBuilder:
         if not filter_expr:
             return self.current_step_id
 
-        filter_node = LogicalPlanNode(node_type=LogicalPlanStepType.Filter)
-
         # Parse filter expression using the dedicated expression parser
         condition = self.expression_parser.parse_filter(filter_expr)
         if condition is None:
             # If parsing returned None, skip the filter node
             return self.current_step_id
 
-        filter_node.condition = condition
         # Filter passes through all columns (doesn't change column set)
-        filter_node.columns = [Node(node_type=NodeType.WILDCARD)]
+        filter_node = FilterStep(condition=condition, columns=[Wildcard()])
 
         return self._add_node(filter_node)
 
@@ -262,12 +265,11 @@ class ODataLogicalPlanBuilder:
         if not computed_nodes:
             return self.current_step_id
 
-        project_node = LogicalPlanNode(node_type=LogicalPlanStepType.Project)
-        wildcard_node = Node(node_type=NodeType.WILDCARD)
-        wildcard_node.except_columns = None
-        project_node.columns = [wildcard_node] + computed_nodes
-        project_node.passthrough_columns = []
-        project_node.except_columns = []
+        project_node = ProjectStep(
+            columns=[Wildcard()] + computed_nodes,
+            passthrough_columns=[],
+            except_columns=[],
+        )
 
         return self._add_node(project_node)
 
@@ -337,12 +339,10 @@ class ODataLogicalPlanBuilder:
         Returns:
             Step ID of the order node
         """
-        order_node = LogicalPlanNode(node_type=LogicalPlanStepType.Order)
-
         # Parse orderby expression using the dedicated expression parser
         orderby_tuples = self.expression_parser.parse_orderby(orderby_expr)
 
-        # Convert to format Opteryx expects: List[Tuple[Node, bool]]
+        # Convert to format Opteryx expects: List[Tuple[Expression, bool]]
         # where bool is True for ascending, False for descending
         order_by_nodes = []
         for column_name, direction in orderby_tuples:
@@ -358,8 +358,8 @@ class ODataLogicalPlanBuilder:
             is_ascending = direction.lower() == "asc"
             order_by_nodes.append((col_node, is_ascending))
 
-        order_node.order_by = order_by_nodes
         # Don't set columns - binder will populate it
+        order_node = OrderStep(order_by=order_by_nodes)
 
         return self._add_node(order_node)
 
@@ -373,15 +373,8 @@ class ODataLogicalPlanBuilder:
         Returns:
             Step ID of the limit node
         """
-        limit_node = LogicalPlanNode(node_type=LogicalPlanStepType.Limit)
-
-        if top is not None:
-            limit_node.limit = top
-
-        if skip is not None:
-            limit_node.offset = skip
-
         # Don't set columns - binder will populate it
+        limit_node = LimitStep(limit=top, offset=skip)
 
         return self._add_node(limit_node)
 
@@ -409,23 +402,18 @@ class ODataLogicalPlanBuilder:
         # If the previous node is an AggregateAndGroup, validate $select columns
         prev_node = None
         if self.current_step_id is not None:
-            prev_node = self.plan._nodes.get(self.current_step_id)
+            prev_node = self.plan[self.current_step_id]
 
-        if prev_node is not None and getattr(prev_node, "node_type", None) in (
+        if prev_node is not None and prev_node.node_type in (
             LogicalPlanStepType.AggregateAndGroup,
             LogicalPlanStepType.Aggregate,
         ):
-            # Build set of allowed columns: group source_column names + aggregate aliases
-            allowed = set()
-            if getattr(prev_node, "groups", None):
-                for g in prev_node.groups:
-                    if getattr(g, "source_column", None):
-                        allowed.add(g.source_column)
-            if getattr(prev_node, "aggregates", None):
-                for a in prev_node.aggregates:
-                    alias = getattr(a, "alias", None)
-                    if alias:
-                        allowed.add(alias)
+            # Build set of allowed columns: group source_column names + aggregate
+            # aliases. Both are built by this service (apply_builder /
+            # _add_count_node): every group is a LogicalColumn and every aggregate
+            # an aliased Aggregator, so both fields are always present.
+            allowed = {g.source_column for g in prev_node.groups}
+            allowed.update(a.alias for a in prev_node.aggregates)
 
             # If select isn't '*', ensure every requested column is allowed
             if selected_cols_list != ["*"]:
@@ -433,18 +421,14 @@ class ODataLogicalPlanBuilder:
                     if col not in allowed:
                         raise ValueError(f"$select references column '{col}' which is not available after aggregation. Allowed: {sorted(list(allowed))}")
 
-        project_node = LogicalPlanNode(node_type=LogicalPlanStepType.Project)
-
         # Convert parsed columns to nodes
         columns = []
         selected_column_names = set(selected_cols_list) if selected_cols_list != ["*"] else set()
 
         # Check if this is a wildcard select
         if selected_cols_list == ["*"]:
-            # Use WILDCARD node to represent all columns
-            wildcard_node = Node(node_type=NodeType.WILDCARD)
-            wildcard_node.except_columns = None  # No exclusions for basic wildcard
-            columns.append(wildcard_node)
+            # Use a Wildcard (no exclusions) to represent all columns
+            columns.append(Wildcard())
             # With wildcard, all columns are selected, so passthrough_columns will be empty
         else:
             # Parse individual columns
@@ -471,8 +455,6 @@ class ODataLogicalPlanBuilder:
 
             self._exit_columns = exit_columns
 
-        project_node.columns = columns
-
         # Compute passthrough_columns: columns in ORDER BY but not in SELECT
         # This allows ordering by columns that aren't in the final projection
         passthrough_columns = []
@@ -490,15 +472,18 @@ class ODataLogicalPlanBuilder:
                     col_node.query_column = col_name
                     passthrough_columns.append(col_node)
 
-        project_node.passthrough_columns = passthrough_columns
-        # Initialize except_columns as empty list (for EXCEPT modifier if needed)
-        project_node.except_columns = []
+        # except_columns is empty: OData $select has no EXCEPT modifier
+        project_node = ProjectStep(
+            columns=columns,
+            passthrough_columns=passthrough_columns,
+            except_columns=[],
+        )
 
         return self._add_node(project_node)
 
     def _add_exit_node(self) -> str:
         """Add an Exit node to mark the end of the plan."""
-        exit_node = LogicalPlanNode(node_type=LogicalPlanStepType.Exit)
+        exit_node = ExitStep()
         if self._pending_aggregate_columns is not None:
             # Reference the aggregate's output nodes directly rather than a
             # wildcard — see the note on self._pending_aggregate_columns.
@@ -510,9 +495,9 @@ class ODataLogicalPlanBuilder:
             # columns reaching the response.
             exit_node.columns = list(self._exit_columns)
         else:
-            # Use WILDCARD node to represent "*" - all columns
+            # A Wildcard represents "*" - all columns
             # This tells the optimizer we want all columns from the previous step
-            exit_node.columns = [Node(node_type=NodeType.WILDCARD)]
+            exit_node.columns = [Wildcard()]
         return self._add_node(exit_node)
 
     def get_plan(self) -> LogicalPlan:

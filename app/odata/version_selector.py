@@ -24,7 +24,7 @@ def split_dataset_label(raw: str) -> Tuple[str, Optional[str]]:
 
 def label_to_version_kwargs(label: Optional[str]) -> dict:
     """Map a parsed label to the version/version_tag kwargs opteryx's
-    VERSION AS OF already understands (LogicalPlanNode.version / .version_tag,
+    VERSION AS OF already understands (ScanStep.version / .version_tag,
     opteryx/planner/binder/dataset.py)."""
     if label is None:
         return {}

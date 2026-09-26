@@ -7,8 +7,8 @@ Two things are easy to get wrong when doing this by hand, and both are handled
 here:
 
 1. `types.ModuleType("opteryx")` is a *module*, not a package, so a later
-   `from opteryx.models import Node` fails with
-   "No module named 'opteryx.models'; 'opteryx' is not a package".
+   `from opteryx.compiled.structures.expressions import Wildcard` fails with
+   "No module named 'opteryx.compiled'; 'opteryx' is not a package".
    Stub packages therefore need a `__path__` -- see `_package()`.
 
 2. Stubs installed at import time stay in `sys.modules` for the rest of the
@@ -30,13 +30,15 @@ from pathlib import Path
 # Every name the stubs replace; recorded so teardown can restore exactly.
 _STUBBED_NAMES = [
     "opteryx",
+    "opteryx.compiled",
+    "opteryx.compiled.structures",
+    "opteryx.compiled.structures.expressions",
+    "opteryx.compiled.structures.plan_steps",
     "opteryx.connectors",
     "opteryx.connectors.mabel_connector",
     "opteryx.connectors.postgres_connector",
     "opteryx.constants",
     "opteryx.expression",
-    "opteryx.models",
-    "opteryx.models.logical_column",
     "opteryx.planner",
     "opteryx.planner.logical_planner",
     "opteryx.utils",
@@ -135,19 +137,27 @@ def _build_stubs():
     expression.NodeType = type("NodeType", (), {})
     stubs["opteryx.expression"] = expression
 
-    models = _package("opteryx.models")
-    models.Node = type("Node", (), {})
-    stubs["opteryx.models"] = models
+    # The typed expression and plan-step classes the OData plan builder imports.
+    stubs["opteryx.compiled"] = _package("opteryx.compiled")
+    stubs["opteryx.compiled.structures"] = _package("opteryx.compiled.structures")
 
-    logical_column = types.ModuleType("opteryx.models.logical_column")
-    logical_column.LogicalColumn = type("LogicalColumn", (), {})
-    stubs["opteryx.models.logical_column"] = logical_column
+    expressions = types.ModuleType("opteryx.compiled.structures.expressions")
+    for name in ("Aggregator", "Expression", "LogicalColumn", "Wildcard"):
+        setattr(expressions, name, type(name, (), {}))
+    stubs["opteryx.compiled.structures.expressions"] = expressions
+
+    plan_steps = types.ModuleType("opteryx.compiled.structures.plan_steps")
+    for name in (
+        "AggregateAndGroupStep", "AggregateStep", "ExitStep", "FilterStep",
+        "LimitStep", "OrderStep", "PlanStep", "ProjectStep", "ScanStep",
+    ):
+        setattr(plan_steps, name, type(name, (), {}))
+    stubs["opteryx.compiled.structures.plan_steps"] = plan_steps
 
     stubs["opteryx.planner"] = _package("opteryx.planner")
 
     logical_planner = types.ModuleType("opteryx.planner.logical_planner")
     logical_planner.LogicalPlan = type("LogicalPlan", (), {})
-    logical_planner.LogicalPlanNode = type("LogicalPlanNode", (), {})
     logical_planner.LogicalPlanStepType = type("LogicalPlanStepType", (), {})
     stubs["opteryx.planner.logical_planner"] = logical_planner
 

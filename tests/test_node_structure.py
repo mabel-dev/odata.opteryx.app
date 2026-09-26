@@ -21,7 +21,7 @@ def test_scan_node_structure():
     nodes_list = list(our_plan.nodes(True))  # Get (id, node) tuples
     for node_id, node in nodes_list:
         print(f"  Node {node_id}:")
-        print(f"    step_type: {node.step_type}")
+        print(f"    step_type: {node.node_type}")
         print(f"    relation: {node.relation if hasattr(node, 'relation') else 'N/A'}")
         print(f"    columns: {node.columns if hasattr(node, 'columns') else 'N/A'}")
         print(f"    alias: {node.alias if hasattr(node, 'alias') else 'N/A'}")
@@ -29,9 +29,9 @@ def test_scan_node_structure():
     # Identify the Scan node
     print("\n=== Scan Node Details ===")
     for node_id, node in nodes_list:
-        if node.step_type and "Scan" in str(node.step_type):
+        if node.node_type and "Scan" in str(node.node_type):
             print(f"Found Scan node: {node_id}")
-            print(f"  Properties: {vars(node)}")
+            print(f"  Properties: {node.field_values()}")
 
 
 def test_filter_node_structure():
@@ -45,7 +45,7 @@ def test_filter_node_structure():
     print(f"Our plan with filter nodes: {len(our_plan.nodes())}")
     for node_id in our_plan.nodes():
         node = our_plan[node_id]
-        print(f"  Node {node_id}: type={node.step_type}")
+        print(f"  Node {node_id}: type={node.node_type}")
         if hasattr(node, "condition"):
             print(f"    condition: {node.condition}")
 

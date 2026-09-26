@@ -47,8 +47,9 @@ import pytest
 from opteryx.models.file_entry import FileEntry
 from opteryx.models.manifest import Manifest
 from opteryx.planner.logical_planner import LogicalPlanStepType
+from opteryx.planner.plan_context import PlanContext
 from opteryx.types.logical_type import DATE, TIMESTAMP
-from opteryx.types.schema import RelationSchema, SchemaColumn, mint_column_identity
+from opteryx.types.schema import ColumnDescriptor, RelationDescriptor
 
 from app.odata.odata_to_logical_plan import build_logical_plan
 
@@ -76,18 +77,18 @@ def _filter_condition(filter_expr, table_name="public.security.cisa_kev"):
     raise AssertionError(f"no Filter node in the plan for {filter_expr!r}")
 
 
-def _manifest(column_type, lower, upper, column_name="date_added"):
+def _manifest(column_type, lower, upper, plan_context, column_name="date_added"):
     """One file whose bounds straddle the filter boundary, so a correct
-    comparison keeps it and only an incorrect one drops it."""
-    schema = RelationSchema(
+    comparison keeps it and only an incorrect one drops it.
+
+    Built the way the binder builds a scan's manifest (binder/dataset.py
+    `visit_scan`): the source describes the relation with a RelationDescriptor,
+    the Manifest is built over that description, and the query's ColumnTable
+    binds it - the manifest's statistics are keyed by BOUND column identity, so
+    it reads the bound schema from then on."""
+    descriptor = RelationDescriptor(
         name="cisa_kev",
-        columns=[
-            SchemaColumn(
-                name=column_name,
-                column_type=column_type,
-                identity=mint_column_identity("cisa_kev", column_name),
-            )
-        ],
+        columns=[ColumnDescriptor(name=column_name, column_type=column_type)],
     )
     file_entry = FileEntry(
         file_path="data/cisa_kev/0000.parquet",
@@ -102,17 +103,23 @@ def _manifest(column_type, lower, upper, column_name="date_added"):
     # DATE32/TIMESTAMP64 - the ordinal key IS the raw tick - so the mismatch
     # survives ordinalisation unchanged. Set explicitly rather than defaulted,
     # so this stays the shape production actually executes.
-    return Manifest(files=[file_entry], schema=schema, bounds_are_ordinal=True)
+    manifest = Manifest(files=[file_entry], schema=descriptor, bounds_are_ordinal=True)
+    manifest.schema = plan_context.columns.bind_relation(descriptor, "cisa_kev")
+    return manifest
 
 
 def _surviving_files(column_type, bounds, filter_expr):
-    manifest = _manifest(column_type, *bounds)
+    # One query's planning context for the manifest and the prune, as in a
+    # real query: the binder binds the scan and the optimizer prunes in the
+    # same PlanContext.
+    plan_context = PlanContext()
+    manifest = _manifest(column_type, *bounds, plan_context=plan_context)
     # `prune_files` does not mutate: it returns the pruned manifest and leaves
     # this one whole. Discarding the return value read the ORIGINAL file list,
     # which made every "reads the data" assertion pass vacuously and every
     # "still prunes" assertion impossible - the test could not see a prune at
     # all, so it could not have caught the regression it exists to pin.
-    return manifest.prune_files([_filter_condition(filter_expr)]).files
+    return manifest.prune_files([_filter_condition(filter_expr)], plan_context=plan_context).files
 
 
 # ---------------------------------------------------------------------------

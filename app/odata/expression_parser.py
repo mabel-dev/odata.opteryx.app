@@ -21,6 +21,7 @@ if _vendored_path not in sys.path:
     sys.path.insert(0, _vendored_path)
 
 from odata_query.exceptions import FunctionCallException
+from opteryx.compiled.structures.expressions import Expression
 from odata_query.grammar import ODataLexer
 from odata_query.grammar import ODataParser
 
@@ -150,7 +151,7 @@ class ODataExpressionParser:
         """Initialize the parser."""
         self.lexer, self.parser = _get_lexer_and_parser()
 
-    def parse_filter(self, filter_expr: str) -> Optional[Node]:
+    def parse_filter(self, filter_expr: str) -> Optional[Expression]:
         """Parse an OData $filter expression into an Opteryx expression node.
 
         Args:
@@ -254,7 +255,7 @@ class ODataExpressionParser:
 
         return None
 
-    def parse_compute(self, compute_expr: str) -> List[Node]:
+    def parse_compute(self, compute_expr: str) -> List[Expression]:
         """Parse an OData $compute expression into aliased Opteryx expression nodes.
 
         Args:
@@ -280,7 +281,7 @@ class ODataExpressionParser:
         if not compute_expr or not compute_expr.strip():
             return []
 
-        computed_nodes: List[Node] = []
+        computed_nodes: List[Expression] = []
         seen_aliases = set()
         for raw_clause in _split_top_level(compute_expr, ","):
             clause = raw_clause.strip()

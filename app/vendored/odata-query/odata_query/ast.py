@@ -50,7 +50,7 @@ class Identifier(_Node):
     def to_opteryx_node(self):
         """Convert to Opteryx LogicalColumn."""
         from opteryx.expression import NodeType
-        from opteryx.models.logical_column import LogicalColumn
+        from opteryx.compiled.structures.expressions import LogicalColumn
 
         # LogicalColumn constructor: (node_type, source_column, ...)
         return LogicalColumn(NodeType.IDENTIFIER, self.name)
@@ -81,11 +81,10 @@ class Null(_Literal):
         return None
 
     def to_opteryx_node(self):
-        from opteryx.expression import NodeType
-        from opteryx.models import Node
+        from opteryx.compiled.structures.expressions import Literal
         from opteryx.types.logical_type import ARRAY, BOOLEAN, DATE, FLOAT64, INT64, INTERVAL, NULL, TIME, TIMESTAMP, VARCHAR
 
-        return Node(NodeType.LITERAL, type=NULL, value=None)
+        return Literal(value=None, type=NULL)
 
 
 @dataclass(frozen=True)
@@ -97,11 +96,10 @@ class Integer(_Literal):
         return int(self.val)
 
     def to_opteryx_node(self):
-        from opteryx.expression import NodeType
-        from opteryx.models import Node
+        from opteryx.compiled.structures.expressions import Literal
         from opteryx.types.logical_type import ARRAY, BOOLEAN, DATE, FLOAT64, INT64, INTERVAL, NULL, TIME, TIMESTAMP, VARCHAR
 
-        return Node(NodeType.LITERAL, type=INT64, value=self.py_val)
+        return Literal(value=self.py_val, type=INT64)
 
 
 @dataclass(frozen=True)
@@ -113,11 +111,10 @@ class Float(_Literal):
         return float(self.val)
 
     def to_opteryx_node(self):
-        from opteryx.expression import NodeType
-        from opteryx.models import Node
+        from opteryx.compiled.structures.expressions import Literal
         from opteryx.types.logical_type import ARRAY, BOOLEAN, DATE, FLOAT64, INT64, INTERVAL, NULL, TIME, TIMESTAMP, VARCHAR
 
-        return Node(NodeType.LITERAL, type=FLOAT64, value=self.py_val)
+        return Literal(value=self.py_val, type=FLOAT64)
 
 
 @dataclass(frozen=True)
@@ -129,11 +126,10 @@ class Boolean(_Literal):
         return self.val.lower() == "true"
 
     def to_opteryx_node(self):
-        from opteryx.expression import NodeType
-        from opteryx.models import Node
+        from opteryx.compiled.structures.expressions import Literal
         from opteryx.types.logical_type import ARRAY, BOOLEAN, DATE, FLOAT64, INT64, INTERVAL, NULL, TIME, TIMESTAMP, VARCHAR
 
-        return Node(NodeType.LITERAL, type=BOOLEAN, value=self.py_val)
+        return Literal(value=self.py_val, type=BOOLEAN)
 
 
 @dataclass(frozen=True)
@@ -145,11 +141,10 @@ class String(_Literal):
         return self.val
 
     def to_opteryx_node(self):
-        from opteryx.expression import NodeType
-        from opteryx.models import Node
+        from opteryx.compiled.structures.expressions import Literal
         from opteryx.types.logical_type import ARRAY, BOOLEAN, DATE, FLOAT64, INT64, INTERVAL, NULL, TIME, TIMESTAMP, VARCHAR
 
-        return Node(NodeType.LITERAL, type=VARCHAR, value=self.val)
+        return Literal(value=self.val, type=VARCHAR)
 
 
 @dataclass(frozen=True)
@@ -169,8 +164,7 @@ class Date(_Literal):
         return dt.date.fromisoformat(self.val)
 
     def to_opteryx_node(self):
-        from opteryx.expression import NodeType
-        from opteryx.models import Node
+        from opteryx.compiled.structures.expressions import Literal
         from opteryx.types.logical_type import ARRAY, BOOLEAN, DATE, FLOAT64, INT64, INTERVAL, NULL, TIME, TIMESTAMP, VARCHAR
         from opteryx.types.timestamps._datetime_conversion import date_to_int64_days
 
@@ -179,9 +173,9 @@ class Date(_Literal):
         if parsed is not None:
             # DATE literals must be encoded as int32 days-since-epoch, matching
             # how Opteryx's own CAST(... AS DATE) folding stores them.
-            return Node(NodeType.LITERAL, type=DATE, value=date_to_int64_days(parsed))
+            return Literal(value=date_to_int64_days(parsed), type=DATE)
         # Fallback to string if parsing fails
-        return Node(NodeType.LITERAL, type=VARCHAR, value=self.val)
+        return Literal(value=self.val, type=VARCHAR)
 
 
 @dataclass(frozen=True)
@@ -193,16 +187,15 @@ class Time(_Literal):
         return dt.time.fromisoformat(self.val)
 
     def to_opteryx_node(self):
-        from opteryx.expression import NodeType
-        from opteryx.models import Node
+        from opteryx.compiled.structures.expressions import Literal
         from opteryx.types.logical_type import ARRAY, BOOLEAN, DATE, FLOAT64, INT64, INTERVAL, NULL, TIME, TIMESTAMP, VARCHAR
 
         # Try to parse ISO string to datetime for proper filtering
         parsed = try_parse_iso(self.val)
         if parsed is not None:
-            return Node(NodeType.LITERAL, type=TIME(), value=parsed)
+            return Literal(value=parsed, type=TIME())
         # Fallback to string if parsing fails
-        return Node(NodeType.LITERAL, type=VARCHAR, value=self.val)
+        return Literal(value=self.val, type=VARCHAR)
 
 
 @dataclass(frozen=True)
@@ -217,8 +210,7 @@ class DateTime(_Literal):
         return parsed
 
     def to_opteryx_node(self):
-        from opteryx.expression import NodeType
-        from opteryx.models import Node
+        from opteryx.compiled.structures.expressions import Literal
         from opteryx.types.logical_type import ARRAY, BOOLEAN, DATE, FLOAT64, INT64, INTERVAL, NULL, TIME, TIMESTAMP, VARCHAR
         from opteryx.types.timestamps._datetime_conversion import timestamp_to_int64_us
 
@@ -227,9 +219,9 @@ class DateTime(_Literal):
         if parsed is not None:
             # TIMESTAMP literals must be encoded as int64 microseconds-since-epoch,
             # matching how Opteryx's own CAST(... AS TIMESTAMP) folding stores them.
-            return Node(NodeType.LITERAL, type=TIMESTAMP(), value=timestamp_to_int64_us(parsed))
+            return Literal(value=timestamp_to_int64_us(parsed), type=TIMESTAMP())
         # Fallback to string if parsing fails
-        return Node(NodeType.LITERAL, type=VARCHAR, value=self.val)
+        return Literal(value=self.val, type=VARCHAR)
 
 
 @dataclass(frozen=True)
@@ -258,8 +250,7 @@ class Duration(_Literal):
         return delta
 
     def to_opteryx_node(self):
-        from opteryx.expression import NodeType
-        from opteryx.models import Node
+        from opteryx.compiled.structures.expressions import Literal
         from opteryx.types.logical_type import ARRAY, BOOLEAN, DATE, FLOAT64, INT64, INTERVAL, NULL, TIME, TIMESTAMP, VARCHAR
 
         # INTERVAL literals are a (months, microseconds) pair in Opteryx, not a
@@ -272,7 +263,7 @@ class Duration(_Literal):
         # Splitting years/months into the months half rather than approximating
         # them as 365.25/30.44 days is also what makes `P1Y` mean a calendar year:
         # month arithmetic is calendar-aware in the engine, day arithmetic is not.
-        return Node(NodeType.LITERAL, type=INTERVAL, value=self.interval_val)
+        return Literal(value=self.interval_val, type=INTERVAL)
 
     @property
     def interval_val(self) -> Tuple[int, int]:
@@ -343,8 +334,7 @@ class List(_Literal):
         return [v.py_val for v in self.val]
 
     def to_opteryx_node(self):
-        from opteryx.expression import NodeType
-        from opteryx.models import Node
+        from opteryx.compiled.structures.expressions import Literal
         from opteryx.types.logical_type import ARRAY, BOOLEAN, DATE, FLOAT64, INT64, INTERVAL, NULL, TIME, TIMESTAMP, VARCHAR
 
         # Convert each element to a node, then extract Python values
@@ -355,12 +345,7 @@ class List(_Literal):
         element_types = {node.type for node in element_nodes}
         element_type = element_types.pop() if len(element_types) == 1 else VARCHAR
 
-        return Node(
-            node_type=NodeType.LITERAL,
-            type=ARRAY(element_type),
-            element_type=None,
-            value=value_list,
-        )
+        return Literal(value=value_list, type=ARRAY(element_type))
 
 
 ###############################################################################
@@ -404,8 +389,7 @@ class BinOp(_Node):
 
     def to_opteryx_node(self):
         """Convert a binary arithmetic expression to an Opteryx BINARY_OPERATOR node."""
-        from opteryx.expression import NodeType
-        from opteryx.models import Node
+        from opteryx.compiled.structures.expressions import BinaryOperator
 
         left_node = self.left.to_opteryx_node()
         right_node = self.right.to_opteryx_node()
@@ -422,9 +406,7 @@ class BinOp(_Node):
         if op_name is None:
             raise ValueError(f"Unknown binary operator: {type(self.op).__name__}")
 
-        return Node(
-            node_type=NodeType.BINARY_OPERATOR, value=op_name, left=left_node, right=right_node
-        )
+        return BinaryOperator(value=op_name, left=left_node, right=right_node)
 
 
 ###############################################################################
@@ -478,7 +460,10 @@ class Compare(_Node):
 
     def to_opteryx_node(self):
         from opteryx.expression import NodeType
-        from opteryx.models import Node
+        from opteryx.compiled.structures.expressions import Comparison
+        from opteryx.compiled.structures.expressions import Literal
+        from opteryx.compiled.structures.expressions import Or
+        from opteryx.compiled.structures.expressions import UnaryOperator
 
         left_node = self.left.to_opteryx_node()
         right_node = self.right.to_opteryx_node()
@@ -486,16 +471,16 @@ class Compare(_Node):
         # Check if comparing to NULL - convert to IS NULL / IS NOT NULL unary operators
         if right_node.node_type == NodeType.LITERAL and str(right_node.type) == "NULL":
             if isinstance(self.comparator, Eq):
-                return Node(node_type=NodeType.UNARY_OPERATOR, value="IsNull", centre=left_node)
+                return UnaryOperator(value="IsNull", centre=left_node)
             elif isinstance(self.comparator, NotEq):
-                return Node(node_type=NodeType.UNARY_OPERATOR, value="IsNotNull", centre=left_node)
+                return UnaryOperator(value="IsNotNull", centre=left_node)
 
         # Special-case IN: expand `col IN (a,b,c)` into `col = a OR col = b OR col = c`
         if isinstance(self.comparator, In) and isinstance(self.right, List):
             # Build equality comparisons for each element
             element_nodes = [elem.to_opteryx_node() for elem in self.right.val]
             eq_nodes = [
-                Node(node_type=NodeType.COMPARISON_OPERATOR, value="Eq", left=left_node, right=en)
+                Comparison(value="Eq", left=left_node, right=en)
                 for en in element_nodes
             ]
 
@@ -504,11 +489,11 @@ class Compare(_Node):
                 # Empty IN () should return a constant-false literal, not col = false
                 from opteryx.types.logical_type import ARRAY, BOOLEAN, DATE, FLOAT64, INT64, INTERVAL, NULL, TIME, TIMESTAMP, VARCHAR
 
-                return Node(node_type=NodeType.LITERAL, type=BOOLEAN, value=False)
+                return Literal(value=False, type=BOOLEAN)
 
             result = eq_nodes[0]
             for en in eq_nodes[1:]:
-                result = Node(node_type=NodeType.OR, value="Or", left=result, right=en)
+                result = Or(value="Or", left=result, right=en)
             return result
 
         # Map comparator types to operator names
@@ -526,12 +511,7 @@ class Compare(_Node):
         if op_name is None:
             raise ValueError(f"Unknown comparator: {type(self.comparator).__name__}")
 
-        return Node(
-            node_type=NodeType.COMPARISON_OPERATOR,
-            value=op_name,
-            left=left_node,
-            right=right_node,
-        )
+        return Comparison(value=op_name, left=left_node, right=right_node)
 
 
 ###############################################################################
@@ -559,23 +539,23 @@ class BoolOp(_Node):
     right: _Node
 
     def to_opteryx_node(self):
-        from opteryx.expression import NodeType
-        from opteryx.models import Node
+        from opteryx.compiled.structures.expressions import And as AndExpression
+        from opteryx.compiled.structures.expressions import Or as OrExpression
 
         op_map = {
-            "And": (NodeType.AND, "And"),
-            "Or": (NodeType.OR, "Or"),
+            "And": (AndExpression, "And"),
+            "Or": (OrExpression, "Or"),
         }
 
         result = op_map.get(type(self.op).__name__)
         if result is None:
             raise ValueError(f"Unknown boolean operator: {type(self.op).__name__}")
 
-        op_type, op_value = result
+        op_class, op_value = result
         left_node = self.left.to_opteryx_node()
         right_node = self.right.to_opteryx_node()
 
-        return Node(op_type, value=op_value, left=left_node, right=right_node)
+        return op_class(value=op_value, left=left_node, right=right_node)
 
 
 ###############################################################################
@@ -602,12 +582,11 @@ class UnaryOp(_Node):
     operand: _Node
 
     def to_opteryx_node(self):
-        from opteryx.expression import NodeType
-        from opteryx.models import Node
+        from opteryx.compiled.structures.expressions import Not as NotExpression
 
         if isinstance(self.op, Not):
             operand_node = self.operand.to_opteryx_node()
-            return Node(NodeType.NOT, centre=operand_node)
+            return NotExpression(centre=operand_node)
         else:
             raise ValueError(f"Unknown unary operator: {type(self.op).__name__}")
 
@@ -642,7 +621,12 @@ class Call(_Node):
 
     def to_opteryx_node(self):
         from opteryx.expression import NodeType
-        from opteryx.models import Node
+        from opteryx.compiled.structures.expressions import BinaryOperator
+        from opteryx.compiled.structures.expressions import Cast
+        from opteryx.compiled.structures.expressions import Comparison
+        from opteryx.compiled.structures.expressions import Function
+        from opteryx.compiled.structures.expressions import Literal
+        from opteryx.compiled.structures.expressions import Not as NotExpression
 
         # Get function name
         func_name = self.func.name
@@ -652,7 +636,7 @@ class Call(_Node):
 
         # Handle 'not' function as a NOT operator
         if func_name == "not" and len(arg_nodes) == 1:
-            return Node(node_type=NodeType.NOT, centre=arg_nodes[0])
+            return NotExpression(centre=arg_nodes[0])
 
         # Handle indexof specially - needs parameter swap and adjustment
         # OData: indexof(string, substring) returns 0-based index, -1 if not found
@@ -664,20 +648,15 @@ class Call(_Node):
             substring_node = arg_nodes[1]
 
             # Create POSITION(substring, string) call
-            position_call = Node(
-                node_type=NodeType.FUNCTION,
-                value="POSITION",
-                parameters=[substring_node, string_node],
-            )
+            position_call = Function(value="POSITION", parameters=[substring_node, string_node])
 
             # Subtract 1 to convert from 1-based to 0-based (POSITION(...) - 1)
             from opteryx.types.logical_type import ARRAY, BOOLEAN, DATE, FLOAT64, INT64, INTERVAL, NULL, TIME, TIMESTAMP, VARCHAR
 
-            return Node(
-                node_type=NodeType.BINARY_OPERATOR,
+            return BinaryOperator(
                 value="Minus",
                 left=position_call,
-                right=Node(node_type=NodeType.LITERAL, type=INT64, value=1),
+                right=Literal(value=1, type=INT64),
             )
 
         # Handle substring specially - OData is 0-based, SQL is 1-based
@@ -691,11 +670,10 @@ class Call(_Node):
             # Add 1 to start position to convert from 0-based to 1-based
             from opteryx.types.logical_type import ARRAY, BOOLEAN, DATE, FLOAT64, INT64, INTERVAL, NULL, TIME, TIMESTAMP, VARCHAR
 
-            adjusted_start = Node(
-                node_type=NodeType.BINARY_OPERATOR,
+            adjusted_start = BinaryOperator(
                 value="Plus",
                 left=start_node,
-                right=Node(node_type=NodeType.LITERAL, type=INT64, value=1),
+                right=Literal(value=1, type=INT64),
             )
 
             # Build parameter list with adjusted start
@@ -703,7 +681,7 @@ class Call(_Node):
             if len(arg_nodes) > 2:  # If length is provided
                 params.append(arg_nodes[2])
 
-            return Node(node_type=NodeType.FUNCTION, value="SUBSTRING", parameters=params)
+            return Function(value="SUBSTRING", parameters=params)
 
         # now() -> the query's wall clock, as Edm.DateTimeOffset (OData v4 §5.1.1.7).
         # Opteryx spells this NOW(); the planner folds it to a single timestamp per
@@ -714,7 +692,7 @@ class Call(_Node):
         # "the last 30 days" has to be written as a hardcoded literal range, which
         # is silently wrong the moment the query is reused on another day.
         if func_name == "now" and not arg_nodes:
-            return Node(node_type=NodeType.FUNCTION, value="NOW", parameters=[])
+            return Function(value="NOW", parameters=[])
 
         # year/month/day/hour/minute/second(temporal) -> EXTRACT(part, temporal).
         # Opteryx has no YEAR()/MONTH()/... function of its own: the part name is a
@@ -724,20 +702,16 @@ class Call(_Node):
         if func_name in _ODATA_DATE_PARTS and len(arg_nodes) == 1:
             from opteryx.types.logical_type import VARCHAR
 
-            return Node(
-                node_type=NodeType.FUNCTION,
+            return Function(
                 value="EXTRACT",
-                parameters=[
-                    Node(node_type=NodeType.LITERAL, type=VARCHAR, value=func_name),
-                    arg_nodes[0],
-                ],
+                parameters=[Literal(value=func_name, type=VARCHAR), arg_nodes[0]],
             )
 
         # date(timestamp) -> the date part, as Edm.Date. Opteryx spells this as a
         # cast rather than a function -- DATE is a type name there, and DATE(x) is
         # refused outright ("DATE is a type name, not a function").
         if func_name == "date" and len(arg_nodes) == 1:
-            return Node(node_type=NodeType.CAST, left=arg_nodes[0], value="DATE", parameters=None)
+            return Cast(left=arg_nodes[0], value="DATE", parameters=None)
 
         # The remaining OData v4 datetime functions have no Opteryx equivalent, and
         # are refused HERE rather than being handed to the binder as a function name
@@ -779,12 +753,7 @@ class Call(_Node):
                     "in_subnet",
                     expected_type="a quoted CIDR string, e.g. '192.168.4.0/24'",
                 )
-            return Node(
-                node_type=NodeType.COMPARISON_OPERATOR,
-                value="IPContainedBy",
-                left=ip_node,
-                right=cidr_node,
-            )
+            return Comparison(value="IPContainedBy", left=ip_node, right=cidr_node)
 
         # Helper function to escape LIKE metacharacters
         def escape_like_literal(s: str, escape_char: str = "\\") -> str:
@@ -809,15 +778,8 @@ class Call(_Node):
             # Escape metacharacters and append '%' to the pattern literal
             if pattern.node_type == NodeType.LITERAL:
                 escaped_value = escape_like_literal(str(pattern.value))
-                new_pattern = Node(
-                    node_type=NodeType.LITERAL, type=pattern.type, value=escaped_value + "%"
-                )
-                return Node(
-                    node_type=NodeType.COMPARISON_OPERATOR,
-                    value="Like",
-                    left=col_node,
-                    right=new_pattern,
-                )
+                new_pattern = Literal(value=escaped_value + "%", type=pattern.type)
+                return Comparison(value="Like", left=col_node, right=new_pattern)
 
         elif func_name == "endswith" and len(arg_nodes) == 2:
             # endswith(field, 'value') → field LIKE '%value'
@@ -826,15 +788,8 @@ class Call(_Node):
             # Escape metacharacters and prepend '%' to the pattern literal
             if pattern.node_type == NodeType.LITERAL:
                 escaped_value = escape_like_literal(str(pattern.value))
-                new_pattern = Node(
-                    node_type=NodeType.LITERAL, type=pattern.type, value="%" + escaped_value
-                )
-                return Node(
-                    node_type=NodeType.COMPARISON_OPERATOR,
-                    value="Like",
-                    left=col_node,
-                    right=new_pattern,
-                )
+                new_pattern = Literal(value="%" + escaped_value, type=pattern.type)
+                return Comparison(value="Like", left=col_node, right=new_pattern)
 
         elif func_name == "contains" and len(arg_nodes) == 2:
             # contains(field, 'value') → field LIKE '%value%'
@@ -843,17 +798,8 @@ class Call(_Node):
             # Escape metacharacters and wrap pattern with '%' on both sides
             if pattern.node_type == NodeType.LITERAL:
                 escaped_value = escape_like_literal(str(pattern.value))
-                new_pattern = Node(
-                    node_type=NodeType.LITERAL,
-                    type=pattern.type,
-                    value="%" + escaped_value + "%",
-                )
-                return Node(
-                    node_type=NodeType.COMPARISON_OPERATOR,
-                    value="Like",
-                    left=col_node,
-                    right=new_pattern,
-                )
+                new_pattern = Literal(value="%" + escaped_value + "%", type=pattern.type)
+                return Comparison(value="Like", left=col_node, right=new_pattern)
 
         # For all other functions, create a function call node
         # Map OData function names to SQL/Opteryx function names
@@ -877,7 +823,7 @@ class Call(_Node):
 
         sql_func_name = odata_to_sql_functions.get(func_name, sql_func_name)
 
-        return Node(node_type=NodeType.FUNCTION, value=sql_func_name, parameters=arg_nodes)
+        return Function(value=sql_func_name, parameters=arg_nodes)
 
 
 ###############################################################################

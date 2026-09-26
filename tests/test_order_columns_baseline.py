@@ -5,10 +5,11 @@ import sys
 
 import opteryx
 from opteryx.expression import NodeType
-from opteryx.models.logical_column import LogicalColumn
+from opteryx.compiled.structures.expressions import LogicalColumn
 from opteryx.planner.logical_planner import LogicalPlan
-from opteryx.planner.logical_planner import LogicalPlanNode
-from opteryx.planner.logical_planner import LogicalPlanStepType
+from opteryx.compiled.structures.plan_steps import OrderStep
+from opteryx.compiled.structures.plan_steps import ProjectStep
+from opteryx.compiled.structures.plan_steps import ScanStep
 from opteryx.utils import random_string
 
 sys.path.insert(1, os.path.join(sys.path[0], "../opteryx-core"))
@@ -23,14 +24,14 @@ def test_order_with_columns_empty():
 
     # Scan node
     scan_id = random_string()
-    scan_node = LogicalPlanNode(node_type=LogicalPlanStepType.Scan)
+    scan_node = ScanStep()
     scan_node.relation = "$planets"
     scan_node.columns = []
     plan.add_node(scan_id, scan_node)
 
     # Order node
     order_id = random_string()
-    order_node = LogicalPlanNode(node_type=LogicalPlanStepType.Order)
+    order_node = OrderStep()
     order_node.order_by = [(LogicalColumn(NodeType.IDENTIFIER, "id"), False)]
     order_node.columns = []  # Empty list
     plan.add_node(order_id, order_node)
@@ -54,14 +55,14 @@ def test_order_with_columns_none():
 
     # Scan node
     scan_id = random_string()
-    scan_node = LogicalPlanNode(node_type=LogicalPlanStepType.Scan)
+    scan_node = ScanStep()
     scan_node.relation = "$planets"
     scan_node.columns = []
     plan.add_node(scan_id, scan_node)
 
     # Order node
     order_id = random_string()
-    order_node = LogicalPlanNode(node_type=LogicalPlanStepType.Order)
+    order_node = OrderStep()
     order_node.order_by = [(LogicalColumn(NodeType.IDENTIFIER, "id"), False)]
     order_node.columns = None  # None
     plan.add_node(order_id, order_node)
@@ -84,17 +85,15 @@ def test_order_with_project():
     plan = LogicalPlan()
 
     # Scan
-    from opteryx.expression import Node
-
     scan_id = random_string()
-    scan_node = LogicalPlanNode(node_type=LogicalPlanStepType.Scan)
+    scan_node = ScanStep()
     scan_node.relation = "$planets"
     scan_node.columns = []
     plan.add_node(scan_id, scan_node)
 
     # Order
     order_id = random_string()
-    order_node = LogicalPlanNode(node_type=LogicalPlanStepType.Order)
+    order_node = OrderStep()
     order_node.order_by = [(LogicalColumn(NodeType.IDENTIFIER, "id"), False)]
     order_node.columns = []  # Test with empty list
     plan.add_node(order_id, order_node)
@@ -102,10 +101,10 @@ def test_order_with_project():
 
     # Project
     project_id = random_string()
-    project_node = LogicalPlanNode(node_type=LogicalPlanStepType.Project)
+    project_node = ProjectStep()
     project_node.columns = [
-        Node(NodeType.IDENTIFIER, source_column="id", current_name="id"),
-        Node(NodeType.IDENTIFIER, source_column="name", current_name="name"),
+        LogicalColumn(NodeType.IDENTIFIER, "id"),
+        LogicalColumn(NodeType.IDENTIFIER, "name"),
     ]
     plan.add_node(project_id, project_node)
     plan.add_edge(order_id, project_id)

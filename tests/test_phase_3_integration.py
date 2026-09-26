@@ -145,7 +145,7 @@ def test_3_3_select_with_orderby():
         if order_node.order_by and len(order_node.order_by) > 0:
             print(f"  ✓ Order columns present: {len(order_node.order_by)}")
             col, direction = order_node.order_by[0]
-            print(f"    Column: {col.current_column_name}")
+            print(f"    Column: {col.current_name}")
             print(f"    Direction: {'ASC' if direction else 'DESC'}")
             if direction is True:  # True = ASC
                 print("  ✓ Order direction correct (ASC)")

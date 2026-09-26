@@ -5,7 +5,7 @@ import sys
 
 import opteryx
 from opteryx.expression import NodeType
-from opteryx.models.logical_column import LogicalColumn
+from opteryx.compiled.structures.expressions import LogicalColumn
 
 from app.odata.odata_to_logical_plan import ODataLogicalPlanBuilder
 
