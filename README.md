@@ -212,6 +212,14 @@ $filter=tolower(name) eq tolower('earth')&$top=10
 **Network Functions:**
 - `in_subnet(field, 'cidr')` - IPv4 CIDR containment, e.g. `in_subnet(src_addr, '192.168.4.0/24')`. `field` must be an IPv4-typed column. This is an Opteryx extension, not part of the OData v4 spec; OData has no containment operator, and PostgreSQL's `<<=` is not valid OData syntax.
 
+**Type Functions:**
+- `cast(field, Edm.Type)` - converts a value to another type before comparing it, e.g. `cast(code, Edm.Int32) gt 10` on a numeric code stored as text, or `cast(price, Edm.String) eq '9.75'`. Supported targets: `Edm.String`, `Edm.Boolean`, `Edm.Byte`, `Edm.SByte`, `Edm.Int16`, `Edm.Int32`, `Edm.Int64`, `Edm.Single`, `Edm.Double`, `Edm.Decimal`, `Edm.Date`, `Edm.DateTimeOffset`. `Edm.Decimal` casts to 18 digits with 6 after the point.
+
+`Edm.TimeOfDay`, `Edm.Duration`, `Edm.Binary` and `Edm.Guid` are valid OData cast
+targets but are **not** supported, and return 400 naming what to write instead.
+Neither is the one-argument form `cast(Edm.Type)`, which casts the entity to a
+derived type; entity types here have none. `isof()` is not implemented.
+
 **Date and Time Functions:**
 - `now()` - the current UTC instant, as `Edm.DateTimeOffset`. Takes no arguments. Evaluated once per query, so every row is compared against the same instant.
 - `year(field)`, `month(field)`, `day(field)` - date components as integers. Work on `Edm.Date` and `Edm.DateTimeOffset` columns.

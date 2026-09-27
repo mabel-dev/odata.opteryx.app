@@ -125,6 +125,44 @@ def _isolate_process_caches():
     _clear()
 
 
+@pytest.fixture(autouse=True)
+def _static_workspaces_own_their_settings():
+    """Let a `register_workspace` mount answer the settings chain too.
+
+    The e2e tests mount `testdata` with `opteryx.register_workspace(...,
+    DiskConnector)`. That static registration wins the DATA chain (slot 1 of
+    `connector_factory`), but opteryx-core's view probe resolves through
+    `view_store_connector` -> `workspace_settings_connector`, which asks the
+    installed settings resolver and never looks at static registrations.
+    `app.routes.v4.interface` installs `resolve_workspace_settings`, which
+    always answers "the native catalog", so once the app is imported the
+    probe asks Firestore about `testdata` and fails with WorkspaceNotFound
+    before the disk mount is ever consulted. Whether a test saw that depended
+    on whether anything had imported the app yet.
+
+    Production registers no static workspaces, so this is only wrapped here:
+    a statically registered name resolves to its own registration on the
+    settings axis as well, and everything else goes to the app's resolver.
+    """
+    from opteryx import connectors
+
+    # Importing the interface is what installs the app's resolvers; do it now
+    # so a later first import cannot reinstall the unwrapped one mid-test.
+    import app.routes.v4.interface  # noqa: F401
+    from app.catalog_resolver import resolve_workspace_settings
+
+    def resolve(workspace):
+        entry = connectors._storage_prefixes.get(workspace)
+        if entry is not None:
+            config = {k: v for k, v in entry.items() if k != "connector"}
+            return connectors.Resolution(entry["connector"], config)
+        return resolve_workspace_settings(workspace)
+
+    connectors.set_workspace_settings_resolver(resolve)
+    yield
+    connectors.set_workspace_settings_resolver(resolve_workspace_settings)
+
+
 def _build_app(authenticate):
     """Build a FastAPI app wired up the way app.main builds the real service.
 

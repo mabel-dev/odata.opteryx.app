@@ -10,7 +10,7 @@ a prior/tagged/specific version — do not invent a tag or snapshot id.
 
 ## Query Parameters
 
-- `$filter` - Filter records: comparison (`eq`, `ne`, `gt`, `ge`, `lt`, `le`), logical (`and`, `or`, `not`), string functions (`contains()`, `startswith()`, `endswith()`), date functions (`now()`, `year()`, `date()`), network functions (`in_subnet()`)
+- `$filter` - Filter records: comparison (`eq`, `ne`, `gt`, `ge`, `lt`, `le`), logical (`and`, `or`, `not`), string functions (`contains()`, `startswith()`, `endswith()`), date functions (`now()`, `year()`, `date()`), type conversion (`cast(col, Edm.Int32)`), network functions (`in_subnet()`)
 - `$select` - Columns to return: `$select=col1,col2,col3`
 - `$orderby` - Sort: `$orderby=col1 asc, col2 desc`
 - `$top` - Optional (default `100`). Limit results (0-25000): `$top=50`. LLMs should include an explicit `$top` to avoid returning excessively large result sets.
@@ -77,6 +77,7 @@ Supported functions you may use directly (in `$filter` expressions):
   - `date(col)` — narrows a timestamp to its day: `date(created_at) eq 2024-01-15` matches the whole day.
   - `time()`, `mindatetime()` and `maxdatetime()` are NOT supported and return 400. Write the bound as a literal instead.
   - Prefer a range over a component function when both express the question: `created_at ge 2024-01-01 and created_at lt 2025-01-01` can use file statistics to skip data, `year(created_at) eq 2024` cannot.
+- Type funcs: `cast(col, Edm.Type)` — convert before comparing, e.g. `cast(code, Edm.Int32) gt 10` when a number is stored as text. Targets: `Edm.String`, `Edm.Boolean`, `Edm.Byte`, `Edm.SByte`, `Edm.Int16`, `Edm.Int32`, `Edm.Int64`, `Edm.Single`, `Edm.Double`, `Edm.Decimal`, `Edm.Date`, `Edm.DateTimeOffset`. The type name is unquoted. `Edm.TimeOfDay`, `Edm.Duration`, `Edm.Binary`, `Edm.Guid`, the one-argument `cast(Edm.Type)` and `isof()` are NOT supported. Do NOT cast to fix a quoted literal: `shipped_date gt 2024-01-15`, not `cast(shipped_date, Edm.String) gt '2024-01-15'`.
 - Network funcs: `in_subnet(ip_column, 'cidr')` — IPv4 CIDR containment, e.g. `in_subnet(src_addr, '192.168.4.0/24')`. The column must be IPv4-typed. There is NO `<<=` operator: OData does not have one, and using it is a parse error.
 
 (Aggregates are only used in `$apply` expressions, see Aggregation Functions below.)
