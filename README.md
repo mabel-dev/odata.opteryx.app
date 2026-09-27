@@ -213,7 +213,7 @@ $filter=tolower(name) eq tolower('earth')&$top=10
 - `in_subnet(field, 'cidr')` - IPv4 CIDR containment, e.g. `in_subnet(src_addr, '192.168.4.0/24')`. `field` must be an IPv4-typed column. This is an Opteryx extension, not part of the OData v4 spec; OData has no containment operator, and PostgreSQL's `<<=` is not valid OData syntax.
 
 **Type Functions:**
-- `cast(field, Edm.Type)` - converts a value to another type before comparing it, e.g. `cast(code, Edm.Int32) gt 10` on a numeric code stored as text, or `cast(price, Edm.String) eq '9.75'`. Supported targets: `Edm.String`, `Edm.Boolean`, `Edm.Byte`, `Edm.SByte`, `Edm.Int16`, `Edm.Int32`, `Edm.Int64`, `Edm.Single`, `Edm.Double`, `Edm.Decimal`, `Edm.Date`, `Edm.DateTimeOffset`. `Edm.Decimal` casts to 18 digits with 6 after the point.
+- `cast(field, Edm.Type)` - converts a value to another type before comparing it, e.g. `cast(code, Edm.Int32) gt 10` on a numeric code stored as text, or `cast(price, Edm.String) eq '9.75'`. Supported targets: `Edm.String`, `Edm.Boolean`, `Edm.Byte`, `Edm.SByte`, `Edm.Int16`, `Edm.Int32`, `Edm.Int64`, `Edm.Single`, `Edm.Double`, `Edm.Decimal`, `Edm.Date`, `Edm.DateTimeOffset`. `Edm.Decimal` casts to 18 digits with 6 after the point. A value that does not convert becomes `null`, as the OData standard defines it, rather than failing the query; `cast(code, Edm.Int32) eq null` finds them.
 
 `Edm.TimeOfDay`, `Edm.Duration`, `Edm.Binary` and `Edm.Guid` are valid OData cast
 targets but are **not** supported, and return 400 naming what to write instead.

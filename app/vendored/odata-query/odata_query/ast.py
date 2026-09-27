@@ -726,7 +726,13 @@ class Call(_Node):
                 from opteryx.types.logical_type import INT64
 
                 parameters = [Literal(value=18, type=INT64), Literal(value=6, type=INT64)]
-            return Cast(left=self.args[0].to_opteryx_node(), value=target, parameters=parameters)
+            # TRY_, because OData defines a failed cast as null (§5.1.1.10.1), not
+            # an error. A plain CAST fails the whole query on the first value it
+            # cannot convert -- one empty string in a text column of numbers -- and
+            # that DataError surfaced as a 500.
+            return Cast(
+                left=self.args[0].to_opteryx_node(), value=f"TRY_{target}", parameters=parameters
+            )
 
         # Convert arguments to Opteryx nodes
         arg_nodes = [arg.to_opteryx_node() for arg in self.args]

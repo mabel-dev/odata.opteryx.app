@@ -43,6 +43,10 @@ ROWS = (
     # n, code, price, published_at,          day_text,     ts_text,               flag
     (1, "42", 9.75, "2024-01-02T03:04:05", "2024-01-02", "2024-01-02T03:04:05", "true"),
     (2, "7", 120.5, "2025-06-07T08:09:10", "2025-06-07", "2025-06-07T08:09:10", "false"),
+    # Nothing in the text columns converts. A failed cast is null in OData, so
+    # this row must drop out of every comparison rather than fail the query --
+    # which is what one empty string in production did.
+    (3, "", 0.5, "2026-01-01T00:00:00", "not a date", "", "maybe"),
 )
 
 
@@ -119,7 +123,7 @@ def test_cast_lowers_to_a_cast_node():
     node = ODataExpressionParser().parse_filter("cast(code, Edm.Int32) gt 10")
 
     assert node.left.node_type == NodeType.CAST
-    assert node.left.value == "INT32"
+    assert node.left.value == "TRY_INT32"
     assert node.left.left.source_column == "code"
 
 
@@ -129,7 +133,7 @@ def test_type_name_spellings_are_accepted(spelling):
     form some clients still send means the same type."""
     node = ODataExpressionParser().parse_filter(f"cast(code, {spelling}) eq 42")
 
-    assert node.left.value == "INT32"
+    assert node.left.value == "TRY_INT32"
 
 
 # ---------------------------------------------------------------------------
@@ -168,11 +172,25 @@ def test_cast_selects_the_right_rows(dataset, filter_expr, expected):
     assert _odata_rows(dataset, filter_expr) == expected
 
 
+@pytest.mark.parametrize(
+    "filter_expr",
+    (
+        "cast(code, Edm.Int32) eq null",
+        "cast(day_text, Edm.Date) eq null",
+        "cast(ts_text, Edm.DateTimeOffset) eq null",
+        "cast(flag, Edm.Boolean) eq null",
+    ),
+)
+def test_a_value_that_does_not_convert_is_null(dataset, filter_expr):
+    """OData §5.1.1.10.1: "If the cast fails, the cast function returns null"."""
+    assert _odata_rows(dataset, filter_expr) == [3]
+
+
 def test_cast_in_compute_yields_the_target_type(dataset):
     morsels = _execute(_plan(dataset, compute_expr="cast(code, Edm.Int32) as code_num"))
 
     values = [value for morsel in morsels for value in morsel.column(morsel.column_names[-1]).to_pylist()]
-    assert sorted(values) == [7, 42]
+    assert sorted(values, key=lambda v: (v is None, v)) == [7, 42, None]
 
 
 # ---------------------------------------------------------------------------
