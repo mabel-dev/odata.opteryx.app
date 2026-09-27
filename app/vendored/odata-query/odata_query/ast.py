@@ -614,6 +614,76 @@ _UNSUPPORTED_DATETIME_FUNCTIONS = {
 }
 
 
+# cast(expr, Edm.X) targets (OData v4 §5.1.1.10.1), mapped to the Opteryx type
+# the CAST node produces. Each is the inverse of app/odata/edm_types.py for that
+# Edm type, so a cast result is declared back to the caller as the type they
+# asked for.
+CAST_TARGETS = {
+    "Edm.String": "VARCHAR",
+    "Edm.Boolean": "BOOLEAN",
+    "Edm.Byte": "UINT8",
+    "Edm.SByte": "INT8",
+    "Edm.Int16": "INT16",
+    "Edm.Int32": "INT32",
+    "Edm.Int64": "INT64",
+    "Edm.Single": "FLOAT32",
+    "Edm.Double": "FLOAT64",
+    "Edm.Decimal": "DECIMAL",
+    "Edm.Date": "DATE",
+    "Edm.DateTimeOffset": "TIMESTAMP",
+}
+
+# Edm types that are valid cast targets in the standard but that this service
+# cannot produce, mapped to what a caller can write instead.
+_UNSUPPORTED_CAST_TARGETS = {
+    # Opteryx cannot narrow a TIMESTAMP to a TIME ("CAST TIMESTAMP64 -> TIME is
+    # not supported"), and a string cast would be the only other source.
+    "Edm.TimeOfDay": "compare the timestamp column directly, or use hour()/minute()/second()",
+    # Opteryx has no cast into INTERVAL from any type.
+    "Edm.Duration": "write the interval as a literal, e.g. duration'P30D'",
+    # Binary columns are served as plain strings (see app/odata/edm_types.py), so
+    # an Edm.Binary result would be declared base64 and delivered as raw bytes.
+    "Edm.Binary": "compare against the column as Edm.String",
+    "Edm.Guid": "compare against the column as Edm.String",
+}
+
+# The lookup is case-insensitive: a caller who wrote `edm.int32` meant Edm.Int32
+# and nothing else, and messages still quote the canonical spelling.
+_CAST_TARGET_NAMES = {name.lower(): name for name in (*CAST_TARGETS, *_UNSUPPORTED_CAST_TARGETS)}
+
+
+def _cast_target(type_arg: "_Node") -> str:
+    """The Opteryx type for cast()'s type argument, or raise naming what to write.
+
+    The standard spells the type as a bare qualified name (`Edm.Int32`). A quoted
+    name is accepted too: some clients still send the pre-v4 `'Edm.Int32'` form,
+    and there is nothing else it could mean.
+    """
+    from .exceptions import CastTargetException
+
+    if isinstance(type_arg, Identifier):
+        type_name = type_arg.full_name()
+    elif isinstance(type_arg, String):
+        type_name = type_arg.val
+    else:
+        raise CastTargetException(
+            "The second argument to cast() must be a type name, e.g. cast(price, Edm.Int32)."
+        )
+
+    canonical = _CAST_TARGET_NAMES.get(type_name.lower())
+    if canonical in CAST_TARGETS:
+        return CAST_TARGETS[canonical]
+    if canonical in _UNSUPPORTED_CAST_TARGETS:
+        raise CastTargetException(
+            f"cast() to {canonical} is not supported by this service. "
+            f"Instead, {_UNSUPPORTED_CAST_TARGETS[canonical]}."
+        )
+    raise CastTargetException(
+        f"cast() cannot produce '{type_name}'. "
+        f"Supported target types: {', '.join(CAST_TARGETS)}."
+    )
+
+
 @dataclass(frozen=True)
 class Call(_Node):
     func: Identifier
@@ -630,6 +700,33 @@ class Call(_Node):
 
         # Get function name
         func_name = self.func.name
+
+        # cast(expr, Edm.X) -> CAST(expr AS <opteryx type>). Handled before the
+        # arguments are converted: the type name parses as an Identifier, and
+        # converting it would turn `Edm.Int32` into a reference to a column `Int32`.
+        #
+        # The one-argument form casts the current instance ($it) to a derived
+        # entity type. This service's entity types have no derived types, so it is
+        # refused rather than treated as a no-op that silently matches everything.
+        if func_name == "cast":
+            from .exceptions import CastTargetException
+
+            if len(self.args) == 1:
+                raise CastTargetException(
+                    "cast() with one argument casts the entity to a derived type, and "
+                    "this service's entity types have none. Pass the property to cast "
+                    "as well, e.g. cast(price, Edm.Int32)."
+                )
+            target = _cast_target(self.args[1])
+            parameters = None
+            if target == "DECIMAL":
+                # Edm.Decimal carries no precision/scale here, and the runtime CAST
+                # node needs both; this is the engine's own default for a bare
+                # DECIMAL, stated rather than left implicit.
+                from opteryx.types.logical_type import INT64
+
+                parameters = [Literal(value=18, type=INT64), Literal(value=6, type=INT64)]
+            return Cast(left=self.args[0].to_opteryx_node(), value=target, parameters=parameters)
 
         # Convert arguments to Opteryx nodes
         arg_nodes = [arg.to_opteryx_node() for arg in self.args]

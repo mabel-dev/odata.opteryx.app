@@ -104,6 +104,18 @@ class UnsupportedFunctionException(FunctionCallException):
         super().__init__(message)
 
 
+class CastTargetException(FunctionCallException):
+    """
+    Thrown when cast() is asked for a type this service cannot produce, or is
+    called in a form it does not support. The message is written in full by the
+    caller, because what to write instead depends on which target was refused.
+    """
+
+    def __init__(self, message: str):
+        self.function_name = "cast"
+        super().__init__(message)
+
+
 class ArgumentTypeException(FunctionCallException):
     """
     Thrown when a function is called with argument of the wrong type.

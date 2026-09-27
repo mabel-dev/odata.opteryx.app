@@ -76,10 +76,11 @@ async def http_exception_handler(request: Request, exc: HTTPException) -> JSONRe
 
 
 # Opteryx ends every type-mismatch message with SQL remediation -- `CAST(column
-# AS type)`. There is no CAST in an OData $filter expression, so that sentence
-# tells an OData caller to do something the query language cannot express. These
-# two patterns cover both spellings opteryx uses (IncompatibleTypesError's
-# imperative form, IncorrectTypeError's "usually resolves it" form).
+# AS type)`. OData spells the same thing `cast(column, Edm.Type)`, so the SQL
+# sentence is swapped for the OData one rather than passed through in a syntax
+# the caller cannot write. These two patterns cover both spellings opteryx uses
+# (IncompatibleTypesError's imperative form, IncorrectTypeError's "usually
+# resolves it" form).
 _CAST_ADVICE = (
     "Cast one side to match the other with `CAST(column AS type)`.",
     "Casting one side to match the other with `CAST(column AS type)` usually resolves it.",
@@ -136,13 +137,52 @@ def _literal_quoting_advice(exc):
     return None
 
 
+def _cast_advice(exc) -> str:
+    """The OData form of the engine's `CAST(column AS type)` advice.
+
+    Worked in the caller's own column and the other side's Edm type where the
+    exception names both and cast() can produce that type; otherwise the
+    general form. A temporal-vs-numeric pair gets the general form too: a cast
+    between them converts through the epoch, which is almost never what the
+    comparison meant, and a worked example would read as a recommendation.
+    """
+    # Order matters: expression_parser puts the vendored odata_query on sys.path.
+    from app.odata import expression_parser  # noqa: F401, I001
+    from app.odata.edm_types import column_type_to_edm
+    from odata_query.ast import CAST_TARGETS
+
+    left = _base_type(getattr(exc, "left_type", None))
+    right = _base_type(getattr(exc, "right_type", None))
+    temporal_vs_numeric = {left in _TEMPORAL_TYPES, right in _TEMPORAL_TYPES} == {True, False} and any(
+        side.startswith(numeric) for side in (left, right) for numeric in _NUMERIC_TYPES
+    )
+    if not temporal_vs_numeric:
+        for column, other_type in (
+            (getattr(exc, "left_column", None), getattr(exc, "right_type", None)),
+            (getattr(exc, "right_column", None), getattr(exc, "left_type", None)),
+        ):
+            if not column or not other_type:
+                continue
+            edm_type = column_type_to_edm(str(other_type))
+            if edm_type in CAST_TARGETS:
+                return (
+                    "Cast one side to match the other with "
+                    f"`cast({_property_name(column)}, {edm_type})`."
+                )
+    return "Cast one side to match the other with `cast(column, Edm.Type)`, e.g. `cast(price, Edm.Double)`."
+
+
 def describe_type_mismatch(exc) -> str:
     """Restate an engine type-mismatch error in terms a $filter author can act on.
 
     The engine's own message names the column, both types and the offending
     literal, all of which are useful -- it is only the trailing CAST advice that
-    does not survive the trip out to OData, so that sentence is replaced rather
-    than the whole message rewritten.
+    is in the wrong syntax for OData, so that sentence is replaced rather than
+    the whole message rewritten.
+
+    A string-vs-temporal or string-vs-numeric mismatch is nearly always a quoted
+    literal, so that case is told to drop the quotes instead of to cast: a cast
+    would work, but it would paper over the actual mistake.
     """
     message = str(exc)
     stripped = False
@@ -150,17 +190,14 @@ def describe_type_mismatch(exc) -> str:
         if advice in message:
             message = message.replace(advice, "").strip()
             stripped = True
-    quoting = _literal_quoting_advice(exc)
-    if quoting is None:
+    advice = _literal_quoting_advice(exc)
+    if advice is None:
         if not stripped:
             # Some other type error that never offered SQL advice in the first
             # place -- leave it exactly as the engine wrote it.
             return message
-        quoting = (
-            "A $filter expression cannot cast, so the literal has to be written in "
-            "the column's own type."
-        )
-    return f"{message} {quoting}"
+        advice = _cast_advice(exc)
+    return f"{message} {advice}"
 
 
 # What an unhandled exception tells the caller. Deliberately says nothing about

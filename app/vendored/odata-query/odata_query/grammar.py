@@ -66,6 +66,8 @@ ODATA_FUNCTIONS = {
     "round": 1,
     "floor": 1,
     "ceiling": 1,
+    # Type functions
+    "cast": (1, 2),
     # Geo functions
     "geo.distance": 2,
     "geo.length": 1,

@@ -1627,9 +1627,9 @@ def read_dataset(
         # inherit from SqlError despite opteryx-core's own docs implying it does.
         #
         # Type mismatches go through describe_type_mismatch because opteryx's
-        # remediation for them is `CAST(column AS type)`, which no $filter
-        # expression can express — the commonest cause out here is a quoted
-        # date/number, and the message now says so.
+        # remediation for them is SQL's `CAST(column AS type)`; the OData
+        # spelling is `cast(column, Edm.Type)`. The commonest cause out here is
+        # a quoted date/number, and the message says that instead.
         if isinstance(
             e, (opteryx.exceptions.IncompatibleTypesError, opteryx.exceptions.IncorrectTypeError)
         ):

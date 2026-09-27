@@ -1,9 +1,9 @@
 """Type-mismatch errors restated for a `$filter` author.
 
 Opteryx ends its type-mismatch messages with `CAST(column AS type)`. That is the
-right advice for SQL and unreachable from OData -- `$filter` has no CAST -- so a
-caller who quoted a date (the commonest cause by far) was told to do the one
-thing they cannot do, and not told the thing they can.
+right advice in SQL's syntax; OData spells it `cast(column, Edm.Type)`. And a
+caller who quoted a date (the commonest cause by far) should be told to drop the
+quotes, not to cast -- a cast would work, but it would paper over the mistake.
 
 The end-to-end cases execute a real query: the message only helps if it is what
 the engine actually produces for that filter, not what the exception can be
@@ -126,27 +126,60 @@ def test_unquoted_literals_are_not_an_error(dataset):
     assert _message(dataset, "vendor eq 'Oracle'") is None
 
 
-def test_a_mismatch_with_no_string_side_gets_no_quoting_advice():
-    """Guessing at a cause is worse than saying nothing, so a pair that is not
-    string-vs-something keeps the generic 'cannot cast here' line and no example."""
+class _Mismatch(Exception):
+    """An engine type mismatch, with the attributes opteryx's exceptions carry."""
 
-    class _Mismatch(Exception):
-        left_type = "TIMESTAMP[us]"
-        right_type = "INT64"
-        left_column = "orders.shipped_date"
-        right_column = None
+    def __init__(self, left_type, right_type, left_column=None, right_column=None):
+        super().__init__()
+        self.left_type = left_type
+        self.right_type = right_type
+        self.left_column = left_column
+        self.right_column = right_column
 
-        def __str__(self):
-            return (
-                "these do not match. Cast one side to match the other with "
-                "`CAST(column AS type)`."
-            )
+    def __str__(self):
+        return "these do not match. Cast one side to match the other with `CAST(column AS type)`."
 
-    message = describe_type_mismatch(_Mismatch())
+
+def test_a_mismatch_with_no_string_side_is_told_the_odata_cast():
+    """Not a quoting problem, so the SQL cast advice is restated in OData's
+    syntax, worked in the caller's own column and the other side's type."""
+    message = describe_type_mismatch(_Mismatch("DATE", "TIMESTAMP[us]", left_column="orders.shipped_date"))
 
     assert _CAST_ADVICE not in message
     assert "unquoted" not in message
-    assert "cannot cast" in message
+    assert "`cast(shipped_date, Edm.DateTimeOffset)`" in message
+
+
+def test_the_worked_example_uses_whichever_side_names_a_column():
+    message = describe_type_mismatch(_Mismatch("INT64", "BOOLEAN", right_column="orders.is_paid"))
+
+    assert "`cast(is_paid, Edm.Int64)`" in message
+
+
+def test_temporal_vs_numeric_gets_only_the_general_form():
+    """A cast between them converts through the epoch, which is almost never
+    what the comparison meant -- a worked example would read as a recommendation."""
+    message = describe_type_mismatch(
+        _Mismatch("TIMESTAMP[us]", "INT64", left_column="orders.shipped_date")
+    )
+
+    assert _CAST_ADVICE not in message
+    assert "unquoted" not in message
+    assert "`cast(column, Edm.Type)`" in message
+    assert "cast(shipped_date" not in message
+
+
+def test_no_column_gets_only_the_general_form():
+    message = describe_type_mismatch(_Mismatch("INT64", "BOOLEAN"))
+
+    assert "`cast(column, Edm.Type)`" in message
+
+
+def test_the_suggested_cast_parses():
+    """The advice is only worth giving if the caller can paste it back in."""
+    from app.odata.expression_parser import ODataExpressionParser
+
+    ODataExpressionParser().parse_filter("cast(shipped_date, Edm.DateTimeOffset) ge 2024-01-01T00:00:00Z")
 
 
 def test_an_error_that_never_offered_cast_advice_is_left_alone():
