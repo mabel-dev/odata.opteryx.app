@@ -15,14 +15,14 @@ def test_orderby_on_aggregate_alias():
     order_step = builder._add_order_node("total desc")
 
     # Find the Order node in the plan
-    order_node = builder.plan._nodes.get(order_step)
+    order_node = builder.plan[order_step]
     assert order_node is not None
     assert getattr(order_node, "node_type", None) == LogicalPlanStepType.Order
 
     # Check order_by entries
     order_by = getattr(order_node, "order_by", [])
     assert len(order_by) == 1
-    col_node, is_asc = order_by[0]
+    col_node, is_asc, _nulls_first = order_by[0]
     assert col_node.query_column == "total"
     assert is_asc is False
 
@@ -34,11 +34,11 @@ def test_orderby_on_groupby_column():
     builder._add_apply_nodes("groupby((region), aggregate($count as total))")
 
     order_step = builder._add_order_node("region asc")
-    order_node = builder.plan._nodes.get(order_step)
+    order_node = builder.plan[order_step]
 
     assert order_node is not None
     order_by = getattr(order_node, "order_by", [])
     assert len(order_by) == 1
-    col_node, is_asc = order_by[0]
+    col_node, is_asc, _nulls_first = order_by[0]
     assert col_node.query_column == "region"
     assert is_asc is True

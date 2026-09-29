@@ -27,7 +27,7 @@ from opteryx.compiled.structures.plan_steps import ScanStep
 from opteryx.expression import NodeType
 from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import LogicalPlanStepType
-from opteryx.utils import random_string
+from opteryx.planner.plan_context import PlanContext
 
 from app.odata.expression_parser import ODataExpressionParser
 
@@ -60,9 +60,14 @@ class ODataLogicalPlanBuilder:
         self.table_name = table_name
         self.version = version
         self.version_tag = version_tag
-        self.plan = LogicalPlan()
-        self.current_step_id: Optional[str] = None
-        self.expression_parser = ODataExpressionParser()
+        # The query's planning context mints the plan's node ids and owns the arena
+        # every expression is created in; the engine continues the query under it
+        # (execute_logical_plan reads it back off the plan).
+        self.plan_context = PlanContext()
+        self.arena = self.plan_context.expressions
+        self.plan = LogicalPlan(self.plan_context)
+        self.current_step_id: Optional[int] = None
+        self.expression_parser = ODataExpressionParser(self.arena)
         # Output columns of the most recent aggregate step, pending consumption by
         # Exit (or a subsequent Project). Opteryx's Exit binder unconditionally
         # drops the "$derived" schema (where aggregate outputs live) before
@@ -181,19 +186,24 @@ class ODataLogicalPlanBuilder:
 
         return self.plan
 
-    def _add_count_node(self) -> str:
+    def _add_count_node(self) -> int:
         """Add an Aggregate node that computes COUNT(*) for the current plan.
 
         Returns the new step_id for the count aggregation node.
         """
         # No group by -> global aggregation; use the ungrouped "Aggregate" step
         # type (rather than AggregateAndGroup), which doesn't require a projection.
-        count_node = Aggregator(value="COUNT", parameters=[Wildcard()], alias="count")
+        count_node = Aggregator(
+            value="COUNT",
+            parameters=[Wildcard(arena=self.arena)],
+            alias="count",
+            arena=self.arena,
+        )
         agg_node = AggregateStep(groups=[], aggregates=[count_node])
         self._pending_aggregate_columns = [count_node]
         return self._add_node(agg_node)
 
-    def _add_node(self, node: PlanStep) -> str:
+    def _add_node(self, node: PlanStep) -> int:
         """Add a node to the plan and connect it to the previous node.
 
         Args:
@@ -202,15 +212,14 @@ class ODataLogicalPlanBuilder:
         Returns:
             The step_id of the newly added node
         """
-        step_id = random_string()
-        self.plan.add_node(step_id, node)
+        step_id = self.plan.add_node(node)
 
         if self.current_step_id is not None:
             self.plan.add_edge(self.current_step_id, step_id)
 
         return step_id
 
-    def _add_scan_node(self) -> str:
+    def _add_scan_node(self) -> int:
         """Add a Scan node to read the table."""
         scan_node = ScanStep(
             relation=self.table_name,
@@ -223,7 +232,7 @@ class ODataLogicalPlanBuilder:
 
         return self._add_node(scan_node)
 
-    def _add_filter_node(self, filter_expr: str) -> str:
+    def _add_filter_node(self, filter_expr: str) -> int:
         """Add a Filter node for WHERE clause.
 
         Args:
@@ -242,11 +251,11 @@ class ODataLogicalPlanBuilder:
             return self.current_step_id
 
         # Filter passes through all columns (doesn't change column set)
-        filter_node = FilterStep(condition=condition, columns=[Wildcard()])
+        filter_node = FilterStep(condition=condition, columns=[Wildcard(arena=self.arena)])
 
         return self._add_node(filter_node)
 
-    def _add_compute_node(self, compute_expr: str) -> str:
+    def _add_compute_node(self, compute_expr: str) -> int:
         """Add a Project node introducing $compute's aliased expressions.
 
         Placed right after Scan/Expand/Apply and before Filter -- see the
@@ -266,14 +275,14 @@ class ODataLogicalPlanBuilder:
             return self.current_step_id
 
         project_node = ProjectStep(
-            columns=[Wildcard()] + computed_nodes,
+            columns=[Wildcard(arena=self.arena)] + computed_nodes,
             passthrough_columns=[],
             except_columns=[],
         )
 
         return self._add_node(project_node)
 
-    def _add_expand_nodes(self, expand_expr: str) -> str:
+    def _add_expand_nodes(self, expand_expr: str) -> int:
         """Add Join nodes for OData $expand (navigation properties).
 
         Args:
@@ -288,7 +297,7 @@ class ODataLogicalPlanBuilder:
         # For now, pass through without modifications
         return self.current_step_id
 
-    def _add_apply_nodes(self, apply_expr: str) -> str:
+    def _add_apply_nodes(self, apply_expr: str) -> int:
         """Add AggregateAndGroup nodes for OData $apply (data aggregation).
 
         Args:
@@ -330,7 +339,7 @@ class ODataLogicalPlanBuilder:
             # which is what makes the resulting 400 actionable.
             raise ValueError(f"Invalid $apply expression: {apply_expr} ({e})") from e
 
-    def _add_order_node(self, orderby_expr: str) -> str:
+    def _add_order_node(self, orderby_expr: str) -> int:
         """Add an Order node for ORDER BY clause.
 
         Args:
@@ -342,8 +351,8 @@ class ODataLogicalPlanBuilder:
         # Parse orderby expression using the dedicated expression parser
         orderby_tuples = self.expression_parser.parse_orderby(orderby_expr)
 
-        # Convert to format Opteryx expects: List[Tuple[Expression, bool]]
-        # where bool is True for ascending, False for descending
+        # Convert to format Opteryx expects: List[Tuple[Expression, bool, bool]]
+        # (expression, ascending, nulls_first)
         order_by_nodes = []
         for column_name, direction in orderby_tuples:
             # Create a LogicalColumn node for the column
@@ -352,18 +361,22 @@ class ODataLogicalPlanBuilder:
                 source_column=column_name,
                 source=None,  # Will be bound during optimization
                 alias=None,
+                arena=self.arena,
             )
             col_node.query_column = column_name  # Required for binder
             # direction is "asc" or "desc", convert to boolean (True=asc, False=desc)
             is_ascending = direction.lower() == "asc"
-            order_by_nodes.append((col_node, is_ascending))
+            # Null placement is explicit in the engine's plan. OData v4.01 §11.2.6.2
+            # sorts null as the lowest value: first when ascending, last when
+            # descending -- the engine's own default, spelled out.
+            order_by_nodes.append((col_node, is_ascending, is_ascending))
 
         # Don't set columns - binder will populate it
         order_node = OrderStep(order_by=order_by_nodes)
 
         return self._add_node(order_node)
 
-    def _add_limit_node(self, top: Optional[int], skip: Optional[int]) -> str:
+    def _add_limit_node(self, top: Optional[int], skip: Optional[int]) -> int:
         """Add a Limit node for pagination.
 
         Args:
@@ -378,7 +391,7 @@ class ODataLogicalPlanBuilder:
 
         return self._add_node(limit_node)
 
-    def _add_project_node(self, select_cols: str, orderby_expr: Optional[str] = None) -> str:
+    def _add_project_node(self, select_cols: str, orderby_expr: Optional[str] = None) -> int:
         """Add a Project node for column selection.
 
         Args:
@@ -428,7 +441,7 @@ class ODataLogicalPlanBuilder:
         # Check if this is a wildcard select
         if selected_cols_list == ["*"]:
             # Use a Wildcard (no exclusions) to represent all columns
-            columns.append(Wildcard())
+            columns.append(Wildcard(arena=self.arena))
             # With wildcard, all columns are selected, so passthrough_columns will be empty
         else:
             # Parse individual columns
@@ -438,6 +451,7 @@ class ODataLogicalPlanBuilder:
                     node_type=NodeType.IDENTIFIER,
                     source_column=col_name,
                     alias=None,  # OData doesn't support field aliasing in $select
+                    arena=self.arena,
                 )
                 col_node.query_column = col_name
                 columns.append(col_node)
@@ -449,6 +463,7 @@ class ODataLogicalPlanBuilder:
                     node_type=NodeType.IDENTIFIER,
                     source_column=col_name,
                     alias=None,
+                    arena=self.arena,
                 )
                 exit_col_node.query_column = col_name
                 exit_columns.append(exit_col_node)
@@ -468,6 +483,7 @@ class ODataLogicalPlanBuilder:
                         node_type=NodeType.IDENTIFIER,
                         source_column=col_name,
                         alias=None,
+                        arena=self.arena,
                     )
                     col_node.query_column = col_name
                     passthrough_columns.append(col_node)
@@ -481,7 +497,7 @@ class ODataLogicalPlanBuilder:
 
         return self._add_node(project_node)
 
-    def _add_exit_node(self) -> str:
+    def _add_exit_node(self) -> int:
         """Add an Exit node to mark the end of the plan."""
         exit_node = ExitStep()
         if self._pending_aggregate_columns is not None:
@@ -497,7 +513,7 @@ class ODataLogicalPlanBuilder:
         else:
             # A Wildcard represents "*" - all columns
             # This tells the optimizer we want all columns from the previous step
-            exit_node.columns = [Wildcard()]
+            exit_node.columns = [Wildcard(arena=self.arena)]
         return self._add_node(exit_node)
 
     def get_plan(self) -> LogicalPlan:

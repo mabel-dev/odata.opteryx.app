@@ -78,10 +78,10 @@ def test_apply_aggregate_only_plan():
     )
 
     found = False
-    for node in plan._nodes.values():
+    for node in (step for _, step in plan.nodes(True)):
         if getattr(node, "node_type", None) == LogicalPlanStepType.Aggregate:
             # No group by for aggregate-only
-            assert node.groups == []
+            assert not node.groups
             assert len(node.aggregates) == 2
             func_names = {agg.value for agg in node.aggregates}
             assert "MIN" in func_names and "MAX" in func_names

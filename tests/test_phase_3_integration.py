@@ -144,7 +144,7 @@ def test_3_3_select_with_orderby():
 
         if order_node.order_by and len(order_node.order_by) > 0:
             print(f"  ✓ Order columns present: {len(order_node.order_by)}")
-            col, direction = order_node.order_by[0]
+            col, direction, _nulls_first = order_node.order_by[0]
             print(f"    Column: {col.current_name}")
             print(f"    Direction: {'ASC' if direction else 'DESC'}")
             if direction is True:  # True = ASC
@@ -198,7 +198,7 @@ def test_3_4_select_with_filter_and_orderby():
         # Validate order
         order_node = plan[node_ids[2]]
         if order_node.order_by and len(order_node.order_by) > 0:
-            col, direction = order_node.order_by[0]
+            col, direction, _nulls_first = order_node.order_by[0]
             if direction is False:  # False = DESC
                 print("  ✓ Order direction correct (DESC)")
             else:

@@ -119,7 +119,7 @@ def test_in_subnet_lowers_to_the_ip_containment_comparison():
     assert node.node_type == NodeType.COMPARISON_OPERATOR
     assert node.value == "IPContainedBy"
     assert node.left.source_column == "src_addr"
-    assert node.right.value == "192.168.4.0/24"
+    assert node.right.value == b"192.168.4.0/24"
 
 
 def test_in_subnet_composes_with_the_rest_of_the_grammar():

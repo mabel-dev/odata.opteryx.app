@@ -20,7 +20,7 @@ def test_groupby_with_count_creates_aggregate_node():
 
     # Inspect nodes in the plan to find AggregateAndGroup node
     found = False
-    for node in builder.plan._nodes.values():
+    for node in (step for _, step in builder.plan.nodes(True)):
         if (
             getattr(node, "node_type", None) is not None
             and node.node_type.name == "AggregateAndGroup"
@@ -44,7 +44,7 @@ def test_filter_in_pipeline_applies_before_groupby():
     apl_builder = ApplyLogicalPlanBuilder()
     last_step = apl_builder.apply_pipeline_to_builder(builder, apply_expr)
 
-    nodes = list(builder.plan._nodes.values())
+    nodes = list((step for _, step in builder.plan.nodes(True)))
     node_names = [
         getattr(n, "node_type", None).name if getattr(n, "node_type", None) else None for n in nodes
     ]
@@ -134,13 +134,13 @@ def test_distinct_count_pipeline_is_supported():
 
     grouped = [
         node
-        for node in builder.plan._nodes.values()
+        for node in (step for _, step in builder.plan.nodes(True))
         if getattr(getattr(node, "node_type", None), "name", None) == "AggregateAndGroup"
     ]
     assert len(grouped) == 2
     dedupe, counted = grouped[0], grouped[1]
     assert [c.source_column for c in dedupe.groups] == ["domain", "client"]
-    assert dedupe.aggregates == []
+    assert not dedupe.aggregates
     assert [c.source_column for c in counted.groups] == ["domain"]
     assert counted.aggregates[0].value == "COUNT"
     assert counted.aggregates[0].alias == "DeviceCount"

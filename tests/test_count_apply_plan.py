@@ -27,7 +27,7 @@ def test_count_only_plan_with_apply():
         if hasattr(plan, "get_node"):
             node = plan.get_node(node_id)
         else:
-            node = getattr(plan, "_nodes", {}).get(node_id)
+            node = plan[node_id]
 
         if not node:
             continue

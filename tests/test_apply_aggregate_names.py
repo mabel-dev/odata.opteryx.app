@@ -30,7 +30,7 @@ def _aggregates_for(apply_expr: str):
     ApplyLogicalPlanBuilder().apply_pipeline_to_builder(builder, apply_expr)
 
     aggregates = []
-    for node in builder.plan._nodes.values():
+    for node in (step for _, step in builder.plan.nodes(True)):
         node_type = getattr(node, "node_type", None)
         if node_type is not None and node_type.name in ("Aggregate", "AggregateAndGroup"):
             aggregates.extend(node.aggregates or [])

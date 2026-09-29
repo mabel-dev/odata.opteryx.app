@@ -12,11 +12,7 @@ def test_count_only_plan_has_count_aggregate():
         # Try to retrieve node object via attributes available on LogicalPlan
         node = None
         # Preferred API
-        if hasattr(plan, "get_node"):
-            node = plan.get_node(node_id)
-        else:
-            # Fallback to internal storage naming
-            node = getattr(plan, "_nodes", {}).get(node_id)
+        node = plan[node_id]
 
         if not node:
             continue

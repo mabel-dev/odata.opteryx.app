@@ -154,7 +154,7 @@ def test_date_components_lower_to_extract(part):
 
     assert node.left.node_type == NodeType.FUNCTION
     assert node.left.value == "EXTRACT"
-    assert node.left.parameters[0].value == part
+    assert node.left.parameters[0].value == part.encode()
     assert node.left.parameters[1].source_column == "published_at"
 
 

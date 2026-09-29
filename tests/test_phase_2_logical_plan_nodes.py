@@ -276,7 +276,7 @@ def test_project_node():
         project_node.passthrough_columns is not None
     ), "Project node passthrough_columns is None (should be [])"
     assert (
-        project_node.passthrough_columns == []
+        not project_node.passthrough_columns
     ), f"Project node passthrough_columns should be [], got {project_node.passthrough_columns}"
     print("✓ Project node has passthrough_columns = []")
 

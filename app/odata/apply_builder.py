@@ -55,18 +55,18 @@ def _aggregator_for(method: str) -> str:
         ) from None
 
 
-def _build_aggregate_node(func: str, prop: Optional[str], alias: str) -> Aggregator:
+def _build_aggregate_node(func: str, prop: Optional[str], alias: str, arena) -> Aggregator:
     """Build an Aggregator expression for one $apply aggregate expression.
 
     `prop` is None for COUNT(*) (OData's "$count"); every other function takes
     a single column-identifier parameter.
     """
     if prop is None:
-        parameter = Wildcard()
+        parameter = Wildcard(arena=arena)
     else:
-        parameter = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column=prop, source=None, alias=None)
+        parameter = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column=prop, source=None, alias=None, arena=arena)
         parameter.query_column = prop
-    return Aggregator(value=func, parameters=[parameter], alias=alias)
+    return Aggregator(value=func, parameters=[parameter], alias=alias, arena=arena)
 
 
 class ApplyLogicalPlanBuilder:
@@ -100,7 +100,7 @@ class ApplyLogicalPlanBuilder:
                 # Group columns
                 group_cols = []
                 for col in transform.properties:
-                    group_col = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column=col, source=None, alias=None)
+                    group_col = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column=col, source=None, alias=None, arena=odata_builder.arena)
                     group_col.query_column = col
                     group_cols.append(group_col)
 
@@ -110,7 +110,7 @@ class ApplyLogicalPlanBuilder:
                     for expr in transform.aggregate.expressions:
                         func = _aggregator_for(expr.method)
                         prop = expr.property_path  # None for $count
-                        aggs.append(_build_aggregate_node(func, prop, expr.alias))
+                        aggs.append(_build_aggregate_node(func, prop, expr.alias, odata_builder.arena))
 
                 agg_node = AggregateAndGroupStep()
                 agg_node.groups = group_cols
@@ -130,7 +130,7 @@ class ApplyLogicalPlanBuilder:
                     func = _aggregator_for(expr.method)
                     prop = expr.property_path
                     prop = None if prop == "$count" else prop
-                    aggs.append(_build_aggregate_node(func, prop, expr.alias))
+                    aggs.append(_build_aggregate_node(func, prop, expr.alias, odata_builder.arena))
 
                 # No group by -> global aggregation; use the ungrouped "Aggregate"
                 # step type (rather than AggregateAndGroup), which doesn't

@@ -147,9 +147,22 @@ class ODataExpressionParser:
     and clearer separation of responsibilities.
     """
 
-    def __init__(self):
-        """Initialize the parser."""
+    def __init__(self, arena=None):
+        """Initialize the parser.
+
+        Args:
+            arena: The query's expression arena (`PlanContext.expressions`); every
+                expression this parser mints belongs to it. A parser used on its
+                own (no plan being built) gets an arena of its own.
+        """
         self.lexer, self.parser = _get_lexer_and_parser()
+        if arena is None:
+            from opteryx.planner.plan_context import PlanContext
+
+            # The arena does not keep its context alive, so the parser does.
+            self._own_context = PlanContext()
+            arena = self._own_context.expressions
+        self.arena = arena
 
     def parse_filter(self, filter_expr: str) -> Optional[Expression]:
         """Parse an OData $filter expression into an Opteryx expression node.
@@ -176,7 +189,7 @@ class ODataExpressionParser:
             # Parse OData filter string to AST using odata-query library
             ast = self.parser.parse(self.lexer.tokenize(filter_expr))
             # Convert AST to Opteryx expression node using the AST node's built-in method
-            return ast.to_opteryx_node()
+            return ast.to_opteryx_node(self.arena)
         except FunctionCallException as e:
             # Unknown function, wrong argument count, wrong argument type -- these
             # already carry a precise, user-facing message. Surface it rather than
@@ -303,7 +316,7 @@ class ODataExpressionParser:
 
             try:
                 ast = self.parser.parse(self.lexer.tokenize(expr_text))
-                node = ast.to_opteryx_node()
+                node = ast.to_opteryx_node(self.arena)
             except FunctionCallException as e:
                 raise ValueError(str(e)) from e
             except Exception as e:

@@ -10,7 +10,7 @@ from app.odata.odata_to_logical_plan import ODataLogicalPlanBuilder
 
 def _get_node_names(plan):
     """Extract node type names from a plan."""
-    nodes = list(plan._nodes.values())
+    nodes = list((step for _, step in plan.nodes(True)))
     return [
         getattr(n, "node_type", None).name if getattr(n, "node_type", None) else None
         for n in nodes
@@ -153,7 +153,7 @@ class TestFilterApplyOrder:
             apply_expr="groupby((region), aggregate($count as cnt))",
         )
 
-        nodes = list(plan._nodes.values())
+        nodes = list((step for _, step in plan.nodes(True)))
         filter_nodes = [n for n in nodes if getattr(n, "node_type", None) and n.node_type.name == "Filter"]
 
         assert len(filter_nodes) == 1, "Should have exactly one filter node"
@@ -167,7 +167,7 @@ class TestFilterApplyOrder:
             apply_expr="groupby((region), aggregate($count as cnt))",
         )
 
-        nodes = list(plan._nodes.values())
+        nodes = list((step for _, step in plan.nodes(True)))
         filter_nodes = [n for n in nodes if getattr(n, "node_type", None) and n.node_type.name == "Filter"]
 
         assert len(filter_nodes) == 1, "Should have exactly one filter node"
@@ -212,7 +212,7 @@ class TestFilterApplyEdgeCases:
             filter_expr="status eq 'active'",
         )
 
-        nodes = list(plan._nodes.values())
+        nodes = list((step for _, step in plan.nodes(True)))
         filter_nodes = [n for n in nodes if getattr(n, "node_type", None) and n.node_type.name == "Filter"]
 
         assert len(filter_nodes) == 1, "Should have exactly one Filter node"

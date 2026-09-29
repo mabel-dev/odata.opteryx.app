@@ -17,7 +17,7 @@ def test_escape_percent_in_contains():
     node = parser.parse_filter("contains(name, 'sale%')")
 
     # Check that the pattern contains escaped %
-    pattern = str(node.right.value)
+    pattern = node.right.value.decode("utf-8")
     assert "\\%" in pattern, f"Expected escaped %, got: {pattern}"
     print(f"✓ contains(name, 'sale%') → pattern: {pattern}")
 
@@ -28,7 +28,7 @@ def test_escape_underscore_in_startswith():
     node = parser.parse_filter("startswith(code, 'A_B')")
 
     # Check that the pattern contains escaped _
-    pattern = str(node.right.value)
+    pattern = node.right.value.decode("utf-8")
     assert "\\_" in pattern, f"Expected escaped _, got: {pattern}"
     print(f"✓ startswith(code, 'A_B') → pattern: {pattern}")
 
@@ -39,7 +39,7 @@ def test_escape_backslash_in_endswith():
     # Test with a path-like string that has a backslash
     node = parser.parse_filter("endswith(path, 'file')")
 
-    pattern = str(node.right.value)
+    pattern = node.right.value.decode("utf-8")
     assert "%file" in pattern, f"Expected %file, got: {pattern}"
     print(f"✓ endswith(path, 'file') → pattern: {pattern}")
 
@@ -49,7 +49,7 @@ def test_combined_escaping():
     parser = ODataExpressionParser()
     node = parser.parse_filter("contains(sku, '100%_sale')")
 
-    pattern = str(node.right.value)
+    pattern = node.right.value.decode("utf-8")
     assert "\\%" in pattern, f"Expected escaped %, got: {pattern}"
     assert "\\_" in pattern, f"Expected escaped _, got: {pattern}"
     print(f"✓ contains(sku, '100%_sale') → pattern: {pattern}")
@@ -73,7 +73,7 @@ def test_normal_contains_unchanged():
     node = parser.parse_filter("contains(name, 'John')")
 
     # Should match the literal string
-    pattern = str(node.right.value)
+    pattern = node.right.value.decode("utf-8")
     assert "%John%" in pattern, f"Expected %John%, got: {pattern}"
     print(f"✓ contains(name, 'John') → pattern: {pattern}")
 

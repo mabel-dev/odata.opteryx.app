@@ -20,7 +20,7 @@ def test_groupby_count_plan_construction():
     # Walk nodes to ensure there is a COUNT aggregation (over the grouped rows,
     # via a plain Aggregate node stacked on top of the AggregateAndGroup)
     found = False
-    for n in count_plan._nodes.values():
+    for n in (step for _, step in count_plan.nodes(True)):
         if getattr(n, "node_type", None) and n.node_type.name in ("AggregateAndGroup", "Aggregate"):
             aggs = getattr(n, "aggregates", None)
             if aggs and any(a.value == "COUNT" for a in aggs):

@@ -17,7 +17,7 @@ def test_plain_contains_still_works():
     """Verify that normal contains queries without special chars still work."""
     parser = ODataExpressionParser()
     node = parser.parse_filter("contains(name, 'John')")
-    pattern = str(node.right.value)
+    pattern = node.right.value.decode("utf-8")
 
     # Should have wrapped with % on both sides
     assert pattern == "%John%", f"Expected %John%, got {pattern}"
@@ -40,7 +40,7 @@ def test_escape_in_middle_of_pattern():
     """Verify that special chars in the middle of patterns are escaped."""
     parser = ODataExpressionParser()
     node = parser.parse_filter("contains(code, 'AB%CD')")
-    pattern = str(node.right.value)
+    pattern = node.right.value.decode("utf-8")
 
     # The % should be escaped in the middle
     assert pattern == "%AB\\%CD%", f"Expected %AB\\%CD%, got {pattern}"
@@ -51,7 +51,7 @@ def test_multiple_same_metacharacters():
     """Verify that multiple occurrences of the same metachar are escaped."""
     parser = ODataExpressionParser()
     node = parser.parse_filter("contains(sku, '%20%discount%')")
-    pattern = str(node.right.value)
+    pattern = node.right.value.decode("utf-8")
 
     # All % should be escaped
     assert pattern == "%\\%20\\%discount\\%%", f"Expected %\\%20\\%discount\\%%, got {pattern}"
@@ -62,7 +62,7 @@ def test_underscore_with_other_chars():
     """Verify underscore escaping works with other characters."""
     parser = ODataExpressionParser()
     node = parser.parse_filter("startswith(filename, 'file_2024')")
-    pattern = str(node.right.value)
+    pattern = node.right.value.decode("utf-8")
 
     # The _ should be escaped
     assert pattern == "file\\_2024%", f"Expected file\\_2024%, got {pattern}"
@@ -73,7 +73,7 @@ def test_endswith_with_percent():
     """Verify endswith with metacharacters."""
     parser = ODataExpressionParser()
     node = parser.parse_filter("endswith(name, 'sale%off')")
-    pattern = str(node.right.value)
+    pattern = node.right.value.decode("utf-8")
 
     # Should have % prepended and the % in the pattern escaped
     assert pattern == "%sale\\%off", f"Expected %sale\\%off, got {pattern}"
