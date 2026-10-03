@@ -200,6 +200,24 @@ VIRTUAL_INFORMATION_SCHEMA_TABLES: dict[str, list[EdmProperty]] = {
         _col("level", "VARCHAR"),
         _col("origin", "VARCHAR"),
     ],
+    # The workspace's customer secrets, WITHOUT their values - the engine's
+    # catalog strips key material before its table sees a record. Mirrors
+    # `InformationSchemaSecretsTable`, which refuses as a WHOLE (PermissionError,
+    # served as 403) without ALTER on the whole workspace rather than returning
+    # an empty list that would read as "none". `last_used_at` is the last
+    # ATTEMPTED use.
+    "secrets": [
+        _col("secret_catalog", "VARCHAR"),
+        _col("secret_name", "VARCHAR"),
+        _col("secret_type", "VARCHAR"),
+        _col("scope", "VARCHAR"),
+        _col("created_by", "VARCHAR"),
+        _col("created_at", "TIMESTAMP"),
+        _col("updated_by", "VARCHAR"),
+        _col("updated_at", "TIMESTAMP"),
+        _col("last_used_at", "TIMESTAMP"),
+        _col("use_count", "BIGINT"),
+    ],
 }
 
 # A task holds no rows, so unlike a table there is nothing to give it a schema
@@ -324,6 +342,13 @@ VIRTUAL_INFORMATION_SCHEMA_DESCRIPTIONS: dict[str, str] = {
         "- `origin` of `inherited`: covers it from the collection or workspace above, "
         "as `SHOW EFFECTIVE GRANTS ON` adds"
     ),
+    "secrets": (
+        "Credentials stored in this workspace for `READ_*` `credentials =>`, never "
+        "with their values. What `SHOW SECRETS` returns.\n"
+        "\n"
+        "- Readable only with owner on the whole workspace; otherwise refused, not empty\n"
+        "- `last_used_at` is the last attempted use, including refused reads"
+    ),
 }
 
 
@@ -360,6 +385,11 @@ VIRTUAL_INFORMATION_SCHEMA_ACTIONS: dict[str, str] = {
     "forks": "READ",
     "schemata": "READ",
     "grants": "GRANT",
+    #   ALTER     secrets: the engine's gate is ALTER on the whole workspace
+    #             (owner of `ws.*`). Offered at this file's usual grain - an owner
+    #             of anything in the workspace - and the engine refuses the rest
+    #             as a whole, which the data path serves as a 403.
+    "secrets": "ALTER",
 }
 
 # A table with a schema but no tier would be offered to nobody; one with a tier

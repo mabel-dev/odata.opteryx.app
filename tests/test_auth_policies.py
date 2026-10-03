@@ -129,7 +129,7 @@ SHAPE_TABLES = [
     "listeners",
     "forks",
 ]
-OWNER_TABLES = ["triggers", "tasks", "grants"]
+OWNER_TABLES = ["triggers", "tasks", "grants", "secrets"]
 
 
 def _names(offered):
@@ -169,6 +169,15 @@ def test_owner_on_one_dataset_still_offers_the_automation_tables():
     assert virtual_information_schema_role(policies, "ws", "triggers") == "owner"
     assert virtual_information_schema_role(policies, "ws", "tasks") == "owner"
     assert virtual_information_schema_role(policies, "ws", "grants") == "owner"
+    # Offered, but the engine refuses it as a whole (ALTER on ws.*): a dataset
+    # owner reaches the table and gets a 403, not an empty list.
+    assert virtual_information_schema_role(policies, "ws", "secrets") == "owner"
+
+
+def test_secrets_are_never_offered_below_owner():
+    for role in ("reader", "writer"):
+        policies = [{"pattern": "ws.*", "role": role, "policy": "p1"}]
+        assert virtual_information_schema_role(policies, "ws", "secrets") is None
 
 
 def test_a_role_in_another_workspace_offers_nothing_here():
