@@ -1856,7 +1856,9 @@ def _resolve_labeled_snapshot(workspace, collection: str, dataset: str, ds, labe
         "last naming what made the commit as `kind:name` -- the segment after the colon is a "
         "catalog object for `task` and `view`, and a channel for `upload`), physical sort "
         "order (Custom.SortOrder.Column/Direction), snapshot tags (Custom.Tags.Count and "
-        "Custom.Tags, a Collection of Records with Name, SnapshotId and CreatedBy), the "
+        "Custom.Tags, a Collection of Records with Name, SnapshotId and CreatedBy), vector "
+        "indexes (Custom.VectorIndexes, a Collection of Records with Name, Column, Method "
+        "and Build), the "
         "the dataset this one was FORKED from, if any (Custom.Fork, a Record with Upstream, "
         "RevisionsBehind, RevisionsAhead, BaseSnapshot, LastSyncMs and ForkedBy -- the two "
         "revision figures are UPPER BOUNDS, since a sequence number advances on every commit "
@@ -1927,6 +1929,10 @@ def dataset_metadata(
         Custom.Sources is.
       * Custom.SortOrder.Column/Custom.SortOrder.Direction: the column the
         underlying storage is physically sorted by, if any (table only)
+      * Custom.VectorIndexes: a Collection of Records, one per vector index
+        defined on the dataset, omitted when there are none. Each Record
+        carries Name, Column, Method and Build. Coverage of the head snapshot
+        is not included; SHOW INDEXES FROM answers that.
       * Custom.Tags.Count: how many snapshot tags the dataset holds, 0 included.
         Present only for catalog-backed table-like datasets -- its absence means
         the dataset cannot hold a tag, not that it holds none.
@@ -2184,6 +2190,9 @@ def dataset_metadata(
     # Custom.Tags.Count annotation below is emitted only for the kinds that
     # can, so a client can still tell those two apart.
     tags = []
+    # Vector index definitions on this dataset (opteryx-core
+    # VECTOR_INDEX_DESIGN.md), read beside the tags and gated the same way.
+    vector_indexes = []
     # The commit receipt of the snapshot this document describes -- see the
     # renderer below. None for everything that has no snapshot to carry one: a
     # view, a virtual table, an external projection, and a materialized view
@@ -2442,13 +2451,32 @@ def dataset_metadata(
                     logger.warning(f"Could not read tags for {table_name}: {exc}")
                     return []
 
-            with ThreadPoolExecutor(max_workers=3) as pool:
+            def _fetch_vector_indexes():
+                # Definitions only -- one read of the dataset's `indexes`
+                # subcollection. How far each index covers the head snapshot
+                # needs the manifest, which is what SHOW INDEXES FROM is for;
+                # this document only says which columns carry one.
+                if source_type not in TABLE_LIKE_SOURCES:
+                    return []
+                lister = getattr(workspace, "list_vector_indexes", None)
+                if lister is None:
+                    # A catalog wheel older than vector indexes.
+                    return []
+                try:
+                    return lister(f"{collection}.{dataset}")
+                except Exception as exc:
+                    logger.warning(f"Could not read vector indexes for {table_name}: {exc}")
+                    return []
+
+            with ThreadPoolExecutor(max_workers=4) as pool:
                 schema_future = pool.submit(_fetch_schema)
                 description_future = pool.submit(_fetch_description)
                 tags_future = pool.submit(_fetch_tags)
+                indexes_future = pool.submit(_fetch_vector_indexes)
                 schema = schema_future.result()
                 description = description_future.result()
                 tags = tags_future.result()
+                vector_indexes = indexes_future.result()
 
             if schema and hasattr(schema, "columns"):
                 mv_materialized = True
@@ -2890,6 +2918,34 @@ def dataset_metadata(
                         record,
                         f"{{{NS_EDM}}}PropertyValue",
                         attrib={"Property": "CreatedBy", "String": str(created_by)},
+                    )
+
+    # Vector indexes: one Record per index, omitted when there are none. Name,
+    # Column, Method and Build are the definition as stored; whether an index
+    # has caught up with the head snapshot is NOT here (it needs the manifest)
+    # -- a client that wants the state runs SHOW INDEXES FROM.
+    named_indexes = [
+        index for index in vector_indexes if index.get("name") and index.get("column")
+    ]
+    if ds is not None and source_type in TABLE_LIKE_SOURCES and named_indexes:
+        indexes_annotation = ET.SubElement(
+            entity_set, f"{{{NS_EDM}}}Annotation", attrib={"Term": "Custom.VectorIndexes"}
+        )
+        indexes_collection = ET.SubElement(indexes_annotation, f"{{{NS_EDM}}}Collection")
+        for index in named_indexes:
+            record = ET.SubElement(indexes_collection, f"{{{NS_EDM}}}Record")
+            for prop, key in (
+                ("Name", "name"),
+                ("Column", "column"),
+                ("Method", "method"),
+                ("Build", "build"),
+            ):
+                value = index.get(key)
+                if value:
+                    ET.SubElement(
+                        record,
+                        f"{{{NS_EDM}}}PropertyValue",
+                        attrib={"Property": prop, "String": str(value)},
                     )
 
     # The standing source list -- what the CURRENT content was built from
