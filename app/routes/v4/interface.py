@@ -1858,7 +1858,7 @@ def _resolve_labeled_snapshot(workspace, collection: str, dataset: str, ds, labe
         "order (Custom.SortOrder.Column/Direction), snapshot tags (Custom.Tags.Count and "
         "Custom.Tags, a Collection of Records with Name, SnapshotId and CreatedBy), vector "
         "indexes (Custom.VectorIndexes, a Collection of Records with Name, Column, Method "
-        "and Build), the "
+        "and Build), "
         "the dataset this one was FORKED from, if any (Custom.Fork, a Record with Upstream, "
         "RevisionsBehind, RevisionsAhead, BaseSnapshot, LastSyncMs and ForkedBy -- the two "
         "revision figures are UPPER BOUNDS, since a sequence number advances on every commit "
