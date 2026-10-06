@@ -1392,7 +1392,22 @@ def read_dataset(
             "calendar month, so their length depends on the date they are applied to — while "
             "day, hour, minute and second durations are fixed spans (duration'P30D' is always "
             "exactly 30 × 24 hours)."
-        )
+        ),
+        # The description above is written for clients that read the spec and
+        # cannot follow a link (LLMs, BI tools). The docs site renders this
+        # instead and points at the guide that walks through the same syntax.
+        json_schema_extra={
+            "x-docs-summary": (
+                "Row filter, e.g. `vendor eq 'Oracle' and price gt 100`. Comparison "
+                "(`eq`, `ne`, `lt`, `le`, `gt`, `ge`), logical (`and`, `or`, `not`) and string "
+                "(`contains`, `startswith`, `endswith`) operators, plus `cast()`, date "
+                "functions, `now()` with durations for rolling windows, and the Opteryx "
+                "extension `in_subnet(src_addr, '192.168.4.0/24')` for IPv4 columns. "
+                "Case-sensitive; date literals are unquoted (`shipped_date gt 2024-01-01`). "
+                "See [Querying via OData](/docs/guides/querying-via-odata#querying-a-dataset) "
+                "for the full syntax."
+            )
+        },
     ),
     top: Optional[int] = Query(
         None,
@@ -1435,7 +1450,15 @@ def read_dataset(
             "and $filter on the same request, e.g. "
             "$compute=price mul quantity as TotalValue&$filter=TotalValue gt 100. "
             "Not supported combined with $apply in this version (400)."
-        )
+        ),
+        json_schema_extra={
+            "x-docs-summary": (
+                "Computed columns, as comma-separated `<expression> as <name>` clauses, e.g. "
+                "`price mul quantity as TotalValue`. Expressions use the same operators and "
+                "functions as `$filter`, and the new name can be used in `$select`, `$orderby` "
+                "and `$filter` on the same request. Can't be combined with `$apply`."
+            )
+        },
     ),
     apply: Optional[str] = Query(
         None,
@@ -1447,7 +1470,17 @@ def read_dataset(
             "forms such as sum(amount) are not accepted. Transformations chain with '/', e.g. "
             "filter(x gt 1)/groupby((col), aggregate($count as Count)); a groupby with no aggregate "
             "deduplicates, so a distinct count is groupby((a,b))/groupby((a), aggregate($count as N))."
-        )
+        ),
+        json_schema_extra={
+            "x-docs-summary": (
+                "Server-side aggregation, e.g. "
+                "`groupby((vendor), aggregate(amount with sum as Total, $count as Count))`. "
+                "Aggregates are `$count as Alias` or `col with <method> as Alias`, where "
+                "`<method>` is `sum`, `average`, `min` or `max`. Chain steps with `/`, e.g. "
+                "`filter(price gt 1)/groupby((vendor), aggregate($count as N))`. See "
+                "[Aggregating with `$apply`](/docs/guides/querying-via-odata#aggregating-with-apply)."
+            )
+        },
     ),
 ) -> Any:
     """Read rows from a specified dataset.
@@ -1886,6 +1919,48 @@ def _resolve_labeled_snapshot(workspace, collection: str, dataset: str, ds, labe
         "pin on the dataset and the source list is a property of its current content, so "
         "both are the same on every version's document."
     ),
+    # The description above is written for clients that read the spec; the docs
+    # site renders this instead. It is the only human-facing reference for these
+    # annotations, so it keeps every one, as a table rather than one sentence.
+    openapi_extra={
+        "x-docs-summary": "\n".join([
+            "Returns the OData `$metadata` (EDMX) document for one dataset: column types and "
+            "nullability, plus the `Custom.*` annotations below. An annotation is left out "
+            "where it doesn't apply to the dataset's kind or isn't available.",
+            "",
+            "| Annotation | What it carries |",
+            "| --- | --- |",
+            "| `Custom.Statistics.*` | Per-column `Min`/`Max` (`MinPrefix`/`MaxPrefix` for text), "
+            "`DistinctValueCount`, `NullCount`, `Distribution`, and `CIDR` for IPv4 columns |",
+            "| `Custom.OriginalType`, `Custom.SourceType` | The column's type in its source |",
+            "| `Custom.Role`, `Custom.Policy` | Your access to the dataset |",
+            "| `Custom.Description`, `Custom.LLMDescribed` | Dataset and column descriptions |",
+            "| `Custom.Snapshot.*` | `Id`, `TotalRecords`, `TotalDataSize`, `CommitMessage`, "
+            "`Author`, and `ProducedBy` - what made the commit, as `kind:name` |",
+            "| `Custom.SortOrder.*` | Physical sort `Column` and `Direction` |",
+            "| `Custom.Tags`, `Custom.Tags.Count` | Snapshot tags: `Name`, `SnapshotId`, `CreatedBy` |",
+            "| `Custom.VectorIndexes` | Vector indexes: `Name`, `Column`, `Method`, `Build` |",
+            "| `Custom.Fork` | The dataset this one was forked from: `Upstream`, "
+            "`RevisionsBehind`, `RevisionsAhead`, `BaseSnapshot`, `LastSyncMs`, `ForkedBy`. "
+            "The revision counts are upper bounds (zero is exact). Absent if it isn't a fork |",
+            "| `Custom.Sources`, `Custom.Sources.Complete` | The datasets the current content "
+            "was built from: `Dataset`, `Visible` |",
+            "| `Custom.ReadSources.*` | What this snapshot's commit read: `Dataset`, "
+            "`SnapshotId`, `ResolvedBy`, `Visible`, plus `Reported` and `Truncated` flags |",
+            "| `Custom.Consumers.*` | Who read this version: `Dataset`, `SnapshotId`, "
+            "`Commits`, `ProducedBy`, `Visible`, plus a `Truncated` flag. Absent if the "
+            "lookup couldn't run; an empty list means nothing read it |",
+            "| `Custom.MaterializedView.*` | Materialized-view state |",
+            "",
+            "Source and consumer lists name every dataset, including ones you can't read; "
+            "`Visible` says which you can.",
+            "",
+            "Add a `@{label}` version selector (`dataset@previous`, `dataset@{tag}`, "
+            "`dataset@{snapshot_id}`) to describe another version. `Custom.Snapshot.*` and "
+            "`Custom.ReadSources.*` follow the label; `Custom.Tags` and `Custom.Sources` "
+            "always describe the dataset as it is now.",
+        ])
+    },
     responses={
         200: {"description": "EDMX metadata document returned as XML"},
         400: {"description": "Malformed @{label} version selector, or the dataset kind does not support snapshot versioning"},
