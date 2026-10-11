@@ -22,10 +22,19 @@ Each worker runs one daemon thread that:
 Reading it: `oom_kill` incremented just before a death = memory, and the
 samples say who held it. Samples flat and no `oom_kill` = the health check.
 
+The 2026-10-11 17:33 run answered that: no `oom_kill`, and the dying worker's
+samples stopped ~6s before uvicorn killed it - Python in that worker froze. So
+each tick also re-arms a faulthandler watchdog: faulthandler's timer is a C
+thread that needs no GIL, and if this thread misses its ticks for
+_WATCHDOG_TIMEOUT_S it writes every Python thread's stack to stderr. A dump
+showing a thread inside a call = what held the GIL; every thread idle (sleeping
+/ waiting) = the process was not scheduled.
+
 Enabled by WORKER_DIAGNOSTICS=1 (set in the Dockerfile). Delete this module,
 its call in main.py and the two Dockerfile changes once the cause is known.
 """
 
+import faulthandler
 import os
 import threading
 import time
@@ -36,6 +45,8 @@ from opteryx_shared_services.logging import get_logger
 
 _EVENTS_INTERVAL_S = 0.25
 _SAMPLE_EVERY = 8  # events ticks per sample: 8 x 0.25s = 2s
+# Under uvicorn's 5s ping timeout, so the dump lands before the kill.
+_WATCHDOG_TIMEOUT_S = 3
 
 logger = get_logger()
 
@@ -82,6 +93,9 @@ def _run() -> None:
     last_oom_kill = _read_oom_kill()
     tick = 0
     while True:
+        # Re-arming cancels the previous timer: the dump fires only if this
+        # loop stalls for _WATCHDOG_TIMEOUT_S.
+        faulthandler.dump_traceback_later(_WATCHDOG_TIMEOUT_S)
         time.sleep(_EVENTS_INTERVAL_S)
         tick += 1
         oom_kill = _read_oom_kill()
