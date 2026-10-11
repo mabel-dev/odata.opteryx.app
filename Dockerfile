@@ -62,9 +62,11 @@ EXPOSE 8080
 # modest relative to vCPUs, though -- opteryx-core spawns its own native worker
 # threads per query, and those multiply per uvicorn process too.
 ENV WEB_CONCURRENCY=2
+# TEMPORARY - per-worker memory / OOM sampler, see app/worker_diagnostics.py.
+ENV WORKER_DIAGNOSTICS=1
 # `app.preflight` runs FIRST and short-circuits the `&&`: it probes every
 # dependency and exits non-zero if one is unreachable, so Cloud Run fails the
 # revision and traffic stays on the one already serving. It cannot be only the
 # ASGI lifespan -- the server's supervisor binds the socket in the parent and
 # respawns dead children, so the port stays open. See app/preflight.py.
-CMD python -m app.preflight && exec uvicorn app.main:service --host 0.0.0.0 --port $PORT --workers $WEB_CONCURRENCY
+CMD python -m app.preflight && python -m app.worker_diagnostics && exec uvicorn app.main:service --host 0.0.0.0 --port $PORT --workers $WEB_CONCURRENCY

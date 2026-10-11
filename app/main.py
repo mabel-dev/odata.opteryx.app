@@ -53,6 +53,11 @@ async def lifespan(app: FastAPI):
     project. Set `HEALTH_DEPENDENCY_CHECKS=false` to run without the probes.
     """
     preflight.run_startup_checks()
+    if os.environ.get("WORKER_DIAGNOSTICS") == "1":
+        # TEMPORARY - see app/worker_diagnostics.py.
+        from app import worker_diagnostics
+
+        worker_diagnostics.start()
     yield
 
 
