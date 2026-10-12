@@ -2,7 +2,7 @@
 says nothing about where that metadata lives.
 
 opteryx wraps any failure to read a dataset's metadata during binding in
-DatasetReadError, embedding the storage URI it failed on. Untreated, that
+DatasetMetadataReadError (a DatasetReadError), embedding the storage URI it failed on. Untreated, that
 reaches the generic exception handler and the URI -- bucket name and internal
 metadata layout -- is echoed to the caller inside a 500. The dataset is
 registered and the query is well-formed, so neither 404 nor 400 describes it.
@@ -37,19 +37,21 @@ def client():
 
 def test_unreadable_metadata_returns_503(client, monkeypatch):
     def fake_execute_odata_query(*args, **kwargs):
-        raise opteryx.exceptions.DatasetReadError(_ENGINE_MESSAGE)
+        raise opteryx.exceptions.DatasetMetadataReadError(_ENGINE_MESSAGE)
 
     monkeypatch.setattr(interface, "execute_odata_query", fake_execute_odata_query)
 
     response = client.get("/api/v4/public/security/nvd_vulnerabilities")
 
     assert response.status_code == 503
-    assert "unavailable" in response.json()["detail"].lower()
+    detail = response.json()["detail"]
+    assert "description (schema, snapshot or manifest)" in detail
+    assert "data file" not in detail
 
 
 def test_the_storage_uri_does_not_reach_the_caller(client, monkeypatch):
     def fake_execute_odata_query(*args, **kwargs):
-        raise opteryx.exceptions.DatasetReadError(_ENGINE_MESSAGE)
+        raise opteryx.exceptions.DatasetMetadataReadError(_ENGINE_MESSAGE)
 
     monkeypatch.setattr(interface, "execute_odata_query", fake_execute_odata_query)
 

@@ -110,6 +110,12 @@ logger = get_logger()
 
 GCP_PROJECT_ID = os.environ.get("GCP_PROJECT_ID")
 
+# Closes every storage-read 503: what the caller can and cannot do about it.
+_STORAGE_READ_ADVICE = (
+    "This is not caused by the query and rewriting it will not help. The failure "
+    "has been logged; retry shortly, and report it if it persists."
+)
+
 
 # Resolved per use, not at import. A module-level constant is evaluated once
 # at startup and then frozen for the life of the process, so config changes
@@ -1674,6 +1680,31 @@ def read_dataset(
         ):
             raise HTTPException(status_code=400, detail=f"Invalid query: {describe_type_mismatch(e)}")
         raise HTTPException(status_code=400, detail=f"Invalid query: {str(e)}")
+    # The three DatasetReadError responses below are all 503: the dataset is
+    # registered and the query is well-formed, so neither 404 nor 400 describes
+    # it, and nothing the caller rewrites will help. They differ in saying WHICH
+    # read failed, so nobody diagnoses the metadata when a data file failed.
+    #
+    # The engine's message embeds the storage URI it failed on, which names the
+    # bucket and its internal layout, so it is logged and never returned.
+    except opteryx.exceptions.DatasetMetadataReadError as e:
+        logger.error(f"Dataset metadata unreadable for {table_name}: {e}")
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "dataset could not be read: its description (schema, snapshot or "
+                f"manifest) could not be read from storage. {_STORAGE_READ_ADVICE}"
+            ),
+        ) from e
+    except opteryx.exceptions.DatasetDataReadError as e:
+        logger.error(f"Dataset data file unreadable for {table_name}: {e}")
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "dataset could not be read: a data file this query needed could not "
+                f"be read from storage. {_STORAGE_READ_ADVICE}"
+            ),
+        ) from e
     except opteryx.exceptions.DatasetReadError as e:
         # Opteryx-core raises this single exception type for two very different
         # situations: a genuine storage failure (manifest unreadable), and a
@@ -1692,18 +1723,13 @@ def read_dataset(
         ):
             raise HTTPException(status_code=404, detail=msg) from e
 
-        # The dataset exists in the catalog but its stored metadata could not be
-        # read -- a manifest the storage layer refused or could not return. Not a
-        # 404: the dataset is registered, and answering "not found" sends the
-        # caller looking for a name that is perfectly correct. Not a 400 either;
-        # nothing about the query caused it and no rewriting of it will help.
-        #
-        # The engine's message embeds the storage URI it failed on, which names
-        # the bucket and its internal layout, so it is logged and not returned.
-        logger.error(f"Dataset metadata unreadable for {table_name}: {e}")
+        # A read failure the engine did not attribute to the metadata or to a data
+        # file (filesystem, connector and READ_* paths still raise the base class).
+        # Say only what is known: something about the dataset could not be read.
+        logger.error(f"Dataset unreadable for {table_name}: {e}")
         raise HTTPException(
             status_code=503,
-            detail="dataset is temporarily unavailable: its stored metadata could not be read",
+            detail=f"dataset could not be read from storage. {_STORAGE_READ_ADVICE}",
         ) from e
     except Exception as e:
         logger.error(f"Error executing OData query for {table_name}: {e}")

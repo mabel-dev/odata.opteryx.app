@@ -168,4 +168,5 @@ def test_genuine_storage_failure_still_returns_503(client, monkeypatch):
     response = client.get("/api/v4/public/demo/people")
 
     assert response.status_code == 503
-    assert "temporarily unavailable" in response.json()["detail"].lower()
+    assert response.json()["detail"].startswith("dataset could not be read from storage.")
+    assert "gs://" not in response.text
