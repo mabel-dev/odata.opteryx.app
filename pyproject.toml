@@ -10,10 +10,10 @@ requires-python = '>=3.14'
 dependencies = [
     "Brotli==1.2.0",
     "cryptography==50.0.2",
-    "fastapi==0.142.2",
-    "google-cloud-firestore>=2.34.0",
+    "fastapi==0.143.0",
+    "google-cloud-firestore>=2.34.1",
     "google-cloud-secret-manager==2.31.0",
-    "google-cloud-storage==3.16.0",
+    "google-cloud-storage==3.17.0",
     "opteryx-shared-services[web,storage,secrets]>=0.2.3",
     "opteryx-core>=0.9.166",
     "opteryx-catalog[kms]>=0.4.176",
@@ -31,7 +31,7 @@ dependencies = [
     # %28default%29 and every gRPC read fails with INVALID_ARGUMENT
     # "Invalid database id %28default%29". Named databases are unaffected.
     # Remove the cap once upstream ships a fixed release.
-    "google-api-core<2.41.0",
+    "google-api-core<2.42.0",
 ]
 
 [project.optional-dependencies]
