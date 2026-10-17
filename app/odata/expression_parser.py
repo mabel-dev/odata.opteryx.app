@@ -21,6 +21,7 @@ if _vendored_path not in sys.path:
     sys.path.insert(0, _vendored_path)
 
 from odata_query.exceptions import FunctionCallException
+from odata_query.exceptions import LiteralValueException
 from opteryx.compiled.structures.expressions import Expression
 from odata_query.grammar import ODataLexer
 from odata_query.grammar import ODataParser
@@ -190,10 +191,11 @@ class ODataExpressionParser:
             ast = self.parser.parse(self.lexer.tokenize(filter_expr))
             # Convert AST to Opteryx expression node using the AST node's built-in method
             return ast.to_opteryx_node(self.arena)
-        except FunctionCallException as e:
-            # Unknown function, wrong argument count, wrong argument type -- these
-            # already carry a precise, user-facing message. Surface it rather than
-            # flattening it into the generic parse failure below.
+        except (FunctionCallException, LiteralValueException) as e:
+            # Unknown function, wrong argument count, wrong argument type, a literal
+            # the engine cannot represent -- these already carry a precise,
+            # user-facing message. Surface it rather than flattening it into the
+            # generic parse failure below.
             raise ValueError(str(e)) from e
         except NotImplementedError as e:
             # Catch unsupported OData constructs and provide a user-friendly error
@@ -317,7 +319,7 @@ class ODataExpressionParser:
             try:
                 ast = self.parser.parse(self.lexer.tokenize(expr_text))
                 node = ast.to_opteryx_node(self.arena)
-            except FunctionCallException as e:
+            except (FunctionCallException, LiteralValueException) as e:
                 raise ValueError(str(e)) from e
             except Exception as e:
                 raise ValueError(

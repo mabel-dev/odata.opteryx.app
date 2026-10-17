@@ -1712,12 +1712,13 @@ def read_dataset(
         # that doesn't exist (see OpteryxTable._resolve_snapshot upstream). The
         # two need different status codes, and there's no distinct exception
         # type to catch, so this is keyed off the resolver's own stable message
-        # templates ("No tag ...", "No previous version for ...", "... which
-        # could not be read"). A version-selector opteryx exception subclass
-        # upstream would let this stop matching message text.
+        # templates ("No tag ...", "No snapshot ...", "No previous version for
+        # ...", "... which could not be read"). A version-selector opteryx
+        # exception subclass upstream would let this stop matching message text.
         msg = str(e)
         if (
             msg.startswith("No tag ")
+            or msg.startswith("No snapshot ")
             or msg.startswith("No previous version for ")
             or "which could not be read" in msg
         ):
@@ -2149,9 +2150,11 @@ def dataset_metadata(
 
     # Public workspace -> read-only
     if not allowed and workstream == "public":
+        from app.auth.permissions import PUBLIC_READ_POLICY
+
         allowed = True
         assigned_role = "reader"
-        assigned_policy = "always-allow-public-read"
+        assigned_policy = PUBLIC_READ_POLICY
 
     # Policy-granted access
     if not allowed:

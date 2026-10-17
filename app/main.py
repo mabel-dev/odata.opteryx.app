@@ -4,6 +4,7 @@ import sys
 
 from fastapi import FastAPI
 from fastapi import HTTPException
+from fastapi.exceptions import RequestValidationError
 from opteryx_shared_services.logging import get_logger
 from opteryx_shared_services.logging import set_log_name
 
@@ -16,6 +17,7 @@ from app.routes.v4.errors import ODataError
 from app.routes.v4.errors import generic_exception_handler
 from app.routes.v4.errors import http_exception_handler
 from app.routes.v4.errors import odata_error_handler
+from app.routes.v4.errors import request_validation_exception_handler
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../opteryx-core")))
 sys.path.insert(
@@ -66,6 +68,7 @@ service = FastAPI(title="Opteryx OData v4 Service", lifespan=lifespan)
 # Register exception handlers for OData v4 error format
 service.add_exception_handler(ODataError, odata_error_handler)
 service.add_exception_handler(HTTPException, http_exception_handler)
+service.add_exception_handler(RequestValidationError, request_validation_exception_handler)
 service.add_exception_handler(Exception, generic_exception_handler)
 
 configure_cors(service)

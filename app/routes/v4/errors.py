@@ -3,6 +3,10 @@
 from fastapi import HTTPException
 from fastapi import Request
 from fastapi import status
+from fastapi.exception_handlers import (
+    request_validation_exception_handler as default_request_validation_exception_handler,
+)
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from opteryx_shared_services.logging import get_logger
 
@@ -73,6 +77,43 @@ async def http_exception_handler(request: Request, exc: HTTPException) -> JSONRe
         status_code=exc.status_code,
         content={"detail": exc.detail},
     )
+
+
+def _describe_validation_error(error: dict) -> str:
+    """One FastAPI validation error as a sentence about the query option.
+
+    `loc` is `("query", "$top")` for a query option; the last element is the
+    name the caller actually wrote, alias included.
+    """
+    name = str(error.get("loc", ("",))[-1]) or "a parameter"
+    value = error.get("input")
+    shown = repr(value)
+    if len(shown) > 60:
+        shown = shown[:57] + "..."
+    if error.get("type") == "int_parsing":
+        return f"{name} must be an integer, not {shown}"
+    return f"{name}: {error.get('msg', 'invalid value')} (got {shown})"
+
+
+async def request_validation_exception_handler(
+    request: Request, exc: RequestValidationError
+) -> JSONResponse:
+    """A query option FastAPI could not parse, as an OData 400 for v4 endpoints.
+
+    `$top` and `$skip` are typed int, so `$top=abc` is refused before the route
+    runs. Without this, FastAPI answers it itself with a 422 and `{"detail":
+    [...]}` - the one error on the v4 surface that was not in the OData shape
+    every other error uses. OData reports a malformed system query option as
+    400 Bad Request.
+    """
+    if request.url.path.startswith("/api/v4"):
+        message = "; ".join(_describe_validation_error(error) for error in exc.errors())
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={"error": {"code": "BadRequest", "message": message}},
+            headers={"OData-Version": "4.0"},
+        )
+    return await default_request_validation_exception_handler(request, exc)
 
 
 # Opteryx ends every type-mismatch message with SQL remediation -- `CAST(column

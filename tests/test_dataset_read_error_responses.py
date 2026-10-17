@@ -112,3 +112,20 @@ def test_version_selector_miss_is_still_a_404(client, monkeypatch):
     response = client.get(_PATH)
 
     assert response.status_code == 404
+
+
+def test_unknown_snapshot_id_is_a_404_not_a_storage_failure(client, monkeypatch):
+    """`@<snapshot id>` naming a snapshot that doesn't exist is the caller's miss,
+    as `$metadata` already reports it - not a 503 storage failure."""
+    _raising(
+        monkeypatch,
+        opteryx.exceptions.DatasetReadError(
+            "No snapshot 1755000000000 for dataset benchmarks.clickbench.hits - "
+            "it may not exist, or may have expired."
+        ),
+    )
+
+    response = client.get(_PATH)
+
+    assert response.status_code == 404
+    assert "No snapshot 1755000000000" in response.json()["detail"]

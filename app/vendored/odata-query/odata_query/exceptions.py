@@ -51,6 +51,16 @@ class FunctionCallException(ODataException):
     pass
 
 
+class LiteralValueException(ODataException):
+    """
+    Thrown when a literal the lexer accepted cannot be represented, e.g. a
+    datetime with more fractional-second digits than the engine stores. The
+    message is user-facing and is surfaced as written.
+    """
+
+    pass
+
+
 class UnknownFunctionException(FunctionCallException):
     """
     Thrown when the parser encounters an undefined function call.

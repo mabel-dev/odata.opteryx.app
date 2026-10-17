@@ -28,6 +28,15 @@ ANONYMOUS_EXEMPT_PAIRS = {
 }
 
 
+# The policy label reported for a read of `public.*`. The read comes from the
+# built-in reader grant every session gets (opteryx_access `implicit_grants`),
+# which has no policy id of its own, so this label stands in for it. It is the
+# same grant signed in or not - an anonymous caller is narrowed to
+# ANONYMOUS_EXEMPT_PAIRS by the listing, not by a different policy - so every
+# route reports this one label for it.
+PUBLIC_READ_POLICY = "always-allow-public-read"
+
+
 def is_anonymous_exempt(workstream: Optional[str], collection: Optional[str]) -> bool:
     """Whether (workstream, collection) is reachable without authentication."""
     return (workstream, collection) in ANONYMOUS_EXEMPT_PAIRS

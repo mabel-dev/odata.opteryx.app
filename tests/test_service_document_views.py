@@ -97,3 +97,43 @@ def test_service_document_offers_an_owner_every_table(monkeypatch):
         assert f"ws.information_schema.{table}" in names, table
     assert names["ws.information_schema.tasks"]["role"] == "owner"
     assert names["ws.information_schema.tasks"]["policy"] == "virtual-information-schema"
+
+
+def test_a_name_in_both_datasets_and_views_is_listed_once_as_the_dataset(monkeypatch):
+    """A materialized view whose name also has a leftover `views` document (written
+    before the catalog refused a second object under a taken name) used to be
+    listed twice, once as MaterializedView and once as View. It is listed once, as
+    the dataset - the same answer $metadata gives."""
+    materialized = sd.DatasetInfo(
+        resource="public.security.vulnerabilities_per_week",
+        workspace="public",
+        collection="security",
+        name="vulnerabilities_per_week",
+        source="MaterializedView",
+    )
+    leftover_view = sd.DatasetInfo(
+        resource="public.security.vulnerabilities_per_week",
+        workspace="public",
+        collection="security",
+        name="vulnerabilities_per_week",
+        source="View",
+    )
+    other_view = sd.DatasetInfo(
+        resource="public.security.recent",
+        workspace="public",
+        collection="security",
+        name="recent",
+        source="View",
+    )
+    by_collection = {"datasets": [materialized], "views": [leftover_view, other_view]}
+    monkeypatch.setattr(sd, "_drop_unlistable_workspaces", lambda db, ids: ids)
+    monkeypatch.setattr(
+        sd, "_query_collection_group", lambda db, coll, workspace_filter=None, limit=1000: list(by_collection[coll])
+    )
+
+    listed = sd._get_workspace_datasets(object(), {"public"})
+
+    assert [(d.resource, d.source) for d in listed] == [
+        ("public.security.vulnerabilities_per_week", "MaterializedView"),
+        ("public.security.recent", "View"),
+    ]

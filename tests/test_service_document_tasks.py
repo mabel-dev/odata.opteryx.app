@@ -315,6 +315,29 @@ def test_an_anonymous_caller_sees_only_exempt_tasks(monkeypatch):
     assert f"{workstream}.not_exempt.closed" not in names
 
 
+def test_public_data_reports_one_policy_signed_in_or_not(monkeypatch):
+    """Anonymous and signed-in reads of public data come from the same built-in
+    reader grant, and per-dataset $metadata reports it as PUBLIC_READ_POLICY for
+    both. The service document used to give anonymous callers a label of its own,
+    so the two endpoints disagreed about the same dataset."""
+    from app.auth.permissions import ANONYMOUS_EXEMPT_PAIRS, PUBLIC_READ_POLICY
+
+    workstream, collection = sorted(ANONYMOUS_EXEMPT_PAIRS)[0]
+    table = sd.DatasetInfo(
+        resource=f"{workstream}.{collection}.cves",
+        workspace=workstream,
+        collection=collection,
+        name="cves",
+        source="Table",
+    )
+
+    for claims in ({"identity": None}, {"identity": "tester", "policies": []}):
+        result = _serve(monkeypatch, [], claims, workspace_datasets=[table])
+        entry = {e["name"]: e for e in result["value"]}[table.resource]
+        assert entry["role"] == "reader"
+        assert entry["policy"] == PUBLIC_READ_POLICY
+
+
 def test_triggers_are_not_listed(no_soft_delete_check):
     """A trigger is named per-dataset in a subcollection, NOT in the
     `workspace.collection.<object>` namespace, so it belongs on a dataset's

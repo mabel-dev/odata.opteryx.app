@@ -618,7 +618,21 @@ def _get_workspace_datasets(db, workspace_ids: set[str]) -> list[DatasetInfo]:
             detail="failed to read datasets from firestore",
         ) from exc
 
-    return results
+    # A name identifies one object - the catalog refuses to create a second under
+    # a taken name - but a document written before that guard can still pair a
+    # dataset (e.g. a materialized view) with a leftover `views` document of the
+    # same name, which listed the name twice. Keep one entry per resource, the
+    # `datasets` document winning, as $metadata (`_ordered_datasets`) and the
+    # per-dataset $metadata (load_dataset before load_view) already resolve it.
+    unique: dict[str, DatasetInfo] = {}
+    for dataset in results:
+        kept = unique.setdefault(dataset.resource, dataset)
+        if kept is not dataset:
+            logger.warning(
+                f"{dataset.resource} is catalogued as both {kept.source} and "
+                f"{dataset.source}; listing it once, as {kept.source}"
+            )
+    return list(unique.values())
 
 
 @router.get(
@@ -682,7 +696,7 @@ def get_service_document(
     claims = request.state.claims
     identity = claims.get("identity")
 
-    from app.auth.permissions import ANONYMOUS_EXEMPT_PAIRS, ANONYMOUS_EXEMPT_WORKSTREAM
+    from app.auth.permissions import ANONYMOUS_EXEMPT_PAIRS, ANONYMOUS_EXEMPT_WORKSTREAM, PUBLIC_READ_POLICY
 
     db = _get_firestore_client(database=_firestore_database())
     if db is None:
@@ -707,7 +721,7 @@ def get_service_document(
         for dataset in all_datasets:
             if (dataset.workspace, dataset.collection) in ANONYMOUS_EXEMPT_PAIRS:
                 dataset.role = "reader"
-                dataset.policy = "always-allow-public-anonymous"
+                dataset.policy = PUBLIC_READ_POLICY
                 filtered_datasets.append(dataset)
     else:
         # Determine access policies from JWT "policies" claim (do not rely on a "permissions" key).
@@ -793,7 +807,7 @@ def get_service_document(
             # Public datasets - read-only for all users
             if dataset.resource.startswith("public."):
                 dataset.role = "reader"
-                dataset.policy = "always-allow-public-read"
+                dataset.policy = PUBLIC_READ_POLICY
                 filtered_datasets.append(dataset)
                 continue
 

@@ -37,6 +37,26 @@ def try_parse_iso(value):
         return None
 
 
+# The grammar accepts up to 12 fractional-second digits (Edm precision allows
+# them), but the engine stores microseconds and parse_iso reads at most 6. A
+# literal with more used to fail parsing silently and fall back to a string,
+# which surfaced as a string-vs-timestamp mismatch telling the caller to drop
+# quotes they never wrote.
+_FRACTIONAL_SECONDS = re.compile(r"\d{2}:\d{2}:\d{2}\.(\d+)")
+_MAX_FRACTIONAL_DIGITS = 6
+
+
+def _reject_excess_precision(text: str, kind: str) -> None:
+    match = _FRACTIONAL_SECONDS.search(text)
+    if match and len(match.group(1)) > _MAX_FRACTIONAL_DIGITS:
+        from .exceptions import LiteralValueException
+
+        raise LiteralValueException(
+            f"Invalid {kind} literal `{text}`: at most {_MAX_FRACTIONAL_DIGITS} "
+            "fractional-second digits (microseconds) are supported."
+        )
+
+
 @dataclass(frozen=True)
 class _Node:
     """Base class for all AST nodes. Can override to_opteryx_node to customize conversion."""
@@ -206,6 +226,7 @@ class Time(_Literal):
             if isinstance(parsed, dt.datetime):
                 parsed = parsed.time()
             return Literal(value=time_to_int64_us(parsed), type=TIME(), arena=arena)
+        _reject_excess_precision(self.val, "time")
         # Fallback to string if parsing fails
         return Literal(value=self.val.encode("utf-8"), type=VARCHAR, arena=arena)
 
@@ -232,6 +253,7 @@ class DateTime(_Literal):
             # TIMESTAMP literals must be encoded as int64 microseconds-since-epoch,
             # matching how Opteryx's own CAST(... AS TIMESTAMP) folding stores them.
             return Literal(value=timestamp_to_int64_us(parsed), type=TIMESTAMP(), arena=arena)
+        _reject_excess_precision(self.val, "datetime")
         # Fallback to string if parsing fails
         return Literal(value=self.val.encode("utf-8"), type=VARCHAR, arena=arena)
 
