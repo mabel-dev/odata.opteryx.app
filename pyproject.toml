@@ -10,21 +10,21 @@ requires-python = '>=3.14'
 dependencies = [
     "Brotli==1.2.0",
     "cryptography==50.0.2",
-    "fastapi==0.143.0",
+    "fastapi==0.146.0",
     "google-cloud-firestore>=2.34.1",
     "google-cloud-secret-manager==2.31.0",
-    "google-cloud-storage==3.17.0",
+    "google-cloud-storage==3.17.1",
     "opteryx-shared-services[web,storage,secrets]>=0.2.3",
-    "opteryx-core>=0.9.170",
+    "opteryx-core>=0.9.172",
     "opteryx-catalog[kms]>=0.4.176",
     "opteryx-access>=0.2.15",
-    "opteryx-iceberg>=0.1.16",
+    "opteryx-iceberg>=0.1.19",
     "python-jose[cryptography]==3.5.0",
     "python-multipart==0.0.32",
     "requests==2.34.2",
     "sly==0.5",
     "uvicorn[standard]==0.38.0",
-    "valkey==6.1.1",
+    "valkey==6.2.0",
 
     # google-api-core 2.35.0 (released 2026-08-24) percent-encodes values in
     # path_template.expand, so the (default) database id reaches Firestore as
