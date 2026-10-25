@@ -8,7 +8,7 @@ version = "0.0.25"
 description = "Opteryx OData Service"
 requires-python = '>=3.14'
 dependencies = [
-    "Brotli==1.2.0",
+    "Brotli==1.2.1",
     "cryptography==50.0.2",
     "fastapi==0.146.0",
     "google-cloud-firestore>=2.34.1",
