@@ -148,7 +148,9 @@ class ODataLogicalPlanBuilder:
         if compute_expr and compute_expr.strip():
             if apply_expr:
                 raise ValueError(
-                    "$compute cannot be combined with $apply in this version"
+                    "$compute cannot be combined with $apply in this version; to group "
+                    "by a computed value, compute it inside $apply instead: "
+                    "compute(year(created_at) as Year)/groupby((Year), aggregate($count as Count))"
                 )
             self.current_step_id = self._add_compute_node(compute_expr)
 

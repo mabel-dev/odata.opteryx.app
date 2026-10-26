@@ -15,6 +15,7 @@ from odata_query.apply import (
     GroupByTransform,
     AggregateTransform,
     FilterTransform,
+    ComputeTransform,
     ApplyParseError,
 )
 
@@ -192,6 +193,28 @@ def test_parse_filter_complex():
     assert "number_of_moons lt 50" in filter_transform.filter_expr
 
 
+def test_parse_compute():
+    """Test: compute(year(published_at) as Year, length(name) as L)"""
+    result = parse_apply("compute(year(published_at) as Year, length(name) as L)")
+
+    compute_transform = result.transformations[0]
+    assert isinstance(compute_transform, ComputeTransform)
+    assert compute_transform.compute_expr == "year(published_at) as Year, length(name) as L"
+
+
+def test_parse_compute_then_groupby():
+    """Test: compute(year(ts) as Year)/groupby((Year), aggregate($count as Count))"""
+    result = parse_apply("compute(year(ts) as Year)/groupby((Year), aggregate($count as Count))")
+
+    assert [type(t) for t in result.transformations] == [ComputeTransform, GroupByTransform]
+    assert result.transformations[1].properties == ["Year"]
+
+
+def test_parse_compute_unmatched_parens():
+    with pytest.raises(ApplyParseError, match="compute"):
+        parse_apply("compute(year(ts) as Year")
+
+
 # ============================================================================
 # Pipeline Tests
 # ============================================================================
@@ -297,7 +320,7 @@ def test_parse_empty_expression():
 
 def test_parse_invalid_keyword():
     """Test invalid transformation keyword raises error"""
-    with pytest.raises(ApplyParseError, match="Expected 'groupby', 'aggregate', or 'filter'"):
+    with pytest.raises(ApplyParseError, match="Expected 'groupby', 'aggregate', 'filter', or 'compute'"):
         parse_apply("invalid((property))")
 
 

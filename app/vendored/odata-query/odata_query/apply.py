@@ -6,6 +6,7 @@ Supports:
 - groupby((properties), aggregate(expressions))
 - aggregate(expressions)
 - filter(expression)
+- compute(expression as alias, ...)
 - Transformation pipelines (chained with /)
 
 Examples:
@@ -13,6 +14,7 @@ Examples:
 - aggregate(mass with sum as total_mass)
 - filter(mass gt 10)/groupby((type))
 - groupby((region, status), aggregate(revenue with sum as total_revenue, $count as count))
+- compute(year(published_at) as yr)/groupby((yr), aggregate($count as count))
 """
 
 from dataclasses import dataclass
@@ -94,6 +96,23 @@ class FilterTransform:
 
 
 @dataclass
+class ComputeTransform:
+    """
+    Represents compute(expression as alias, ...) transformation.
+
+    Example: compute(year(published_at) as yr)
+    Note: The clauses are parsed by the $compute parser, so a computed
+    property means the same thing here as in $compute; inside $apply it can
+    also be grouped on by a later groupby.
+    """
+
+    compute_expr: str  # Raw "<expression> as <alias>, ..." string
+
+    def __repr__(self):
+        return f"ComputeTransform({self.compute_expr})"
+
+
+@dataclass
 class ApplyPipeline:
     """
     Represents the full $apply transformation pipeline.
@@ -102,7 +121,7 @@ class ApplyPipeline:
     Example: filter(mass gt 10)/groupby((type), aggregate($count as total))
     """
 
-    transformations: List[Union[GroupByTransform, AggregateTransform, FilterTransform]]
+    transformations: List[Union[GroupByTransform, AggregateTransform, FilterTransform, ComputeTransform]]
 
     def __repr__(self):
         return f"ApplyPipeline({len(self.transformations)} transformations)"
@@ -125,10 +144,11 @@ class ApplyParser:
 
     Grammar (simplified):
     apply_expr := transformation ('/' transformation)*
-    transformation := groupby_transform | aggregate_transform | filter_transform
+    transformation := groupby_transform | aggregate_transform | filter_transform | compute_transform
     groupby_transform := 'groupby' '((' property_list ')' [',' aggregate_transform] ')'
     aggregate_transform := 'aggregate' '(' aggregate_expr (',' aggregate_expr)* ')'
     filter_transform := 'filter' '(' filter_expr ')'
+    compute_transform := 'compute' '(' compute_expr ')'
     aggregate_expr := '$count' 'as' identifier | property 'with' method 'as' identifier
     method := 'sum' | 'average' | 'min' | 'max'
     """
@@ -170,8 +190,10 @@ class ApplyParser:
 
         return ApplyPipeline(transformations)
 
-    def _parse_transformation(self) -> Union[GroupByTransform, AggregateTransform, FilterTransform]:
-        """Parse a single transformation (groupby, aggregate, or filter)."""
+    def _parse_transformation(
+        self,
+    ) -> Union[GroupByTransform, AggregateTransform, FilterTransform, ComputeTransform]:
+        """Parse a single transformation (groupby, aggregate, filter, or compute)."""
         self._skip_whitespace()
 
         if self._peek_keyword("groupby"):
@@ -180,9 +202,11 @@ class ApplyParser:
             return self._parse_aggregate()
         elif self._peek_keyword("filter"):
             return self._parse_filter()
+        elif self._peek_keyword("compute"):
+            return self._parse_compute()
         else:
             raise ApplyParseError(
-                f"Expected 'groupby', 'aggregate', or 'filter' at position {self.pos}, "
+                f"Expected 'groupby', 'aggregate', 'filter', or 'compute' at position {self.pos}, "
                 f"found: {self.expr[self.pos :]}"
             )
 
@@ -272,7 +296,15 @@ class ApplyParser:
 
     def _parse_filter(self) -> FilterTransform:
         """Parse filter(expression) - extract expression for later parsing"""
-        self._consume_keyword("filter")
+        return FilterTransform(self._parse_raw_argument("filter"))
+
+    def _parse_compute(self) -> ComputeTransform:
+        """Parse compute(expression as alias, ...) - extract clauses for later parsing"""
+        return ComputeTransform(self._parse_raw_argument("compute"))
+
+    def _parse_raw_argument(self, keyword: str) -> str:
+        """Consume `keyword(...)` and return the text between the parentheses."""
+        self._consume_keyword(keyword)
         self._skip_whitespace()
         self._consume_char("(")
 
@@ -287,12 +319,10 @@ class ApplyParser:
             self.pos += 1
 
         if paren_count != 0:
-            raise ApplyParseError("Unmatched parentheses in filter expression")
+            raise ApplyParseError(f"Unmatched parentheses in {keyword} expression")
 
-        # Extract filter expression (excluding closing paren)
-        filter_expr = self.expr[start : self.pos - 1].strip()
-
-        return FilterTransform(filter_expr)
+        # Extract the argument (excluding closing paren)
+        return self.expr[start : self.pos - 1].strip()
 
     def _parse_property_list(self) -> List[str]:
         """Parse comma-separated list of property names"""

@@ -4,8 +4,8 @@ This module provides a small builder that maps the vendored $apply AST
 (`parse_apply`) into Opteryx typed plan steps by mutating the
 `ODataLogicalPlanBuilder` (adding nodes via its `_add_node` method).
 
-Only a focused subset is implemented: FilterTransform, GroupByTransform,
-AggregateTransform and the common aggregate methods (COUNT, SUM, AVG,
+Only a focused subset is implemented: FilterTransform, ComputeTransform,
+GroupByTransform, AggregateTransform and the common aggregate methods (COUNT, SUM, AVG,
 MIN, MAX). The builder is intentionally small and relies on the
 `ODataLogicalPlanBuilder` to supply helper methods for filters and node
 insertion.
@@ -17,7 +17,7 @@ where they coincide it is a coincidence -- see `_METHOD_TO_AGGREGATOR`.
 from typing import Any
 from typing import Optional
 
-from odata_query.apply import parse_apply, AggregateTransform, GroupByTransform, FilterTransform
+from odata_query.apply import parse_apply, AggregateTransform, ComputeTransform, GroupByTransform, FilterTransform
 from opteryx.compiled.structures.expressions import Aggregator
 from opteryx.compiled.structures.expressions import LogicalColumn
 from opteryx.compiled.structures.expressions import Wildcard
@@ -94,6 +94,14 @@ class ApplyLogicalPlanBuilder:
             if isinstance(transform, FilterTransform):
                 # Use existing filter helper on builder
                 odata_builder.current_step_id = odata_builder._add_filter_node(transform.filter_expr)
+                last_step = odata_builder.current_step_id
+
+            elif isinstance(transform, ComputeTransform):
+                # Same node $compute adds, but placed in the pipeline, so a
+                # later groupby can group on the alias: compute(year(ts) as
+                # yr)/groupby((yr), ...) is the only way to group by a
+                # derived value, since groupby takes property names only.
+                odata_builder.current_step_id = odata_builder._add_compute_node(transform.compute_expr)
                 last_step = odata_builder.current_step_id
 
             elif isinstance(transform, GroupByTransform):

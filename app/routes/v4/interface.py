@@ -1475,7 +1475,9 @@ def read_dataset(
             "<method> is one of sum, average, min, max -- that list is exhaustive, and function-call "
             "forms such as sum(amount) are not accepted. Transformations chain with '/', e.g. "
             "filter(x gt 1)/groupby((col), aggregate($count as Count)); a groupby with no aggregate "
-            "deduplicates, so a distinct count is groupby((a,b))/groupby((a), aggregate($count as N))."
+            "deduplicates, so a distinct count is groupby((a,b))/groupby((a), aggregate($count as N)). "
+            "groupby takes column names only; to group by a derived value, compute it first: "
+            "compute(year(created_at) as Year)/groupby((Year), aggregate($count as Count))."
         ),
         json_schema_extra={
             "x-docs-summary": (
@@ -1483,7 +1485,9 @@ def read_dataset(
                 "`groupby((vendor), aggregate(amount with sum as Total, $count as Count))`. "
                 "Aggregates are `$count as Alias` or `col with <method> as Alias`, where "
                 "`<method>` is `sum`, `average`, `min` or `max`. Chain steps with `/`, e.g. "
-                "`filter(price gt 1)/groupby((vendor), aggregate($count as N))`. See "
+                "`filter(price gt 1)/groupby((vendor), aggregate($count as N))`. To group by a "
+                "derived value, `compute` it first: "
+                "`compute(year(created_at) as Year)/groupby((Year), aggregate($count as Count))`. See "
                 "[Aggregating with `$apply`](/docs/guides/querying-via-odata#aggregating-with-apply)."
             )
         },

@@ -147,3 +147,47 @@ class TestComputeAndApplyRejected:
                 compute_expr="mass mul gravity as Foo",
                 apply_expr="groupby((id), aggregate($count as Count))",
             )
+
+
+class TestComputeInsideApply:
+    """compute() as an $apply transformation: the way to group by a derived
+    value, since groupby takes property names only. Unlike $compute it runs
+    where it appears in the pipeline, so a later groupby can use the alias."""
+
+    def test_group_by_computed_value(self):
+        result = execute_odata_query(
+            table_name=TABLE,
+            apply_expr="compute(id mod 3 as Bucket)/groupby((Bucket), aggregate($count as Count))",
+            orderby_expr="Bucket",
+        )
+        assert _rows(result) == [
+            {"Bucket": 0, "Count": 3},
+            {"Bucket": 1, "Count": 3},
+            {"Bucket": 2, "Count": 3},
+        ]
+
+    def test_group_by_year(self):
+        result = execute_odata_query(
+            table_name=TABLE,
+            apply_expr="compute(year(now()) as Year)/groupby((Year), aggregate($count as Count))",
+        )
+        rows = _rows(result)
+        assert len(rows) == 1 and rows[0]["Count"] == 9 and rows[0]["Year"] >= 2026
+
+    def test_filter_before_compute(self):
+        result = execute_odata_query(
+            table_name=TABLE,
+            apply_expr=(
+                "filter(id gt 6)/compute(id mod 2 as Odd)"
+                "/groupby((Odd), aggregate(mass with sum as Mass))"
+            ),
+            orderby_expr="Odd",
+        )
+        assert [row["Odd"] for row in _rows(result)] == [0, 1]
+
+    def test_bad_compute_clause_is_a_value_error(self):
+        with pytest.raises(ValueError):
+            execute_odata_query(
+                table_name=TABLE,
+                apply_expr="compute(year(now()))/groupby((Year), aggregate($count as Count))",
+            )
