@@ -1669,11 +1669,19 @@ def read_dataset(
         # Match the $metadata endpoint: an unknown dataset is a 404, not a 400,
         # even though DatasetNotFoundError is (surprisingly) a subclass of SqlError.
         raise HTTPException(status_code=404, detail="dataset not found in catalog") from e
-    except (opteryx.exceptions.SqlError, opteryx.exceptions.IncompatibleTypesError) as e:
+    except (
+        opteryx.exceptions.SqlError,
+        opteryx.exceptions.IncompatibleTypesError,
+        opteryx.exceptions.NotSupportedError,
+    ) as e:
         # "The query as given is invalid" — client-fixable (bad/uncast filter
         # literal, unknown column, unsupported syntax, etc.), not a server fault.
         # IncompatibleTypesError is listed separately because it doesn't actually
         # inherit from SqlError despite opteryx-core's own docs implying it does.
+        # NotSupportedError doesn't either: it is the engine refusing a construct
+        # it cannot run as written -- `$apply=aggregate(name with sum as total)`
+        # over a VARCHAR column raises it -- and the caller rewrites the query to
+        # get past it, the same as any other 400.
         #
         # Type mismatches go through describe_type_mismatch because opteryx's
         # remediation for them is SQL's `CAST(column AS type)`; the OData
