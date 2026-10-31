@@ -12,6 +12,21 @@ from opteryx_shared_services.logging import get_logger
 
 logger = get_logger()
 
+# RFC 9110 requires a 401 to carry a WWW-Authenticate challenge naming the schemes
+# the server accepts. Without one a browser never prompts for credentials, and
+# Power Query (Power BI, Excel) has nothing to suggest in its credentials dialog.
+# Basic is listed first because it is what those clients send: a client_id as the
+# user name and a personal access token as the password (see app.auth.deps).
+WWW_AUTHENTICATE = 'Basic realm="opteryx", charset="UTF-8", Bearer realm="opteryx"'
+
+
+def _error_headers(status_code: int) -> dict:
+    """Headers for an error response: the OData version, plus the challenge on a 401."""
+    headers = {"OData-Version": "4.0"}
+    if status_code == status.HTTP_401_UNAUTHORIZED:
+        headers["WWW-Authenticate"] = WWW_AUTHENTICATE
+    return headers
+
 
 class ODataError(Exception):
     """OData-specific error that should be returned in OData error format."""
@@ -52,7 +67,7 @@ async def odata_error_handler(request: Request, exc: ODataError) -> JSONResponse
                 "message": exc.message,
             }
         },
-        headers={"OData-Version": "4.0"},
+        headers=_error_headers(exc.status_code),
     )
 
 
@@ -69,13 +84,15 @@ async def http_exception_handler(request: Request, exc: HTTPException) -> JSONRe
                     "message": exc.detail,
                 }
             },
-            headers={"OData-Version": "4.0"},
+            headers=_error_headers(exc.status_code),
         )
 
     # For non-v4 endpoints, return standard FastAPI error
+    challenge = {"WWW-Authenticate": WWW_AUTHENTICATE} if exc.status_code == 401 else None
     return JSONResponse(
         status_code=exc.status_code,
         content={"detail": exc.detail},
+        headers=challenge,
     )
 
 

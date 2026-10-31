@@ -63,10 +63,12 @@ def configure_cors(app) -> None:
         # A cross-origin caller can only read headers named here. ETag is the
         # other half of conditional requests -- unlisted, it reads as null and
         # the client can never revalidate. The X-Dataset-* headers are response
-        # metadata browser clients are expected to act on.
+        # metadata browser clients are expected to act on. WWW-Authenticate tells a
+        # browser client which scheme a 401 wants.
         expose_headers=[
             "ETag",
             "OData-Version",
+            "WWW-Authenticate",
             "X-Dataset-Source",
             "X-Dataset-LastModified",
             "X-Dataset-Snapshot-Id",
