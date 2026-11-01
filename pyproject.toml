@@ -15,12 +15,12 @@ dependencies = [
     "google-cloud-secret-manager==2.31.0",
     "google-cloud-storage==3.17.1",
     "opteryx-shared-services[web,storage,secrets]>=0.2.3",
-    "opteryx-core>=0.9.175",
+    "opteryx-core>=0.9.181",
     "opteryx-catalog[kms]>=0.4.177",
     "opteryx-access>=0.2.15",
-    "opteryx-iceberg>=0.1.19",
+    "opteryx-iceberg>=0.1.23",
     "python-jose[cryptography]==3.5.0",
-    "python-multipart==0.0.32",
+    "python-multipart==0.0.33",
     "requests==2.34.2",
     "sly==0.5",
     "uvicorn[standard]==0.38.0",
@@ -31,7 +31,7 @@ dependencies = [
     # %28default%29 and every gRPC read fails with INVALID_ARGUMENT
     # "Invalid database id %28default%29". Named databases are unaffected.
     # Remove the cap once upstream ships a fixed release.
-    "google-api-core<2.43.0",
+    "google-api-core<2.43.2",
 ]
 
 [project.optional-dependencies]
