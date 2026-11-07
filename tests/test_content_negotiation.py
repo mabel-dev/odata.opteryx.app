@@ -50,7 +50,7 @@ class TestMaxVersionParsingUnit:
 
 
 class TestAcceptHeaderOnDataRoute:
-    """GET .../{dataset} only ever returns application/json."""
+    """GET .../{dataset} returns application/json, or text/csv when asked."""
 
     def test_no_accept_header_allowed(self, client):
         response = client.get("/api/v4/public/demo/users?$top=1")
@@ -78,14 +78,23 @@ class TestAcceptHeaderOnDataRoute:
         assert "Accept" in data["error"]["message"]
 
     def test_accept_rejection_error_format(self, client):
+        # text/plain, not text/csv: the data route returns CSV too now (for
+        # spreadsheet tools, see tests/test_csv_format.py).
         response = client.get(
-            "/api/v4/public/demo/users?$top=1", headers={"Accept": "text/csv"}
+            "/api/v4/public/demo/users?$top=1", headers={"Accept": "text/plain"}
         )
         assert response.status_code == 406
         assert response.headers.get("OData-Version") == "4.0"
         data = response.json()
         assert "code" in data["error"]
         assert "message" in data["error"]
+
+
+    def test_accept_csv_allowed(self, client):
+        response = client.get(
+            "/api/v4/public/demo/users?$top=1", headers={"Accept": "text/csv"}
+        )
+        assert response.status_code != 406
 
 
 class TestAcceptHeaderOnMetadataRoute:

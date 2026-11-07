@@ -17,6 +17,10 @@ from fastapi import Request
 
 MEDIA_JSON = "application/json"
 MEDIA_XML = "application/xml"
+# Not an OData format. Offered on the data route for spreadsheet tools that
+# can only read CSV (Google Sheets IMPORTDATA, Excel From Web); see
+# `wants_csv` and `rows_to_csv` in routes/v4/interface.py.
+MEDIA_CSV = "text/csv"
 
 # This service implements OData 4.0. A client that caps itself below that
 # with OData-MaxVersion is asking for something this service cannot produce.
@@ -97,4 +101,4 @@ def require_acceptable(*acceptable: str):
     return _dependency
 
 
-__all__ = ["MEDIA_JSON", "MEDIA_XML", "require_acceptable"]
+__all__ = ["MEDIA_CSV", "MEDIA_JSON", "MEDIA_XML", "require_acceptable"]

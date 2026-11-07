@@ -76,6 +76,8 @@ from app.auth.deps import require_authentication
 from app.core import _get_firestore_client
 from app.odata.content_negotiation import MEDIA_JSON
 from app.odata.content_negotiation import MEDIA_XML
+from app.odata.content_negotiation import MEDIA_CSV
+from app.odata.content_negotiation import _accepts
 from app.odata.content_negotiation import require_acceptable
 from opteryx_shared_services.config import get_config
 from app.odata.odata_to_logical_plan import ODataLogicalPlanBuilder
@@ -883,6 +885,64 @@ def _materialize_logical_plan_result(
     return _MaterializedResult(column_names or [], columns, num_rows)
 
 
+def wants_csv(format_values: list[str], accept_header: str | None) -> bool:
+    """Whether a data request asked for CSV instead of OData JSON.
+
+    `$format=csv` (or `$format=text/csv`) asks explicitly. Without it, an
+    Accept header that admits CSV but not JSON asks too -- the only reading
+    under which `require_acceptable` let a CSV-only client through. Any other
+    `$format` keeps the long-standing behaviour (ignored, JSON returned).
+
+    CSV is not an OData format. It is here for tools that can read nothing
+    else: Google Sheets' `=IMPORTDATA(url)` and Excel's Data > From Web.
+    """
+    fmt = (format_values[0] if format_values else "").strip().lower()
+    if fmt in ("csv", MEDIA_CSV):
+        return True
+    if fmt:
+        return False
+    return bool(
+        accept_header
+        and _accepts(accept_header, (MEDIA_CSV,))
+        and not _accepts(accept_header, (MEDIA_JSON,))
+    )
+
+
+def rows_to_csv(value_bytes: bytes, col_names: list[str]) -> bytes:
+    """A page of rows (the JSON array `_execute_and_serialize_rows` built) as
+    RFC 4180 CSV with a header row, UTF-8 with a BOM so Excel reads
+    non-ASCII text correctly.
+
+    Converted from the finished JSON page rather than serialized separately so
+    CSV goes through exactly the same execution, filtering, visibility and
+    paging as the JSON response -- it is a rendering of that page, not a
+    second code path to the data. Nested values (arrays, structs) are written
+    as their JSON text; nulls as empty fields.
+    """
+    import csv
+    import io
+
+    rows = json.loads(value_bytes) if value_bytes else []
+    columns = list(col_names) or (list(rows[0].keys()) if rows else [])
+    out = io.StringIO()
+    writer = csv.writer(out, lineterminator="\r\n")
+    writer.writerow(columns)
+    for row in rows:
+        record = []
+        for name in columns:
+            value = row.get(name)
+            if value is None:
+                record.append("")
+            elif isinstance(value, bool):
+                record.append("true" if value else "false")
+            elif isinstance(value, (dict, list)):
+                record.append(json.dumps(value, ensure_ascii=False, separators=(",", ":")))
+            else:
+                record.append(value)
+        writer.writerow(record)
+    return ("\ufeff" + out.getvalue()).encode("utf-8")
+
+
 def _execute_and_serialize_rows(
     session, logical_plan, top: int, fetch_top: int, visibility_filters=None
 ):
@@ -1351,7 +1411,7 @@ router = APIRouter(
         406: {"description": "Accept header does not admit application/json, the only format this route returns"},
         501: {"description": "Unsupported query feature: $search or $expand not implemented"},
     },
-    dependencies=[Depends(require_acceptable(MEDIA_JSON))],
+    dependencies=[Depends(require_acceptable(MEDIA_JSON, MEDIA_CSV))],
 )
 def read_dataset(
     request: Request,
@@ -1554,8 +1614,12 @@ def read_dataset(
             status_code=400, detail=f"Multiple parameters not allowed: {', '.join(duplicates)}"
         )
 
+    # CSV is for spreadsheets, which want the whole table: without an explicit
+    # $top it gets the service maximum rather than the JSON default page.
+    csv_requested = wants_csv(query_params.get("$format", []), request.headers.get("accept"))
+
     if top is None:
-        top = _default_top()
+        top = _max_top() if csv_requested else _default_top()
     else:
         top = int(top)  # Will raise ValueError if not a valid integer
 
@@ -1751,6 +1815,28 @@ def read_dataset(
 
     # All paging (LIMIT/OFFSET) should have been pushed down to SQL when
     # possible; no Python-side slicing is necessary.
+
+    if csv_requested:
+        headers = {"OData-Version": "4.0", "Cache-Control": "private, max-age=60"}
+        safe_name = f"{workstream}_{collection}_{dataset_name}".replace('"', "")
+        headers["Content-Disposition"] = f'inline; filename="{safe_name}.csv"'
+        if total_count is not None:
+            headers["X-Total-Count"] = str(int(total_count))
+        if has_more_rows:
+            # CSV has nowhere to put @odata.nextLink. Say so in a header, and
+            # leave the body a clean table a spreadsheet can import.
+            from urllib.parse import urlencode
+
+            next_params = dict(query_params)
+            next_params["$skip"] = [str(int(skip or 0) + top)]
+            next_query = urlencode([(k, v) for k, vs in next_params.items() for v in vs])
+            headers["Link"] = f'</api/v4/{workstream}/{collection}/{dataset}?{next_query}>; rel="next"'
+            headers["X-Truncated"] = "true"
+        return Response(
+            content=rows_to_csv(value_bytes, result.get("col_names") or []),
+            media_type="text/csv; charset=utf-8",
+            headers=headers,
+        )
 
     # Build the response body directly as bytes -- value_bytes is already a
     # complete, valid JSON array (see _execute_and_serialize_rows), so it's
