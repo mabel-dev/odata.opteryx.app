@@ -17,7 +17,7 @@ dependencies = [
     "opteryx-shared-services[web,storage,secrets]>=0.2.3",
     "opteryx-core>=0.9.192",
     "opteryx-catalog[kms]>=0.4.180",
-    "opteryx-access>=0.2.16",
+    "opteryx-access>=0.2.18",
     "opteryx-iceberg>=0.1.23",
     "python-jose[cryptography]==3.5.0",
     "python-multipart==0.0.33",
