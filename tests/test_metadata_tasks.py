@@ -50,7 +50,7 @@ def _render(monkeypatch, datasets, policies):
     monkeypatch.setattr(metadata, "_get_firestore_client", lambda **kwargs: object())
     monkeypatch.setattr(metadata, "_get_personal_datasets", lambda db, identity: [])
     monkeypatch.setattr(metadata, "_get_workspace_datasets", lambda db, ids: [])
-    monkeypatch.setattr(metadata, "_get_tasks", lambda db, ids: list(datasets))
+    monkeypatch.setattr(metadata, "_get_tasks", lambda db, ids, **_kw: list(datasets))
     monkeypatch.setattr(metadata, "_get_relationships", lambda db, ids: [])
 
     request = DummyRequest()

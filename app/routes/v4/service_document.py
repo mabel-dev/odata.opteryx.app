@@ -363,7 +363,9 @@ def _get_personal_datasets(db, identity: str) -> list[DatasetInfo]:
     return results
 
 
-def _get_tasks(db, workspace_ids: set[str], limit: int = 1000) -> list[DatasetInfo]:
+def _get_tasks(
+    db, workspace_ids: set[str], limit: int = 1000, *, include_unlisted: bool = False
+) -> list[DatasetInfo]:
     """Retrieve the tasks in the given workspaces, as single-row datasets.
 
     Deliberately NOT routed through `_query_collection_group`, because a task
@@ -390,7 +392,9 @@ def _get_tasks(db, workspace_ids: set[str], limit: int = 1000) -> list[DatasetIn
     results: list[DatasetInfo] = []
 
     try:
-        workspace_ids = _drop_unlistable_workspaces(db, workspace_ids)
+        workspace_ids = _drop_unlistable_workspaces(
+            db, workspace_ids, include_unlisted=include_unlisted
+        )
         if not workspace_ids:
             return []
 
@@ -499,7 +503,9 @@ def _starred_workspaces(db, workspace_ids: set[str], identity: str) -> list[str]
         return []
 
 
-def _drop_unlistable_workspaces(db, workspace_ids: set[str]) -> set[str]:
+def _drop_unlistable_workspaces(
+    db, workspace_ids: set[str], *, include_unlisted: bool = False
+) -> set[str]:
     """Filter out workspaces that should not be listed, so their datasets never
     reach the collection-group query below in the first place.
 
@@ -538,6 +544,13 @@ def _drop_unlistable_workspaces(db, workspace_ids: set[str]) -> set[str]:
     to -- that field is not written by anything anymore, but a workspace
     already carrying it from before this change is still effectively
     deleted until something clears the doc outright.
+
+    `include_unlisted` keeps a `listed: false` workspace while still dropping a
+    deleted one. For the ANONYMOUS listing only: `demo` is unlisted so it stays
+    out of signed-in catalogs, but it is the whole of what a caller with no
+    credentials can read, and a listing that hid it would show them nothing.
+    (A signed-in listing never fetches `demo` in the first place - implicit
+    grants never reach a token's policies - so the flag only ever matters here.)
     """
     if not workspace_ids:
         return workspace_ids
@@ -576,7 +589,7 @@ def _drop_unlistable_workspaces(db, workspace_ids: set[str]) -> set[str]:
             # their catalog - so this fails toward the status quo, not toward
             # hiding. Mirrors opteryx_catalog's `_guard_is_on`.
             listed = properties.get("listed")
-            if listed is not None and not listed:
+            if not include_unlisted and listed is not None and not listed:
                 gone.add(workspace_id)
         except Exception:
             continue
@@ -584,7 +597,9 @@ def _drop_unlistable_workspaces(db, workspace_ids: set[str]) -> set[str]:
     return workspace_ids - gone
 
 
-def _get_workspace_datasets(db, workspace_ids: set[str]) -> list[DatasetInfo]:
+def _get_workspace_datasets(
+    db, workspace_ids: set[str], *, include_unlisted: bool = False
+) -> list[DatasetInfo]:
     """Retrieve all datasets from the given workspace IDs.
 
     Soft-deleted workspaces are excluded before the collection-group query
@@ -601,7 +616,9 @@ def _get_workspace_datasets(db, workspace_ids: set[str]) -> list[DatasetInfo]:
     results = []
 
     try:
-        workspace_ids = _drop_unlistable_workspaces(db, workspace_ids)
+        workspace_ids = _drop_unlistable_workspaces(
+            db, workspace_ids, include_unlisted=include_unlisted
+        )
         for workspace_id in workspace_ids:
             # Query both datasets and views collection groups
             for coll in ("datasets", "views"):
@@ -725,8 +742,8 @@ def get_service_document(
         # NOT passed through `_drop_unlistable_workspaces`: `demo` is unlisted
         # for signed-in catalogs, but it is the whole of the anonymous one.
         anonymous_workspaces = set(implicitly_readable_workspaces(None))
-        all_datasets = _get_workspace_datasets(db, anonymous_workspaces)
-        all_datasets.extend(_get_tasks(db, anonymous_workspaces))
+        all_datasets = _get_workspace_datasets(db, anonymous_workspaces, include_unlisted=True)
+        all_datasets.extend(_get_tasks(db, anonymous_workspaces, include_unlisted=True))
         filtered_datasets = []
         for dataset in all_datasets:
             access = read_access([], dataset.resource, None, grants=[])

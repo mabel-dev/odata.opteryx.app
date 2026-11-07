@@ -35,9 +35,9 @@ class DummyRequest:
 def _stub_listing(monkeypatch):
     monkeypatch.setattr(sd, "_get_firestore_client", lambda **kwargs: object())
     monkeypatch.setattr(sd, "_get_personal_datasets", lambda db, identity: [])
-    monkeypatch.setattr(sd, "_get_workspace_datasets", lambda db, ids: [])
-    monkeypatch.setattr(sd, "_get_tasks", lambda db, ids: [])
-    monkeypatch.setattr(sd, "_drop_unlistable_workspaces", lambda db, ids: ids)
+    monkeypatch.setattr(sd, "_get_workspace_datasets", lambda db, ids, **_kw: [])
+    monkeypatch.setattr(sd, "_get_tasks", lambda db, ids, **_kw: [])
+    monkeypatch.setattr(sd, "_drop_unlistable_workspaces", lambda db, ids, **_kw: ids)
 
 
 def _document(monkeypatch, claims):
@@ -96,7 +96,7 @@ def test_an_anonymous_document_carries_no_annotation_at_all(monkeypatch):
 def test_the_lookup_set_is_the_resolved_workspaces_plus_personal(monkeypatch):
     _stub_listing(monkeypatch)
     # The soft-delete filter is the arbiter of the set; mimic it dropping one.
-    monkeypatch.setattr(sd, "_drop_unlistable_workspaces", lambda db, ids: ids - {"gone"})
+    monkeypatch.setattr(sd, "_drop_unlistable_workspaces", lambda db, ids, **_kw: ids - {"gone"})
     seen = {}
     monkeypatch.setattr(
         sd, "_starred_workspaces", lambda db, ids, identity: seen.update(ids=set(ids), who=identity) or []

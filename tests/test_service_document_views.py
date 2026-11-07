@@ -41,7 +41,7 @@ def test_service_document_includes_views(monkeypatch):
     # get_service_document calls this directly now (not just inside the
     # mocked _get_workspace_datasets above), so it needs a stub too or it
     # hits the real Firestore batched read against the placeholder client.
-    monkeypatch.setattr(sd, "_drop_unlistable_workspaces", lambda db, ids: ids)
+    monkeypatch.setattr(sd, "_drop_unlistable_workspaces", lambda db, ids, **_kw: ids)
 
     # Prepare request and claims
     req = DummyRequest()
@@ -65,8 +65,8 @@ def _service_document_names(monkeypatch, policies):
     monkeypatch.setattr(sd, "_get_firestore_client", lambda **kwargs: object())
     monkeypatch.setattr(sd, "_get_personal_datasets", lambda db, identity: [])
     monkeypatch.setattr(sd, "_get_workspace_datasets", lambda db, ids: [])
-    monkeypatch.setattr(sd, "_get_tasks", lambda db, ids: [])
-    monkeypatch.setattr(sd, "_drop_unlistable_workspaces", lambda db, ids: ids)
+    monkeypatch.setattr(sd, "_get_tasks", lambda db, ids, **_kw: [])
+    monkeypatch.setattr(sd, "_drop_unlistable_workspaces", lambda db, ids, **_kw: ids)
 
     req = DummyRequest()
     req.state.claims = {"identity": "tester", "policies": policies}
@@ -126,7 +126,7 @@ def test_a_name_in_both_datasets_and_views_is_listed_once_as_the_dataset(monkeyp
         source="View",
     )
     by_collection = {"datasets": [materialized], "views": [leftover_view, other_view]}
-    monkeypatch.setattr(sd, "_drop_unlistable_workspaces", lambda db, ids: ids)
+    monkeypatch.setattr(sd, "_drop_unlistable_workspaces", lambda db, ids, **_kw: ids)
     monkeypatch.setattr(
         sd, "_query_collection_group", lambda db, coll, workspace_filter=None, limit=1000: list(by_collection[coll])
     )

@@ -76,8 +76,8 @@ class TestItem1ServiceDocument:
         )
         monkeypatch.setattr(sd, "_get_firestore_client", lambda **kwargs: object())
         monkeypatch.setattr(sd, "_get_personal_datasets", lambda db, identity: [])
-        monkeypatch.setattr(sd, "_get_workspace_datasets", lambda db, ids: [table])
-        monkeypatch.setattr(sd, "_drop_unlistable_workspaces", lambda db, ids: ids)
+        monkeypatch.setattr(sd, "_get_workspace_datasets", lambda db, ids, **_kw: [table])
+        monkeypatch.setattr(sd, "_drop_unlistable_workspaces", lambda db, ids, **_kw: ids)
 
         req = DummyRequest()
         req.state.claims = {
@@ -153,8 +153,8 @@ class TestItem4ODataVersionHeader:
     def test_present_on_service_document_route(self, monkeypatch):
         monkeypatch.setattr(sd, "_get_firestore_client", lambda **kwargs: object())
         monkeypatch.setattr(sd, "_get_personal_datasets", lambda db, identity: [])
-        monkeypatch.setattr(sd, "_get_workspace_datasets", lambda db, ids: [])
-        monkeypatch.setattr(sd, "_drop_unlistable_workspaces", lambda db, ids: ids)
+        monkeypatch.setattr(sd, "_get_workspace_datasets", lambda db, ids, **_kw: [])
+        monkeypatch.setattr(sd, "_drop_unlistable_workspaces", lambda db, ids, **_kw: ids)
 
         req = DummyRequest()
         req.state.claims = {"identity": "tester", "policies": []}
@@ -367,7 +367,7 @@ class TestItem13Metadata:
         )
         monkeypatch.setattr(metadata, "_get_firestore_client", lambda **kwargs: object())
         monkeypatch.setattr(metadata, "_get_personal_datasets", lambda db, identity: [dataset])
-        monkeypatch.setattr(metadata, "_get_workspace_datasets", lambda db, ids: [])
+        monkeypatch.setattr(metadata, "_get_workspace_datasets", lambda db, ids, **_kw: [])
         monkeypatch.setattr(
             metadata,
             "_facts_for",

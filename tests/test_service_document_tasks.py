@@ -97,7 +97,7 @@ class DummyRequest:
 @pytest.fixture
 def no_soft_delete_check(monkeypatch):
     """Skip the `$properties` batched read; every workspace here is live."""
-    monkeypatch.setattr(sd, "_drop_unlistable_workspaces", lambda db, ids: ids)
+    monkeypatch.setattr(sd, "_drop_unlistable_workspaces", lambda db, ids, **_kw: ids)
 
 
 # ---------------------------------------------------------------- _get_tasks
@@ -206,8 +206,8 @@ def _serve(monkeypatch, task_docs, claims, workspace_datasets=()):
     db = FakeFirestore(task_docs)
     monkeypatch.setattr(sd, "_get_firestore_client", lambda **kwargs: db)
     monkeypatch.setattr(sd, "_get_personal_datasets", lambda db, identity: [])
-    monkeypatch.setattr(sd, "_get_workspace_datasets", lambda db, ids: list(workspace_datasets))
-    monkeypatch.setattr(sd, "_drop_unlistable_workspaces", lambda db, ids: ids)
+    monkeypatch.setattr(sd, "_get_workspace_datasets", lambda db, ids, **_kw: list(workspace_datasets))
+    monkeypatch.setattr(sd, "_drop_unlistable_workspaces", lambda db, ids, **_kw: ids)
     monkeypatch.setattr(sd, "_resolve_pending_sort_orders", lambda db, datasets: None)
 
     request = DummyRequest()

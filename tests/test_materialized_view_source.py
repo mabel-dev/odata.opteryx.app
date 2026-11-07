@@ -174,7 +174,7 @@ def test_service_document_reports_materialized_view_source(monkeypatch):
     monkeypatch.setattr(sd, "_get_firestore_client", lambda **kwargs: object())
     monkeypatch.setattr(sd, "_get_personal_datasets", lambda db, identity: [])
     monkeypatch.setattr(sd, "_get_workspace_datasets", lambda db, ids: [mv])
-    monkeypatch.setattr(sd, "_drop_unlistable_workspaces", lambda db, ids: ids)
+    monkeypatch.setattr(sd, "_drop_unlistable_workspaces", lambda db, ids, **_kw: ids)
 
     req = DummyRequest()
     req.state.claims = {

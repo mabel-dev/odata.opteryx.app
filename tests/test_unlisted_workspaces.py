@@ -53,8 +53,8 @@ class _FakeDb:
         ]
 
 
-def _drop(properties, workspaces, raises=False):
-    return sd._drop_unlistable_workspaces(_FakeDb(properties, raises), set(workspaces))
+def _drop(properties, workspaces, raises=False, **kwargs):
+    return sd._drop_unlistable_workspaces(_FakeDb(properties, raises), set(workspaces), **kwargs)
 
 
 # --------------------------------------------------------------------------
@@ -119,3 +119,23 @@ def test_an_unreachable_firestore_lists_everything():
 
 def test_nothing_to_check_is_answered_without_a_read():
     assert _drop({}, [], raises=True) == set()
+
+
+# --------------------------------------------------------------------------
+# The anonymous listing: `demo` is unlisted, and is all an anonymous caller has
+# --------------------------------------------------------------------------
+
+
+def test_include_unlisted_keeps_an_unlisted_workspace():
+    # `demo` is unlisted so signed-in catalogs never show it, but it is the
+    # whole of the anonymous one; that listing passes include_unlisted.
+    assert _drop({"demo": {"listed": False}}, ["demo"], include_unlisted=True) == {"demo"}
+
+
+def test_include_unlisted_still_drops_a_deleted_workspace():
+    gone = {"demo": {"listed": False, "deleted-at-ms": 1}, "acme": {}}
+    assert _drop(gone, ["demo", "acme"], include_unlisted=True) == {"acme"}
+
+
+def test_include_unlisted_still_drops_a_missing_workspace():
+    assert _drop({}, ["ghost"], include_unlisted=True) == set()
