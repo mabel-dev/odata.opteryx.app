@@ -630,18 +630,13 @@ def _can_read_relation(
     identity: str | None,
     access_policies_list,
 ) -> bool:
-    """Whether the caller may read one relation, by the same ladder the
-    per-dataset metadata route uses for the dataset it was asked about."""
-    if workstream == "personal":
-        return collection == identity
-    if workstream == "public":
-        return True
-    from app.auth.permissions import read_grant_for_relation
+    """Whether the caller may read one relation -- opteryx-access's decision,
+    the same one the per-dataset metadata route makes for the dataset it was
+    asked about."""
+    from app.auth.permissions import read_access
 
     return (
-        read_grant_for_relation(
-            access_policies_list, f"{workstream}.{collection}.{dataset}"
-        )
+        read_access(access_policies_list, f"{workstream}.{collection}.{dataset}", identity)
         is not None
     )
 
@@ -1620,8 +1615,8 @@ def read_dataset(
     # Opteryx's permission checks are evaluated against the actual caller.
     from app.auth.permissions import (
         access_policies_for_query,
+        anonymous_may_read,
         entitlements_from_claims,
-        is_anonymous_exempt,
         visibility_filters_from_claims,
     )
 
@@ -1634,7 +1629,7 @@ def read_dataset(
     # billing account is unknown, and Opteryx leaves unlisted relations unfiltered.
     visibility_filters = visibility_filters_from_claims(claims)
 
-    if identity is None and not is_anonymous_exempt(workstream, collection):
+    if identity is None and not anonymous_may_read(table_name):
         raise HTTPException(
             status_code=401,
             detail="Missing or invalid credentials",
@@ -2111,14 +2106,16 @@ def dataset_metadata(
     claims = getattr(request.state, "claims", {}) or {}
     identity = claims.get("identity")
 
-    from app.auth.permissions import is_anonymous_exempt
+    from app.auth.permissions import anonymous_may_read
 
-    if identity is None and not is_anonymous_exempt(workstream, collection):
+    if identity is None and not anonymous_may_read(table_name):
         raise HTTPException(status_code=401, detail="Missing or invalid credentials")
 
     from app.auth.permissions import entitlements_from_claims
     from app.auth.permissions import get_access_policies_from_claims
-    from app.auth.permissions import read_grant_for_relation
+    from opteryx_access import VIRTUAL_INFORMATION_SCHEMA_POLICY
+
+    from app.auth.permissions import read_access
     from app.auth.permissions import virtual_information_schema_role
 
     # Default: no access
@@ -2141,39 +2138,25 @@ def dataset_metadata(
     # decision for these datasets: the branches below are for catalog objects.
     if is_virtual_info_schema:
         role = virtual_information_schema_role(
-            access_policies_list, workstream, dataset, entitlements=entitlements_list
+            access_policies_list,
+            workstream,
+            dataset,
+            entitlements=entitlements_list,
+            identity=identity,
         )
         if role is None:
             raise HTTPException(status_code=403, detail="forbidden: not allowed to view metadata")
         allowed = True
         assigned_role = role
-        assigned_policy = "virtual-information-schema"
+        assigned_policy = VIRTUAL_INFORMATION_SCHEMA_POLICY
 
-    # Personal workspace handling
-    if not allowed and workstream == "personal":
-        # the collection is the identity for personal workspaces
-        if collection == identity:
-            allowed = True
-            assigned_role = "owner"
-            assigned_policy = "always-allow-personal"
-        else:
-            # deny access to other users' personal workspaces
-            raise HTTPException(status_code=403, detail="forbidden: not allowed to view metadata")
-
-    # Public workspace -> read-only
-    if not allowed and workstream == "public":
-        from app.auth.permissions import PUBLIC_READ_POLICY
-
-        allowed = True
-        assigned_role = "reader"
-        assigned_policy = PUBLIC_READ_POLICY
-
-    # Policy-granted access
+    # Every catalog object -- the caller's own personal namespace, `public`,
+    # `demo`, and policy-granted workspaces alike -- is opteryx-access's
+    # decision on THIS relation, reported with the role and policy it names.
+    # Matching on the pattern's workstream alone would let a grant on one
+    # dataset disclose every dataset beside it in the same workspace.
     if not allowed:
-        # The caller needs a read grant on THIS relation. Matching on the pattern's
-        # workstream alone would let a grant on one dataset disclose every dataset
-        # beside it in the same workspace.
-        grant = read_grant_for_relation(access_policies_list, table_name)
+        grant = read_access(access_policies_list, table_name, identity)
         if grant is not None:
             allowed = True
             assigned_role, assigned_policy = grant

@@ -4,7 +4,6 @@ This module provides utilities for converting and handling permissions
 between JWT format and Opteryx format.
 """
 
-import fnmatch
 from typing import Any
 from typing import Dict
 from typing import List
@@ -15,31 +14,14 @@ from opteryx_shared_services.logging import get_logger
 
 logger = get_logger()
 
-# The workstream.collection pairs reachable with zero credentials (see
-# app.auth.deps.require_authentication, which lets anonymous requests through
-# rather than rejecting them). Every endpoint that accepts anonymous callers
-# must still scope them down to exactly these pairs itself. Only add a pair
-# here for datasets that are intentionally public (e.g. open data backing
-# public-facing dashboards) — this is the full anonymous-access surface.
-ANONYMOUS_EXEMPT_WORKSTREAM = "public"
-ANONYMOUS_EXEMPT_PAIRS = {
-    ("public", "security"),
-    ("public", "geopolitics"),
-}
-
-
-# The policy label reported for a read of `public.*`. The read comes from the
-# built-in reader grant every session gets (opteryx_access `implicit_grants`),
-# which has no policy id of its own, so this label stands in for it. It is the
-# same grant signed in or not - an anonymous caller is narrowed to
-# ANONYMOUS_EXEMPT_PAIRS by the listing, not by a different policy - so every
-# route reports this one label for it.
-PUBLIC_READ_POLICY = "always-allow-public-read"
-
-
-def is_anonymous_exempt(workstream: Optional[str], collection: Optional[str]) -> bool:
-    """Whether (workstream, collection) is reachable without authentication."""
-    return (workstream, collection) in ANONYMOUS_EXEMPT_PAIRS
+# WHO MAY READ WHAT IS NOT DECIDED IN THIS SERVICE. Every allow/deny below is
+# answered by opteryx-access -- the library the query engine's own gate is
+# answered from -- so the listing, the per-dataset metadata and the query can
+# never disagree about a caller. That includes the anonymous surface: what a
+# caller with no Authorization header may read (the `demo` workspace, see
+# `opteryx_access.UNAUTHENTICATED_WORKSPACE`) is an implicit grant in the
+# library, not an allowlist here. This module only converts claims into the
+# library's inputs and reports the library's answer in OData's terms.
 
 
 # Entitlement that lifts row-level filtering entirely. Holders see every account's rows.
@@ -324,15 +306,68 @@ def get_access_policies_from_claims(claims: Dict[str, Any]) -> List[Dict[str, st
     return convert_policies_for_opteryx(policies)
 
 
-# Roles that permit reading a relation, and therefore permit seeing it exist at all.
-_READ_CAPABLE_ROLES = frozenset({"reader", "writer", "admin", "owner"})
-
-
 def role_allows_read(role: Optional[str]) -> bool:
-    """Whether a role string permits reading."""
+    """Whether a role string permits reading -- asked of opteryx-access."""
+    from opteryx_access import action_allowed_for_role
+
     if not role:
         return False
-    return role.lower() in _READ_CAPABLE_ROLES
+    return action_allowed_for_role(role.lower(), "READ")
+
+
+def grants_from_policies(policies: List[Dict[str, str]]) -> list:
+    """The caller's issued policies as opteryx-access `Grant`s.
+
+    Patterns pass through `_pattern_for_matching`, so a bare-workstream pattern
+    covers that workstream's relations here exactly as it always has.
+    """
+    from opteryx_access import parse_policy_claim
+
+    return parse_policy_claim(
+        {
+            "policies": [
+                {"role": p["role"], "pattern": _pattern_for_matching(p["pattern"])}
+                for p in policies
+                if p.get("pattern") and p.get("role")
+            ]
+        }
+    )
+
+
+def read_access(
+    policies: List[Dict[str, str]],
+    relation: str,
+    identity: Optional[str],
+    grants: Optional[list] = None,
+) -> Optional[Tuple[str, Optional[str]]]:
+    """`(role, policy)` under which `identity` may read `relation`, or None.
+
+    THE decision for every catalog object this service lists or describes, and
+    it is opteryx-access's: `can_perform_action` says whether, and only then is
+    the answer described -- by the implicit grant that decided it and that
+    grant's label (`implicit_access`), or else by the first issued policy that
+    covers the relation. `identity` None is an anonymous caller.
+
+    `grants` is `grants_from_policies(policies)`, passed by a caller deciding
+    many relations so it is converted once.
+    """
+    from opteryx_access import can_perform_action
+    from opteryx_access import implicit_access
+
+    if grants is None:
+        grants = grants_from_policies(policies)
+    if not can_perform_action(grants, relation, "READ", identity=identity):
+        return None
+    implicit = implicit_access(relation, identity)
+    if implicit is not None:
+        held, label = implicit
+        return held.role, label
+    return read_grant_for_relation(policies, relation)
+
+
+def anonymous_may_read(relation: str) -> bool:
+    """Whether a caller with no credentials at all may read `relation`."""
+    return read_access([], relation, None) is not None
 
 
 def _pattern_for_matching(pattern: str) -> str:
@@ -367,27 +402,13 @@ def accessible_workstreams(policies: List[Dict[str, str]]) -> set:
     }
 
 
-def roles_in_workstream(policies: List[Dict[str, str]], workstream: str) -> List[str]:
-    """The roles `policies` hold on patterns reaching `workstream`, in policy order.
-
-    A superset in the same sense as `accessible_workstreams`: a role on one
-    relation counts as a role held in its workstream. That is the right grain for
-    deciding which information_schema tables to OFFER in a workspace - a caller
-    who owns one dataset there can see that dataset's triggers, so the triggers
-    table has rows for them - while the engine decides row by row what is in it.
-    """
-    return [
-        p["role"]
-        for p in policies
-        if p.get("pattern") and p.get("role") and workstream_from_pattern(p["pattern"]) == workstream
-    ]
-
-
 def virtual_information_schema_role(
     policies: List[Dict[str, str]],
     workstream: str,
     name: str,
     entitlements: Optional[List[str]] = None,
+    *,
+    identity: Optional[str],
 ) -> Optional[str]:
     """The role under which `<workstream>.information_schema.<name>` is offered to a
     caller holding `policies`, or None when it is not offered to them at all.
@@ -399,14 +420,18 @@ def virtual_information_schema_role(
     answered from, so the listing cannot offer a table the query would return
     empty, nor withhold one it would fill.
 
-    `personal` is the caller's own namespace, held as owner without any policy
-    saying so; `public` is readable by everyone the same way. Both are decided
-    here rather than left to the caller for the same reason the engine decides
-    implicit grants in one place.
+    The roles held in the workspace are `opteryx_access.workspace_roles`:
+    implicit grants first (the caller's own `personal`, `public`/`samples` for
+    any signed-in caller, `demo` for everyone), then issued policies -- a role on
+    one relation counting as a role held in its workstream. That is the right
+    grain for deciding which tables to OFFER: a caller who owns one dataset
+    there can see that dataset's triggers, so the triggers table has rows for
+    them, while the engine decides row by row what is in it.
 
-    The role reported is the FIRST qualifying one in policy order, as
+    The role reported is the FIRST qualifying one in that order, as
     `read_grant_for_relation` reports the first qualifying grant.
     """
+    from opteryx_access import workspace_roles
     from opteryx_access.actions import action_allowed_for_role
 
     from app.odata.virtual_datasets import VIRTUAL_INFORMATION_SCHEMA_ACTIONS
@@ -415,14 +440,7 @@ def virtual_information_schema_role(
     if action is None:
         return None
 
-    if workstream == "personal":
-        roles = ["owner"]
-    else:
-        roles = roles_in_workstream(policies, workstream)
-        if workstream == "public":
-            roles.append("reader")
-
-    for role in roles:
+    for role in workspace_roles(workstream, identity, grants_from_policies(policies)):
         if action_allowed_for_role(role, action):
             return role
 
@@ -442,7 +460,11 @@ def virtual_information_schema_role(
 
 
 def visible_virtual_information_schema(
-    policies: List[Dict[str, str]], workstream: str, entitlements: Optional[List[str]] = None
+    policies: List[Dict[str, str]],
+    workstream: str,
+    entitlements: Optional[List[str]] = None,
+    *,
+    identity: Optional[str],
 ) -> List[Tuple[str, str]]:
     """Every virtual information_schema table offered in `workstream` to a caller
     holding `policies`, as `(name, role)` in registry order."""
@@ -450,7 +472,9 @@ def visible_virtual_information_schema(
 
     offered = []
     for name in VIRTUAL_INFORMATION_SCHEMA_TABLES:
-        role = virtual_information_schema_role(policies, workstream, name, entitlements=entitlements)
+        role = virtual_information_schema_role(
+            policies, workstream, name, entitlements=entitlements, identity=identity
+        )
         if role is not None:
             offered.append((name, role))
     return offered
@@ -459,21 +483,23 @@ def visible_virtual_information_schema(
 def read_grant_for_relation(
     policies: List[Dict[str, str]], relation: str
 ) -> Optional[Tuple[str, Optional[str]]]:
-    """The first read-capable policy granting `relation`, as `(role, policy_id)`.
+    """The first read-capable ISSUED policy covering `relation`, as `(role, policy_id)`.
 
-    `relation` is a fully-qualified `workstream.collection.dataset` name, and the
-    policy's pattern is matched against the whole of it — the same fnmatch the query
-    path applies. Matching on anything less (e.g. collapsing the pattern to its
-    workstream) would let a grant on one relation disclose every relation beside it.
-
-    Case-sensitive on purpose: `fnmatch.fnmatch` normalises case per-platform, which
-    would make an authorization decision depend on the host OS.
+    Reporting, not deciding: `read_access` asks opteryx-access whether the read
+    is allowed, then uses this to say which policy allowed it. It matches with
+    the library's own `resource_matches` -- the whole relation name, normalized
+    the same way on every platform -- so the policy named is one the engine's
+    gate would also have matched. Matching on anything less (e.g. collapsing the
+    pattern to its workstream) would let a grant on one relation disclose every
+    relation beside it.
     """
+    from opteryx_access import resource_matches
+
     for policy in policies:
         role = policy.get("role")
         pattern = policy.get("pattern")
         if not role or not pattern or not role_allows_read(role):
             continue
-        if fnmatch.fnmatchcase(relation, _pattern_for_matching(pattern)):
+        if resource_matches(relation, _pattern_for_matching(pattern)):
             return role, policy.get("policy")
     return None

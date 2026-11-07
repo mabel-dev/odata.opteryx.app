@@ -8,6 +8,7 @@ from fastapi import Response
 from fastapi import status
 from google.api_core.exceptions import FailedPrecondition
 from google.cloud.firestore_v1.base_query import FieldFilter
+from opteryx_access import PERSONAL_POLICY
 from opteryx_shared_services.logging import get_logger
 
 from app.auth.deps import require_authentication
@@ -346,7 +347,7 @@ def _get_personal_datasets(db, identity: str) -> list[DatasetInfo]:
                             name=name,
                             source=source_type,
                             role="owner",
-                            policy="always-allow-personal",
+                            policy=PERSONAL_POLICY,
                             ordered=ordered,
                             order_by=order_by,
                             order_direction=order_direction,
@@ -696,7 +697,11 @@ def get_service_document(
     claims = request.state.claims
     identity = claims.get("identity")
 
-    from app.auth.permissions import ANONYMOUS_EXEMPT_PAIRS, ANONYMOUS_EXEMPT_WORKSTREAM, PUBLIC_READ_POLICY
+    from opteryx_access import VIRTUAL_INFORMATION_SCHEMA_POLICY
+    from opteryx_access import implicitly_readable_workspaces
+
+    from app.auth.permissions import grants_from_policies
+    from app.auth.permissions import read_access
 
     db = _get_firestore_client(database=_firestore_database())
     if db is None:
@@ -713,25 +718,30 @@ def get_service_document(
 
     if identity is None:
         # Anonymous callers (no Authorization header at all — see
-        # app.auth.deps.require_authentication) only ever see the
-        # workstream.collection pairs reachable without credentials.
-        all_datasets = _get_workspace_datasets(db, {ANONYMOUS_EXEMPT_WORKSTREAM})
-        all_datasets.extend(_get_tasks(db, {ANONYMOUS_EXEMPT_WORKSTREAM}))
+        # app.auth.deps.require_authentication) see what opteryx-access lets a
+        # caller with no identity read: the `demo` workspace. The library names
+        # the workspaces to fetch (a superset) and decides each dataset in them.
+        #
+        # NOT passed through `_drop_unlistable_workspaces`: `demo` is unlisted
+        # for signed-in catalogs, but it is the whole of the anonymous one.
+        anonymous_workspaces = set(implicitly_readable_workspaces(None))
+        all_datasets = _get_workspace_datasets(db, anonymous_workspaces)
+        all_datasets.extend(_get_tasks(db, anonymous_workspaces))
         filtered_datasets = []
         for dataset in all_datasets:
-            if (dataset.workspace, dataset.collection) in ANONYMOUS_EXEMPT_PAIRS:
-                dataset.role = "reader"
-                dataset.policy = PUBLIC_READ_POLICY
+            access = read_access([], dataset.resource, None, grants=[])
+            if access is not None:
+                dataset.role, dataset.policy = access
                 filtered_datasets.append(dataset)
     else:
         # Determine access policies from JWT "policies" claim (do not rely on a "permissions" key).
         from app.auth.permissions import accessible_workstreams
         from app.auth.permissions import entitlements_from_claims
         from app.auth.permissions import get_access_policies_from_claims
-        from app.auth.permissions import read_grant_for_relation
         from app.auth.permissions import visible_virtual_information_schema
 
         access_policies_list = get_access_policies_from_claims(claims)
+        caller_grants = grants_from_policies(access_policies_list)
 
         # Which workspaces to *fetch* from the catalog. This is a superset of what the
         # caller may see -- a policy on "opteryx.ops.findings" reaches the "opteryx"
@@ -785,37 +795,16 @@ def get_service_document(
         filtered_datasets: list[DatasetInfo] = []
 
         for dataset in all_datasets:
-            # Personal datasets - full access to own resources
-            if dataset.resource == f"personal.{identity}" or dataset.resource.startswith(
-                f"personal.{identity}."
-            ):
-                # Role and policy are already set for personal datasets and views,
-                # which `_get_personal_datasets` stamps as it reads them. A personal
-                # TASK arrives from the tasks collection group instead, which is
-                # identity-agnostic and so stamps neither -- it is the caller's own,
-                # established by the branch condition, so it earns the same pair here.
-                if dataset.role is None:
-                    dataset.role = "owner"
-                    dataset.policy = "always-allow-personal"
-                filtered_datasets.append(dataset)
-                continue
-
-            # If dataset is a personal workspace for someone else, do not allow access
-            if dataset.resource.startswith("personal."):
-                continue
-
-            # Public datasets - read-only for all users
-            if dataset.resource.startswith("public."):
-                dataset.role = "reader"
-                dataset.policy = PUBLIC_READ_POLICY
-                filtered_datasets.append(dataset)
-                continue
-
-            # Workspace datasets - the caller needs a read grant on THIS relation, not
-            # merely on something else in the same workspace.
-            grant = read_grant_for_relation(access_policies_list, dataset.resource)
-            if grant is not None:
-                dataset.role, dataset.policy = grant
+            # Every dataset is decided by opteryx-access on THIS relation -- the
+            # caller's own personal namespace, `public`, and policy-granted
+            # workspaces alike -- and stamped with the role and policy the
+            # library reports. Someone else's personal datasets, and anything
+            # held only by a grant on a neighbouring relation, come back None.
+            access = read_access(
+                access_policies_list, dataset.resource, identity, grants=caller_grants
+            )
+            if access is not None:
+                dataset.role, dataset.policy = access
                 filtered_datasets.append(dataset)
 
         # Every workspace the caller has any access to gets the virtual
@@ -828,7 +817,12 @@ def get_service_document(
         # is never offered that would only ever come back empty. Which rows are in
         # it is decided downstream, at query time.
         for workspace in workspace_ids | {"personal"}:
-            for name, role in visible_virtual_information_schema(access_policies_list, workspace, entitlements=sorted(entitlements_from_claims(claims))):
+            for name, role in visible_virtual_information_schema(
+                access_policies_list,
+                workspace,
+                entitlements=sorted(entitlements_from_claims(claims)),
+                identity=identity,
+            ):
                 filtered_datasets.append(
                     DatasetInfo(
                         resource=f"{workspace}.information_schema.{name}",
@@ -837,7 +831,7 @@ def get_service_document(
                         name=name,
                         source="Virtual",
                         role=role,
-                        policy="virtual-information-schema",
+                        policy=VIRTUAL_INFORMATION_SCHEMA_POLICY,
                     )
                 )
 

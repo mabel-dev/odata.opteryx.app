@@ -257,12 +257,13 @@ def require_authentication(
     Stores claims in request.state for use by endpoints.
 
     A request with no Authorization header at all is let through as anonymous
-    (identity=None, no policies) rather than rejected here — this lets
-    public.security stay reachable with zero credentials (see
-    app.auth.permissions.is_anonymous_exempt). A request that DOES send
+    (identity=None, no policies) rather than rejected here — this lets the
+    `demo` workspace stay reachable with zero credentials (opteryx-access
+    decides what an anonymous caller may read; see
+    app.auth.permissions.anonymous_may_read). A request that DOES send
     credentials, even if malformed, is still rejected: only omitting auth
-    entirely counts as "anonymous". Every endpoint other than public.security
-    is responsible for rejecting anonymous callers itself.
+    entirely counts as "anonymous". Every endpoint is responsible for refusing
+    an anonymous caller whatever opteryx-access does not let one read.
 
     Deliberately sync (see require_bearer_token) so FastAPI dispatches this
     dependency, and the blocking auth I/O it does, to the thread pool instead

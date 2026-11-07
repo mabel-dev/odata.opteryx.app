@@ -917,7 +917,10 @@ def get_edmx_metadata(request: Request) -> Any:
         cached_etag, cached_xml, cached_headers = cached
         return metadata_response(cached_xml, cached_etag, cached_headers, if_none_match)
 
-    from app.auth.permissions import ANONYMOUS_EXEMPT_PAIRS, ANONYMOUS_EXEMPT_WORKSTREAM
+    from opteryx_access import implicitly_readable_workspaces
+
+    from app.auth.permissions import grants_from_policies
+    from app.auth.permissions import read_access
 
     db = _get_firestore_client(database=_firestore_database())
     if db is None:
@@ -928,14 +931,16 @@ def get_edmx_metadata(request: Request) -> Any:
 
     if identity is None:
         # Anonymous callers (no Authorization header at all — see
-        # app.auth.deps.require_authentication) only ever see the
-        # workstream.collection pairs reachable without credentials.
-        all_datasets = _get_workspace_datasets(db, {ANONYMOUS_EXEMPT_WORKSTREAM})
-        all_datasets.extend(_get_tasks(db, {ANONYMOUS_EXEMPT_WORKSTREAM}))
+        # app.auth.deps.require_authentication) see what opteryx-access lets a
+        # caller with no identity read -- the same set, by the same decision,
+        # as the service document's anonymous listing.
+        anonymous_workspaces = set(implicitly_readable_workspaces(None))
+        all_datasets = _get_workspace_datasets(db, anonymous_workspaces)
+        all_datasets.extend(_get_tasks(db, anonymous_workspaces))
         filtered_datasets = [
             dataset
             for dataset in all_datasets
-            if (dataset.workspace, dataset.collection) in ANONYMOUS_EXEMPT_PAIRS
+            if read_access([], dataset.resource, None, grants=[]) is not None
         ]
     else:
         # Determine access policies from JWT "policies" claim (do not rely on a "permissions" key).
@@ -943,11 +948,11 @@ def get_edmx_metadata(request: Request) -> Any:
             accessible_workstreams,
             entitlements_from_claims,
             get_access_policies_from_claims,
-            read_grant_for_relation,
             visible_virtual_information_schema,
         )
 
         access_policies_list = get_access_policies_from_claims(claims)
+        caller_grants = grants_from_policies(access_policies_list)
 
         # Which workspaces to *fetch* from the catalog. This is a superset of what the
         # caller may see -- a policy on "opteryx.ops.findings" reaches the "opteryx"
@@ -995,25 +1000,12 @@ def get_edmx_metadata(request: Request) -> Any:
         filtered_datasets: list[DatasetInfo] = []
 
         for dataset in all_datasets:
-            # Personal datasets - full access to own resources
-            if dataset.resource == f"personal.{identity}" or dataset.resource.startswith(
-                f"personal.{identity}."
+            # Decided by opteryx-access on THIS relation, exactly as the service
+            # document decides it -- the two documents describe one catalog.
+            if (
+                read_access(access_policies_list, dataset.resource, identity, grants=caller_grants)
+                is not None
             ):
-                filtered_datasets.append(dataset)
-                continue
-
-            # If dataset is a personal workspace for someone else, do not allow access
-            if dataset.resource.startswith("personal."):
-                continue
-
-            # Public datasets - read-only for all users
-            if dataset.resource.startswith("public."):
-                filtered_datasets.append(dataset)
-                continue
-
-            # Workspace datasets - the caller needs a read grant on THIS relation, not
-            # merely on something else in the same workspace.
-            if read_grant_for_relation(access_policies_list, dataset.resource) is not None:
                 filtered_datasets.append(dataset)
 
         # Every workspace the caller has any access to gets the virtual
@@ -1025,7 +1017,12 @@ def get_edmx_metadata(request: Request) -> Any:
         # visible_virtual_information_schema). Which rows are in a table is
         # decided downstream, at query time.
         for workspace in workspace_ids | {"personal"}:
-            for name, _role in visible_virtual_information_schema(access_policies_list, workspace, entitlements=sorted(entitlements_from_claims(claims))):
+            for name, _role in visible_virtual_information_schema(
+                access_policies_list,
+                workspace,
+                entitlements=sorted(entitlements_from_claims(claims)),
+                identity=identity,
+            ):
                 filtered_datasets.append(
                     DatasetInfo(
                         resource=f"{workspace}.information_schema.{name}",

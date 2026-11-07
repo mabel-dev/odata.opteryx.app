@@ -1,8 +1,10 @@
 from app.auth.permissions import accessible_workstreams
 from app.auth.permissions import get_access_policies_from_claims
+from opteryx_access import workspace_roles
+
+from app.auth.permissions import grants_from_policies
 from app.auth.permissions import read_grant_for_relation
 from app.auth.permissions import role_allows_read
-from app.auth.permissions import roles_in_workstream
 from app.auth.permissions import virtual_information_schema_role
 from app.auth.permissions import visible_virtual_information_schema
 
@@ -99,8 +101,10 @@ def test_non_read_roles_grant_nothing():
 
 
 def test_role_allows_read_covers_read_capable_roles():
-    assert all(role_allows_read(r) for r in ("reader", "writer", "admin", "owner", "OWNER"))
-    assert not any(role_allows_read(r) for r in (None, "", "none", "denied"))
+    # The roles opteryx-access defines -- the engine's gate answers from the same
+    # table. `admin` is not one of them, so it reads nothing here either.
+    assert all(role_allows_read(r) for r in ("reader", "writer", "owner", "OWNER"))
+    assert not any(role_allows_read(r) for r in (None, "", "none", "denied", "admin"))
 
 
 # ---------------------------------------------------------------------------
@@ -139,7 +143,7 @@ def _names(offered):
 def test_a_reader_is_offered_the_shape_tables_only():
     policies = [{"pattern": "ws.*", "role": "reader", "policy": "p1"}]
 
-    offered = visible_virtual_information_schema(policies, "ws")
+    offered = visible_virtual_information_schema(policies, "ws", identity="alice")
 
     assert sorted(_names(offered)) == sorted(SHAPE_TABLES)
     assert {role for _name, role in offered} == {"reader"}
@@ -148,13 +152,13 @@ def test_a_reader_is_offered_the_shape_tables_only():
 def test_a_writer_is_offered_no_more_than_a_reader():
     policies = [{"pattern": "ws.*", "role": "writer", "policy": "p1"}]
 
-    assert sorted(_names(visible_virtual_information_schema(policies, "ws"))) == sorted(SHAPE_TABLES)
+    assert sorted(_names(visible_virtual_information_schema(policies, "ws", identity="alice"))) == sorted(SHAPE_TABLES)
 
 
 def test_an_owner_is_offered_every_table():
     policies = [{"pattern": "ws.*", "role": "owner", "policy": "p1"}]
 
-    offered = visible_virtual_information_schema(policies, "ws")
+    offered = visible_virtual_information_schema(policies, "ws", identity="alice")
 
     assert sorted(_names(offered)) == sorted(SHAPE_TABLES + OWNER_TABLES)
     assert {role for _name, role in offered} == {"owner"}
@@ -166,25 +170,25 @@ def test_owner_on_one_dataset_still_offers_the_automation_tables():
     Which rows is the engine's decision."""
     policies = [{"pattern": "ws.sales.orders", "role": "owner", "policy": "p1"}]
 
-    assert virtual_information_schema_role(policies, "ws", "triggers") == "owner"
-    assert virtual_information_schema_role(policies, "ws", "tasks") == "owner"
-    assert virtual_information_schema_role(policies, "ws", "grants") == "owner"
+    assert virtual_information_schema_role(policies, "ws", "triggers", identity="alice") == "owner"
+    assert virtual_information_schema_role(policies, "ws", "tasks", identity="alice") == "owner"
+    assert virtual_information_schema_role(policies, "ws", "grants", identity="alice") == "owner"
     # Offered, but the engine refuses it as a whole (ALTER on ws.*): a dataset
     # owner reaches the table and gets a 403, not an empty list.
-    assert virtual_information_schema_role(policies, "ws", "secrets") == "owner"
+    assert virtual_information_schema_role(policies, "ws", "secrets", identity="alice") == "owner"
 
 
 def test_secrets_are_never_offered_below_owner():
     for role in ("reader", "writer"):
         policies = [{"pattern": "ws.*", "role": role, "policy": "p1"}]
-        assert virtual_information_schema_role(policies, "ws", "secrets") is None
+        assert virtual_information_schema_role(policies, "ws", "secrets", identity="alice") is None
 
 
 def test_a_role_in_another_workspace_offers_nothing_here():
     policies = [{"pattern": "elsewhere.*", "role": "owner", "policy": "p1"}]
 
-    assert visible_virtual_information_schema(policies, "ws") == []
-    assert roles_in_workstream(policies, "ws") == []
+    assert visible_virtual_information_schema(policies, "ws", identity="alice") == []
+    assert workspace_roles("ws", "alice", grants_from_policies(policies)) == []
 
 
 def test_the_role_reported_is_the_first_qualifying_one():
@@ -193,19 +197,19 @@ def test_the_role_reported_is_the_first_qualifying_one():
         {"pattern": "ws.b.*", "role": "owner", "policy": "p2"},
     ]
 
-    assert virtual_information_schema_role(policies, "ws", "tables") == "reader"
-    assert virtual_information_schema_role(policies, "ws", "tasks") == "owner"
+    assert virtual_information_schema_role(policies, "ws", "tables", identity="alice") == "reader"
+    assert virtual_information_schema_role(policies, "ws", "tasks", identity="alice") == "owner"
 
 
 def test_personal_is_offered_everything_as_owner_without_a_policy():
-    offered = visible_virtual_information_schema([], "personal")
+    offered = visible_virtual_information_schema([], "personal", identity="alice")
 
     assert sorted(_names(offered)) == sorted(SHAPE_TABLES + OWNER_TABLES)
     assert {role for _name, role in offered} == {"owner"}
 
 
 def test_public_is_offered_the_shape_tables_as_reader_without_a_policy():
-    offered = visible_virtual_information_schema([], "public")
+    offered = visible_virtual_information_schema([], "public", identity="alice")
 
     assert sorted(_names(offered)) == sorted(SHAPE_TABLES)
     assert {role for _name, role in offered} == {"reader"}
@@ -216,13 +220,13 @@ def test_an_unrecognised_role_is_offered_nothing():
     # confers nothing on it, so the engine would return no rows, so no table.
     policies = [{"pattern": "ws.*", "role": "admin", "policy": "p1"}]
 
-    assert visible_virtual_information_schema(policies, "ws") == []
+    assert visible_virtual_information_schema(policies, "ws", identity="alice") == []
 
 
 def test_a_name_that_is_not_a_virtual_table_is_not_offered():
     policies = [{"pattern": "ws.*", "role": "owner", "policy": "p1"}]
 
-    assert virtual_information_schema_role(policies, "ws", "orders") is None
+    assert virtual_information_schema_role(policies, "ws", "orders", identity="alice") is None
 
 
 def test_scoped_entitlement_offers_automation_tables_where_no_policy_can():
@@ -231,15 +235,15 @@ def test_scoped_entitlement_offers_automation_tables_where_no_policy_can():
     same library the engine's gate is answered from, so odata offers exactly the
     tables the query would fill. Reported as `entitlement`, which is not a role."""
     held = ["data_admin", "automation_admin::public"]
-    assert virtual_information_schema_role([], "public", "triggers") is None
-    assert virtual_information_schema_role([], "public", "triggers", entitlements=held) == "entitlement"
-    assert virtual_information_schema_role([], "public", "tasks", entitlements=held) == "entitlement"
+    assert virtual_information_schema_role([], "public", "triggers", identity="alice") is None
+    assert virtual_information_schema_role([], "public", "triggers", entitlements=held, identity="alice") == "entitlement"
+    assert virtual_information_schema_role([], "public", "tasks", entitlements=held, identity="alice") == "entitlement"
     # Scope is in the name: nothing in a workspace it does not name.
-    assert virtual_information_schema_role([], "opteryx", "triggers", entitlements=held) is None
+    assert virtual_information_schema_role([], "opteryx", "triggers", entitlements=held, identity="alice") is None
     # A role that already confers the action still wins, and is reported as itself.
     owner = [{"pattern": "opteryx.*", "role": "owner"}]
-    assert virtual_information_schema_role(owner, "opteryx", "triggers", entitlements=held) == "owner"
+    assert virtual_information_schema_role(owner, "opteryx", "triggers", entitlements=held, identity="alice") == "owner"
     # Unrecognized names confer nothing.
-    assert virtual_information_schema_role([], "public", "triggers", entitlements=["platform_admin"]) is None
-    offered = dict(visible_virtual_information_schema([], "public", entitlements=held))
+    assert virtual_information_schema_role([], "public", "triggers", entitlements=["platform_admin"], identity="alice") is None
+    offered = dict(visible_virtual_information_schema([], "public", entitlements=held, identity="alice"))
     assert offered["triggers"] == "entitlement" and offered["tasks"] == "entitlement"

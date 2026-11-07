@@ -271,7 +271,7 @@ def test_a_public_task_is_listed_read_only(monkeypatch):
 
     entries = {entry["name"]: entry for entry in result["value"]}
     assert entries["public.examples.demo"]["role"] == "reader"
-    assert entries["public.examples.demo"]["policy"] == "always-allow-public-read"
+    assert entries["public.examples.demo"]["policy"] == "always-allow-read-any-authenticated-user"
 
 
 def test_a_personal_task_is_the_owners_alone(monkeypatch):
@@ -295,38 +295,39 @@ def test_a_personal_task_is_the_owners_alone(monkeypatch):
     assert mine["policy"] == "always-allow-personal"
 
 
-def test_an_anonymous_caller_sees_only_exempt_tasks(monkeypatch):
-    from app.auth.permissions import ANONYMOUS_EXEMPT_PAIRS, ANONYMOUS_EXEMPT_WORKSTREAM
-
-    workstream, collection = sorted(ANONYMOUS_EXEMPT_PAIRS)[0]
-    assert workstream == ANONYMOUS_EXEMPT_WORKSTREAM
-
+def test_an_anonymous_caller_sees_only_what_opteryx_access_lets_it_read(monkeypatch):
+    """`demo` is the anonymous workspace; `public.security` stays readable until
+    opteryx-access drops its transitional grant. The rest of `public`, and
+    `samples`, need a signed-in identity."""
     result = _serve(
         monkeypatch,
         [
-            task_doc(workstream, collection, "open"),
-            task_doc(workstream, "not_exempt", "closed"),
+            task_doc("demo", "security", "open"),
+            task_doc("public", "security", "transitional"),
+            task_doc("public", "astronomy", "closed"),
+            task_doc("samples", "tpch_sf1", "closed"),
         ],
         {"identity": None},
     )
 
     names = {entry["name"] for entry in result["value"]}
-    assert f"{workstream}.{collection}.open" in names
-    assert f"{workstream}.not_exempt.closed" not in names
+    assert "demo.security.open" in names
+    assert "public.security.transitional" in names
+    assert "public.astronomy.closed" not in names
+    assert "samples.tpch_sf1.closed" not in names
 
 
-def test_public_data_reports_one_policy_signed_in_or_not(monkeypatch):
-    """Anonymous and signed-in reads of public data come from the same built-in
-    reader grant, and per-dataset $metadata reports it as PUBLIC_READ_POLICY for
-    both. The service document used to give anonymous callers a label of its own,
-    so the two endpoints disagreed about the same dataset."""
-    from app.auth.permissions import ANONYMOUS_EXEMPT_PAIRS, PUBLIC_READ_POLICY
+def test_demo_data_reports_one_policy_signed_in_or_not(monkeypatch):
+    """Anonymous and signed-in reads of `demo` come from the same built-in reader
+    grant, so they report the same label -- the one opteryx-access names for it.
+    The service document once gave anonymous callers a label of its own, so two
+    endpoints disagreed about the same dataset."""
+    from opteryx_access import GLOBAL_UNAUTHENTICATED_READ_POLICY
 
-    workstream, collection = sorted(ANONYMOUS_EXEMPT_PAIRS)[0]
     table = sd.DatasetInfo(
-        resource=f"{workstream}.{collection}.cves",
-        workspace=workstream,
-        collection=collection,
+        resource="demo.security.cves",
+        workspace="demo",
+        collection="security",
         name="cves",
         source="Table",
     )
@@ -335,7 +336,26 @@ def test_public_data_reports_one_policy_signed_in_or_not(monkeypatch):
         result = _serve(monkeypatch, [], claims, workspace_datasets=[table])
         entry = {e["name"]: e for e in result["value"]}[table.resource]
         assert entry["role"] == "reader"
-        assert entry["policy"] == PUBLIC_READ_POLICY
+        assert entry["policy"] == GLOBAL_UNAUTHENTICATED_READ_POLICY
+
+
+def test_public_data_is_labelled_as_any_signed_in_reader(monkeypatch):
+    from opteryx_access import AUTHENTICATED_READ_POLICY
+
+    table = sd.DatasetInfo(
+        resource="public.astronomy.planets",
+        workspace="public",
+        collection="astronomy",
+        name="planets",
+        source="Table",
+    )
+
+    result = _serve(monkeypatch, [], {"identity": "tester", "policies": []}, workspace_datasets=[table])
+    entry = {e["name"]: e for e in result["value"]}[table.resource]
+    assert (entry["role"], entry["policy"]) == ("reader", AUTHENTICATED_READ_POLICY)
+
+    anonymous = _serve(monkeypatch, [], {"identity": None}, workspace_datasets=[table])
+    assert table.resource not in {e["name"] for e in anonymous["value"]}
 
 
 def test_triggers_are_not_listed(no_soft_delete_check):
