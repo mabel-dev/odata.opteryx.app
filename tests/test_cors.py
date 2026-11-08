@@ -5,8 +5,10 @@ none of the router-level tests exercise it. A missing origin here is invisible
 until a browser on that origin gets no Access-Control-Allow-Origin header back
 -- which is exactly how the docs site's "Try it" panel broke.
 
-`allow_credentials=True` is set on the middleware, so the allowlist must stay an
-explicit list of origins: browsers reject `*` in combination with credentials.
+Opteryx's own origins get a credentialed policy (origin echoed back); every
+other origin gets a public one (`*`, never credentials), because the service
+accepts HTTP Basic auth and browsers attach remembered Basic credentials on
+their own.
 """
 
 import pytest
@@ -57,10 +59,69 @@ def test_docs_site_dev_server_origins_are_allowed(client):
         assert response.headers.get("access-control-allow-origin") == origin, origin
 
 
-def test_unknown_origin_is_not_allowed(client):
-    """An origin outside the allowlist must not receive an allow header."""
-    response = preflight(client, "https://not-opteryx.example.com")
-    assert response.headers.get("access-control-allow-origin") is None
+UNKNOWN = "https://not-opteryx.example.com"
+
+
+def test_unknown_origin_gets_the_public_policy(client):
+    """Any other site may read: `*`, with no credentials."""
+    response = preflight(client, UNKNOWN)
+    assert response.status_code == 200
+    assert response.headers.get("access-control-allow-origin") == "*"
+    assert "access-control-allow-credentials" not in response.headers
+
+
+def test_unknown_origin_simple_request_never_gets_credentials(client):
+    """Even if a browser sends ambient credentials, the response won't allow them."""
+    response = client.get(
+        "/probe", headers={"Origin": UNKNOWN, "Authorization": "Basic dXNlcjpwYXNz"}
+    )
+    assert response.headers.get("access-control-allow-origin") == "*"
+    assert "access-control-allow-credentials" not in response.headers
+
+
+def test_unknown_origin_may_send_its_own_bearer_token(client):
+    """A page holding a token can set Authorization itself; that must preflight."""
+    response = client.options(
+        "/probe",
+        headers={
+            "Origin": UNKNOWN,
+            "Access-Control-Request-Method": "GET",
+            "Access-Control-Request-Headers": "authorization,if-none-match",
+        },
+    )
+    assert response.status_code == 200
+    allowed = {
+        h.strip().lower()
+        for h in response.headers.get("access-control-allow-headers", "").split(",")
+    }
+    assert {"authorization", "if-none-match"} <= allowed
+
+
+def test_admin_header_is_refused_for_unknown_origins(client):
+    response = client.options(
+        "/probe",
+        headers={
+            "Origin": UNKNOWN,
+            "Access-Control-Request-Method": "GET",
+            "Access-Control-Request-Headers": "x-admin-token",
+        },
+    )
+    assert response.status_code == 400
+
+
+def test_public_responses_vary_on_origin(client):
+    """`*` for one site, an echoed origin for another: caches must key on Origin."""
+    response = client.get("/probe", headers={"Origin": UNKNOWN})
+    assert "origin" in response.headers.get("vary", "").lower()
+
+
+def test_unknown_origin_can_read_dataset_headers(client):
+    response = client.get("/probe", headers={"Origin": UNKNOWN})
+    exposed = {
+        h.strip().lower()
+        for h in response.headers.get("access-control-expose-headers", "").split(",")
+    }
+    assert {"etag", "x-dataset-lastmodified", "odata-version"} <= exposed
 
 
 def test_credentialed_responses_never_use_a_wildcard(client):

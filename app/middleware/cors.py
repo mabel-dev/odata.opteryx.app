@@ -1,12 +1,25 @@
 """CORS (Cross-Origin Resource Sharing) middleware configuration.
 
-This module provides secure CORS configuration for the OData service.
-By default, CORS is restrictive and requires explicit origin configuration.
+Two policies, chosen by the request's Origin:
+
+- Opteryx's own sites (CORS_ORIGINS) get a credentialed policy: the origin is
+  echoed back with Access-Control-Allow-Credentials, as before.
+- Every other site gets a public policy: `Access-Control-Allow-Origin: *` and
+  NO credentials. Anyone can build a page on the anonymous `demo` workspace, or
+  call the API with a bearer token their own code holds.
+
+Why the split matters: this service accepts HTTP Basic auth, and browsers
+remember Basic credentials and attach them on their own. A credentialed `*`
+would let any web page read a signed-in visitor's private datasets. With no
+Allow-Credentials on the public policy, a browser never sends or exposes those
+ambient credentials to a foreign page; only an Authorization header the page
+set itself (so a token it already has) gets through.
 """
 
 from fastapi.middleware.cors import CORSMiddleware
 from opteryx_shared_services.config import get_config
 from opteryx_shared_services.logging import get_logger
+from starlette.datastructures import Headers, MutableHeaders
 
 logger = get_logger()
 
@@ -24,23 +37,90 @@ CORS_ORIGINS = [
     "http://localhost:3000",
 ]
 
+ALLOW_METHODS = ["GET", "POST"]  # Only allow necessary methods
+
+# If-None-Match lets a browser client revalidate a cached $metadata document
+# instead of refetching it. It is not a CORS-safelisted request header, so
+# without it here the preflight rejects the conditional request.
+PUBLIC_ALLOW_HEADERS = ["Authorization", "Content-Type", "If-None-Match"]
+# Admin tooling only ever runs on Opteryx's own sites.
+TRUSTED_ALLOW_HEADERS = PUBLIC_ALLOW_HEADERS + ["X-Admin-Token"]
+
+# A cross-origin caller can only read headers named here. ETag is the other half
+# of conditional requests -- unlisted, it reads as null and the client can never
+# revalidate. The X-Dataset-* headers are response metadata browser clients are
+# expected to act on. WWW-Authenticate tells a browser client which scheme a 401
+# wants.
+EXPOSE_HEADERS = [
+    "ETag",
+    "OData-Version",
+    "WWW-Authenticate",
+    "X-Dataset-Source",
+    "X-Dataset-LastModified",
+    "X-Dataset-Snapshot-Id",
+]
+
+MAX_AGE = 3600  # Cache preflight requests for 1 hour
+
 
 def get_cors_origins() -> list[str]:
-    """Get allowed CORS origins from environment configuration.
+    """Get the origins that get the credentialed policy.
 
     Returns:
-        List of allowed origin URLs, or empty list if none configured.
-        Returns ["*"] only if CORS_ALLOW_ALL=true (development mode).
+        List of trusted origin URLs, or ["*"] only if CORS_ALLOW_ALL=true
+        (development mode: every origin credentialed).
     """
-    # Check for development mode first
     if get_config("CORS_ALLOW_ALL", "").lower() == "true":
         logger.error("CORS_ALLOW_ALL is enabled - this should only be used in development!")
         return ["*"]
 
-    if CORS_ORIGINS:
-        logger.info(f"CORS enabled for origins: {CORS_ORIGINS}")
-
+    logger.info(f"Credentialed CORS for origins: {CORS_ORIGINS}; all others public")
     return CORS_ORIGINS
+
+
+class OriginSplitCORSMiddleware:
+    """Route each request to the credentialed or the public CORS policy."""
+
+    def __init__(self, app, trusted_origins: list[str]):
+        self.trusted = set(trusted_origins)
+        self.credentialed = CORSMiddleware(
+            app,
+            allow_origins=trusted_origins,
+            allow_credentials=True,
+            allow_methods=ALLOW_METHODS,
+            allow_headers=TRUSTED_ALLOW_HEADERS,
+            expose_headers=EXPOSE_HEADERS,
+            max_age=MAX_AGE,
+        )
+        self.public = CORSMiddleware(
+            app,
+            allow_origins=["*"],
+            allow_credentials=False,
+            allow_methods=ALLOW_METHODS,
+            allow_headers=PUBLIC_ALLOW_HEADERS,
+            expose_headers=EXPOSE_HEADERS,
+            max_age=MAX_AGE,
+        )
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.credentialed(scope, receive, send)
+            return
+
+        origin = Headers(scope=scope).get("origin")
+        if origin is None or origin in self.trusted:
+            await self.credentialed(scope, receive, send)
+            return
+
+        # The same URL answers `*` here and an echoed origin for a trusted
+        # site, so a cache must key on Origin or it could hand one site's
+        # answer to the other. The trusted policy already adds this.
+        async def send_with_vary(message):
+            if message["type"] == "http.response.start":
+                MutableHeaders(scope=message).add_vary_header("Origin")
+            await send(message)
+
+        await self.public(scope, receive, send_with_vary)
 
 
 def configure_cors(app) -> None:
@@ -49,32 +129,19 @@ def configure_cors(app) -> None:
     Args:
         app: FastAPI application instance
     """
-    allowed_origins = get_cors_origins()
+    trusted = get_cors_origins()
 
-    if allowed_origins == ["*"]:
-        logger.warning("CORS enabled for ALL origins - not recommended for production")
+    if trusted == ["*"]:
+        logger.warning("Credentialed CORS enabled for ALL origins - not for production")
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=["*"],
+            allow_credentials=True,
+            allow_methods=ALLOW_METHODS,
+            allow_headers=TRUSTED_ALLOW_HEADERS,
+            expose_headers=EXPOSE_HEADERS,
+            max_age=MAX_AGE,
+        )
+        return
 
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=allowed_origins if allowed_origins else [],
-        allow_credentials=True,
-        allow_methods=["GET", "POST"],  # Only allow necessary methods
-        # If-None-Match lets a browser client revalidate a cached $metadata
-        # document instead of refetching it. It is not a CORS-safelisted request
-        # header, so without it here the preflight rejects the conditional request.
-        allow_headers=["Authorization", "Content-Type", "X-Admin-Token", "If-None-Match"],
-        # A cross-origin caller can only read headers named here. ETag is the
-        # other half of conditional requests -- unlisted, it reads as null and
-        # the client can never revalidate. The X-Dataset-* headers are response
-        # metadata browser clients are expected to act on. WWW-Authenticate tells a
-        # browser client which scheme a 401 wants.
-        expose_headers=[
-            "ETag",
-            "OData-Version",
-            "WWW-Authenticate",
-            "X-Dataset-Source",
-            "X-Dataset-LastModified",
-            "X-Dataset-Snapshot-Id",
-        ],
-        max_age=3600,  # Cache preflight requests for 1 hour
-    )
+    app.add_middleware(OriginSplitCORSMiddleware, trusted_origins=trusted)
