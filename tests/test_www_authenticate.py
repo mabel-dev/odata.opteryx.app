@@ -19,6 +19,7 @@ os.environ["GCS_BUCKET"] = "test-bucket"
 from app.main import service
 from app.middleware.cors import configure_cors
 from app.routes.v4.errors import WWW_AUTHENTICATE
+from app.routes.v4.errors import WWW_AUTHENTICATE_BEARER
 from app.routes.v4.errors import ODataError
 from app.routes.v4.errors import http_exception_handler
 from app.routes.v4.errors import odata_error_handler
@@ -86,6 +87,30 @@ def probe_client():
         raise HTTPException(status_code=401, detail="no")
 
     return TestClient(app)
+
+
+def _assert_bearer_only_challenge(response):
+    """A rejected Bearer token must not offer Basic: browsers would prompt."""
+    assert response.status_code == 401
+    challenge = response.headers.get("WWW-Authenticate")
+    assert challenge == WWW_AUTHENTICATE_BEARER
+    assert "Basic" not in challenge
+
+
+def test_rejected_bearer_token_gets_a_bearer_only_challenge():
+    response = client.get("/api/v4/", headers={"Authorization": "Bearer not-a-real-token"})
+    _assert_bearer_only_challenge(response)
+    assert response.headers.get("OData-Version") == "4.0"
+
+
+def test_bearer_scheme_is_case_insensitive(probe_client):
+    response = probe_client.get("/api/v4/odata-401", headers={"Authorization": "bearer x"})
+    _assert_bearer_only_challenge(response)
+
+
+@pytest.mark.parametrize("path", ["/api/v4/odata-401", "/other-401"])
+def test_every_401_path_drops_basic_for_bearer(probe_client, path):
+    _assert_bearer_only_challenge(probe_client.get(path, headers={"Authorization": "Bearer x"}))
 
 
 def test_odata_error_401_carries_the_challenge(probe_client):

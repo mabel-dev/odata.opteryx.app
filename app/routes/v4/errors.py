@@ -19,12 +19,28 @@ logger = get_logger()
 # user name and a personal access token as the password (see app.auth.deps).
 WWW_AUTHENTICATE = 'Basic realm="opteryx", charset="UTF-8", Bearer realm="opteryx"'
 
+# A request that already presented a Bearer token is a browser app (Studio) or a
+# script, never a Power Query client - and a browser shows its native username/
+# password dialog whenever a 401 offers Basic to a credentialed fetch. So a
+# rejected Bearer token is told only that the token is bad (RFC 6750 §3.1);
+# browsers never prompt for a Bearer-only challenge, and the page's own 401
+# handling (send the user to sign in) runs instead.
+WWW_AUTHENTICATE_BEARER = 'Bearer realm="opteryx", error="invalid_token"'
 
-def _error_headers(status_code: int) -> dict:
+
+def _challenge(request: Request) -> str:
+    """The WWW-Authenticate value for a 401 to this request."""
+    authorization = request.headers.get("authorization", "")
+    if authorization[:7].lower() == "bearer ":
+        return WWW_AUTHENTICATE_BEARER
+    return WWW_AUTHENTICATE
+
+
+def _error_headers(request: Request, status_code: int) -> dict:
     """Headers for an error response: the OData version, plus the challenge on a 401."""
     headers = {"OData-Version": "4.0"}
     if status_code == status.HTTP_401_UNAUTHORIZED:
-        headers["WWW-Authenticate"] = WWW_AUTHENTICATE
+        headers["WWW-Authenticate"] = _challenge(request)
     return headers
 
 
@@ -67,7 +83,7 @@ async def odata_error_handler(request: Request, exc: ODataError) -> JSONResponse
                 "message": exc.message,
             }
         },
-        headers=_error_headers(exc.status_code),
+        headers=_error_headers(request, exc.status_code),
     )
 
 
@@ -84,11 +100,11 @@ async def http_exception_handler(request: Request, exc: HTTPException) -> JSONRe
                     "message": exc.detail,
                 }
             },
-            headers=_error_headers(exc.status_code),
+            headers=_error_headers(request, exc.status_code),
         )
 
     # For non-v4 endpoints, return standard FastAPI error
-    challenge = {"WWW-Authenticate": WWW_AUTHENTICATE} if exc.status_code == 401 else None
+    challenge = {"WWW-Authenticate": _challenge(request)} if exc.status_code == 401 else None
     return JSONResponse(
         status_code=exc.status_code,
         content={"detail": exc.detail},
