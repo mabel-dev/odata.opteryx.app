@@ -17,7 +17,10 @@ CORS_ORIGINS = [
     "http://localhost:8000",
     # Docs site "Try it" panel calls this service from the browser
     "https://docs.opteryx.app",
-    "http://127.0.0.1:3000",  # docs-site `npm run dev`
+    # Notebooks (notebooks.opteryx.app) run their queries from the browser,
+    # anonymously, against the demo workspace only.
+    "https://notebooks.opteryx.app",
+    "http://127.0.0.1:3000",  # docs-site `npm run dev`, notebooks serve.py
     "http://localhost:3000",
 ]
 
