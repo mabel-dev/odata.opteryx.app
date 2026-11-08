@@ -117,7 +117,10 @@ class OriginSplitCORSMiddleware:
         # answer to the other. The trusted policy already adds this.
         async def send_with_vary(message):
             if message["type"] == "http.response.start":
-                MutableHeaders(scope=message).add_vary_header("Origin")
+                headers = MutableHeaders(scope=message)
+                vary = {v.strip().lower() for v in headers.get("vary", "").split(",")}
+                if "origin" not in vary:
+                    headers.add_vary_header("Origin")
             await send(message)
 
         await self.public(scope, receive, send_with_vary)

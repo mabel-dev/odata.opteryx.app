@@ -115,6 +115,19 @@ def test_public_responses_vary_on_origin(client):
     assert "origin" in response.headers.get("vary", "").lower()
 
 
+def test_vary_origin_is_not_duplicated(client):
+    """A route that already varies on Origin must not get it twice."""
+    from fastapi import Response
+
+    @client.app.get("/varies")
+    def varies():
+        return Response("ok", headers={"Vary": "Origin"})
+
+    response = client.get("/varies", headers={"Origin": UNKNOWN})
+    values = [v.strip().lower() for v in response.headers.get("vary", "").split(",")]
+    assert values.count("origin") == 1
+
+
 def test_unknown_origin_can_read_dataset_headers(client):
     response = client.get("/probe", headers={"Origin": UNKNOWN})
     exposed = {
