@@ -61,6 +61,7 @@ def _map_status_to_code(status_code: int) -> str:
     mapping = {
         status.HTTP_400_BAD_REQUEST: "BadRequest",
         status.HTTP_401_UNAUTHORIZED: "Unauthorized",
+        status.HTTP_402_PAYMENT_REQUIRED: "PaymentRequired",
         status.HTTP_403_FORBIDDEN: "Forbidden",
         status.HTTP_404_NOT_FOUND: "NotFound",
         status.HTTP_406_NOT_ACCEPTABLE: "NotAcceptable",

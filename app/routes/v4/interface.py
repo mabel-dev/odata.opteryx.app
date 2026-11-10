@@ -1144,6 +1144,33 @@ def _execute_count_query(
         ) from e
 
 
+def _refuse_if_billing_blocked(billing_account: Optional[str], table_name: str) -> None:
+    """402 when the caller's billing account is suspended or at its spending cap.
+
+    `platform.billing.*` stays readable: it is the caller's own usage, and the
+    Studio billing page reads it through this service - a blocked account has
+    to be able to see what it owes to fix it.
+    """
+    if table_name.lower().startswith("platform.billing."):
+        return
+
+    from app.auth import billing_block
+    from app.core import _get_firestore_client
+
+    reason = billing_block.check(
+        billing_account,
+        lambda: _get_firestore_client(
+            database=get_config("ACCOUNTS_FIRESTORE_DATABASE", "(default)")
+        ),
+    )
+    if reason:
+        raise HTTPException(
+            status_code=402,
+            detail=billing_block.MESSAGES[reason],
+            headers={"X-Billing-Block": reason},
+        )
+
+
 def execute_odata_query(
     table_name: str,
     filter_expr: Optional[str] = None,
@@ -1698,6 +1725,8 @@ def read_dataset(
             status_code=401,
             detail="Missing or invalid credentials",
         )
+
+    _refuse_if_billing_blocked(billing_account, table_name)
 
     # Execute the OData query using the core function
     try:
