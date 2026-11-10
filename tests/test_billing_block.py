@@ -1,7 +1,7 @@
 """Entity reads billed to a suspended or capped account are refused with 402.
 
-The rule is vendored from control.opteryx (`app/auth/billing_block.py`); the
-parametrised cases are the ones control pins on the original.
+The rule is control.opteryx's, shared as `opteryx_shared_services.billing.block`;
+the parametrised cases are the ones control pins.
 """
 
 import datetime
@@ -11,7 +11,8 @@ from fastapi import FastAPI
 from fastapi import Request
 from fastapi.testclient import TestClient
 
-from app.auth import billing_block
+from opteryx_shared_services.billing import accounts as billing_accounts
+from opteryx_shared_services.billing import block as billing_block
 from app.routes.v4 import interface
 from app.routes.v4.interface import require_authentication
 from app.routes.v4.interface import router
@@ -65,7 +66,7 @@ class _Doc:
 
 @pytest.fixture
 def accounts(monkeypatch):
-    billing_block._cache.clear()
+    billing_accounts.clear_cache()
     data = {}
     ran = []
 
@@ -77,7 +78,7 @@ def accounts(monkeypatch):
     monkeypatch.setattr(interface, "execute_odata_query", fake_execute)
     data["_ran"] = ran
     yield data
-    billing_block._cache.clear()
+    billing_accounts.clear_cache()
 
 
 @pytest.fixture

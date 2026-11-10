@@ -1154,7 +1154,7 @@ def _refuse_if_billing_blocked(billing_account: Optional[str], table_name: str) 
     if table_name.lower().startswith("platform.billing."):
         return
 
-    from app.auth import billing_block
+    from opteryx_shared_services.billing import block as billing_block
     from app.core import _get_firestore_client
 
     reason = billing_block.check(
