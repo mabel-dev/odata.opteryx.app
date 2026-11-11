@@ -27,9 +27,10 @@ every file, and the scan reads nothing at all.
 That makes this an integration test by necessity: the two halves are individually
 correct and only the join between them is wrong, so it asserts on the OData plan's
 real predicate node driving a manifest whose bounds are encoded the way a
-catalog-backed DATE column really encodes them. `opteryx.models.Manifest` is
-where the fix lives (`_temporal_domain_mismatch`); this pins the contract the
-OData surface depends on, and fails against any opteryx-core without it.
+catalog-backed DATE column really encodes them. The fix lives in opteryx-core's
+native file pruning (`temporal_domain_mismatch` in src/cpp/planner/manifest_prune.hpp);
+this pins the contract the OData surface depends on, and fails against any
+opteryx-core without it.
 
 The reverse pairing is covered too. A TIMESTAMP column against a date-only
 literal fails the same way with the operators inverted - `published_at lt
@@ -44,7 +45,7 @@ import sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import pytest
-from opteryx.models.file_entry import FileEntry
+from opteryx.compiled.planner.native_manifest import NativeManifestBuilder
 from opteryx.models.manifest import Manifest
 from opteryx.planner.logical_planner import LogicalPlanStepType
 from opteryx.planner.plan_context import PlanContext
@@ -68,12 +69,14 @@ US_2026_08_03 = DAY_2026_08_03 * US_PER_DAY
 OPERATORS = ("eq", "ne", "gt", "ge", "lt", "le")
 
 
-def _filter_condition(filter_expr, table_name="public.security.cisa_kev"):
-    """The predicate node the OData layer hands Opteryx for `filter_expr`."""
+def _filter_plan(filter_expr, table_name="public.security.cisa_kev"):
+    """The plan's context, and the predicate node the OData layer hands Opteryx
+    for `filter_expr`. The predicate's expressions live in that context's arena,
+    and file pruning reads them there - so the manifest is pruned in it too."""
     plan = build_logical_plan(table_name=table_name, filter_expr=filter_expr)
     for _, node in plan.nodes(True):
         if node.node_type == LogicalPlanStepType.Filter:
-            return node.condition
+            return plan.plan_context, node.condition
     raise AssertionError(f"no Filter node in the plan for {filter_expr!r}")
 
 
@@ -81,45 +84,53 @@ def _manifest(column_type, lower, upper, plan_context, column_name="date_added")
     """One file whose bounds straddle the filter boundary, so a correct
     comparison keeps it and only an incorrect one drops it.
 
-    Built the way the binder builds a scan's manifest (binder/dataset.py
-    `visit_scan`): the source describes the relation with a RelationDescriptor,
-    the Manifest is built over that description, and the query's ColumnTable
-    binds it - the manifest's statistics are keyed by BOUND column identity, so
-    it reads the bound schema from then on."""
+    Built the way a catalog producer builds a scan's manifest: the source
+    describes the relation with a RelationDescriptor, the native manifest is
+    built over that description with one row per file (statistics keyed by the
+    column's load-time position), and the query's ColumnTable binds the schema -
+    as the binder does in `visit_scan` - so it reads the bound schema from then on.
+
+    `bounds_are_ordinal=True` is what the catalog connector the hosted service
+    runs on builds, and ordinalisation is the identity for DATE32/TIMESTAMP64 -
+    the ordinal key IS the raw tick - so the mismatch survives it unchanged. Set
+    explicitly rather than defaulted, so this stays the shape production executes.
+    `stats_are_authoritative=True`, as a catalog's commit-written statistics are:
+    only authoritative bounds may prune a file at all."""
     descriptor = RelationDescriptor(
         name="cisa_kev",
         columns=[ColumnDescriptor(name=column_name, column_type=column_type)],
     )
-    file_entry = FileEntry(
-        file_path="data/cisa_kev/0000.parquet",
-        file_format="PARQUET",
-        record_count=1657,
-        file_size_in_bytes=0,
-        lower_bounds={0: lower},
-        upper_bounds={0: upper},
+    builder = NativeManifestBuilder(
+        (column_name,),
+        (descriptor.columns[0].column_type.physical,),
+        True,  # bounds_are_ordinal
+        True,  # stats_are_authoritative
     )
-    # `bounds_are_ordinal=True` is what the catalog connector the hosted service
-    # runs on builds, and `ColumnType.ordinalize` is the identity for
-    # DATE32/TIMESTAMP64 - the ordinal key IS the raw tick - so the mismatch
-    # survives ordinalisation unchanged. Set explicitly rather than defaulted,
-    # so this stays the shape production actually executes.
-    manifest = Manifest(files=[file_entry], schema=descriptor, bounds_are_ordinal=True)
+    # path, format, record count, size; then row groups, uncompressed size and
+    # histogram bins unknown (-1), no deletes, and this file's sketch row.
+    row = builder.add_file(
+        "data/cisa_kev/0000.parquet", "PARQUET", 1657, 0, -1, -1, -1, 0, None, None, 0
+    )
+    builder.set_ordinal_bound(row, 0, True, lower)
+    builder.set_ordinal_bound(row, 0, False, upper)
+    # Null count, lengths, byte totals and distinct floor all unknown.
+    builder.set_counts(row, 0, -1, -1, -1, -1, -1, -1)
+    manifest = Manifest(builder.build({}), descriptor)
     manifest.schema = plan_context.columns.bind_relation(descriptor, "cisa_kev")
     return manifest
 
 
 def _surviving_files(column_type, bounds, filter_expr):
-    # One query's planning context for the manifest and the prune, as in a
-    # real query: the binder binds the scan and the optimizer prunes in the
-    # same PlanContext.
-    plan_context = PlanContext()
+    """The paths of the files pruning keeps. One query's planning context for
+    the predicate, the manifest and the prune, as in a real query.
+
+    `prune_files` does not mutate: it returns the pruned manifest and leaves
+    this one whole. Reading the original's file list would make every "reads
+    the data" assertion pass vacuously and every "still prunes" assertion
+    impossible - the test could not see a prune at all."""
+    plan_context, condition = _filter_plan(filter_expr)
     manifest = _manifest(column_type, *bounds, plan_context=plan_context)
-    # `prune_files` does not mutate: it returns the pruned manifest and leaves
-    # this one whole. Discarding the return value read the ORIGINAL file list,
-    # which made every "reads the data" assertion pass vacuously and every
-    # "still prunes" assertion impossible - the test could not see a prune at
-    # all, so it could not have caught the regression it exists to pin.
-    return manifest.prune_files([_filter_condition(filter_expr)], plan_context=plan_context).files
+    return manifest.prune_files([condition], plan_context=plan_context).get_file_paths()
 
 
 # ---------------------------------------------------------------------------
@@ -174,8 +185,8 @@ def test_datetime_literal_never_prunes_a_file_the_date_only_literal_keeps(bounds
     date_only = _surviving_files(DATE, bounds, f"date_added {operator} 2025-01-01")
     datetime_form = _surviving_files(DATE, bounds, f"date_added {operator} 2025-01-01T00:00:00Z")
 
-    kept_by_date_only = {f.file_path for f in date_only}
-    kept_by_datetime = {f.file_path for f in datetime_form}
+    kept_by_date_only = set(date_only)
+    kept_by_datetime = set(datetime_form)
 
     assert kept_by_date_only <= kept_by_datetime, (
         f"'{operator}' with a datetime literal pruned files the date-only form "

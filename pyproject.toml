@@ -15,7 +15,12 @@ dependencies = [
     "google-cloud-secret-manager==2.32.0",
     "google-cloud-storage==3.17.1",
     "opteryx-shared-services[web,storage,secrets]>=0.3.0",
-    "opteryx-core>=0.9.195",
+    # From Artifact Registry, not PyPI - see [tool.uv.sources] below. Pinned EXACTLY: the
+    # image installs whatever this resolves to at build time, so with `>=` a new opteryx-core
+    # reached production on the next unrelated rebuild. A new version arrives as a commit that
+    # bumps this pin (to what worker.opteryx's canary has passed), and that commit is deployed
+    # through .github/workflows/deploy.yaml like any other.
+    "opteryx-core==0.9.198",
     "opteryx-catalog[kms]>=0.4.180",
     "opteryx-access>=0.2.18",
     "opteryx-iceberg>=0.1.23",
@@ -39,6 +44,23 @@ test = [
     "httpx2==2.9.1",
     "pytest",
 ]
+
+# opteryx-core comes from Artifact Registry (`opteryx-wheels`), never PyPI. opteryx-core's
+# `gar-*` tags publish there only (cp314, x86_64 + aarch64 - what production runs); PyPI releases
+# are rarer and have gaps, so a version the SaaS needs may never be on PyPI. `explicit`: this
+# index serves opteryx-core and nothing else, and opteryx-core is never looked for on PyPI.
+#
+# The index needs credentials: uv reads them from UV_INDEX_OPTERYX_WHEELS_USERNAME
+# (`oauth2accesstoken`) and UV_INDEX_OPTERYX_WHEELS_PASSWORD (`gcloud auth print-access-token`).
+# Install with uv: pip ignores [tool.uv.*] and would look for the pin on PyPI. There are no
+# macOS wheels in this channel.
+[[tool.uv.index]]
+name = "opteryx-wheels"
+url = "https://us-east1-python.pkg.dev/mabeldev/opteryx-wheels/simple/"
+explicit = true
+
+[tool.uv.sources]
+opteryx-core = { index = "opteryx-wheels" }
 
 [tool.setuptools.packages.find]
 include = ["app*"]

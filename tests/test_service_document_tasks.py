@@ -296,14 +296,14 @@ def test_a_personal_task_is_the_owners_alone(monkeypatch):
 
 
 def test_an_anonymous_caller_sees_only_what_opteryx_access_lets_it_read(monkeypatch):
-    """`demo` is the anonymous workspace; `public.security` stays readable until
-    opteryx-access drops its transitional grant. The rest of `public`, and
-    `samples`, need a signed-in identity."""
+    """`demo` is the only workspace an anonymous caller reads. `public` - including
+    `public.security`, whose transitional anonymous grant opteryx-access 0.2.18
+    dropped - and `samples` need a signed-in identity."""
     result = _serve(
         monkeypatch,
         [
             task_doc("demo", "security", "open"),
-            task_doc("public", "security", "transitional"),
+            task_doc("public", "security", "formerly_open"),
             task_doc("public", "astronomy", "closed"),
             task_doc("samples", "tpch_sf1", "closed"),
         ],
@@ -312,7 +312,7 @@ def test_an_anonymous_caller_sees_only_what_opteryx_access_lets_it_read(monkeypa
 
     names = {entry["name"] for entry in result["value"]}
     assert "demo.security.open" in names
-    assert "public.security.transitional" in names
+    assert "public.security.formerly_open" not in names
     assert "public.astronomy.closed" not in names
     assert "samples.tpch_sf1.closed" not in names
 

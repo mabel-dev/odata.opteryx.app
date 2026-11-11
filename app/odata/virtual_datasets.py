@@ -206,6 +206,12 @@ VIRTUAL_INFORMATION_SCHEMA_TABLES: dict[str, list[EdmProperty]] = {
     # served as 403) without ALTER on the whole workspace rather than returning
     # an empty list that would read as "none". `last_used_at` is the last
     # ATTEMPTED use.
+    "maintenance": [
+        # ONE row, for this workspace: the setting is held at the workspace and
+        # everything inside inherits it, so there is no per-object value to list.
+        _col("catalog_name", "VARCHAR"),
+        _col("maintenance", "BOOL"),
+    ],
     "secrets": [
         _col("secret_catalog", "VARCHAR"),
         _col("secret_name", "VARCHAR"),
@@ -342,6 +348,13 @@ VIRTUAL_INFORMATION_SCHEMA_DESCRIPTIONS: dict[str, str] = {
         "- `origin` of `inherited`: covers it from the collection or workspace above, "
         "as `SHOW EFFECTIVE GRANTS ON` adds"
     ),
+    "maintenance": (
+        "Whether the platform keeps this workspace's data compacted - one row, "
+        "for the workspace. Everything in the workspace inherits it.\n"
+        "\n"
+        "- `maintenance` is `true` when the platform's maintenance identity holds "
+        "its WRITE grant here, which is exactly what the compactor checks"
+    ),
     "secrets": (
         "Credentials stored in this workspace for `READ_*` `credentials =>`, never "
         "with their values. What `SHOW SECRETS` returns.\n"
@@ -385,6 +398,11 @@ VIRTUAL_INFORMATION_SCHEMA_ACTIONS: dict[str, str] = {
     "forks": "READ",
     "schemata": "READ",
     "grants": "GRANT",
+    # READ: the engine does not gate it at all - it says whether the
+    # workspace is maintained, names no principal, and is one row about the
+    # workspace itself. READ is the lowest tier this file offers at, so it is
+    # listed wherever the caller can read anything in the workspace.
+    "maintenance": "READ",
     #   ALTER     secrets: the engine's gate is ALTER on the whole workspace
     #             (owner of `ws.*`). Offered at this file's usual grain - an owner
     #             of anything in the workspace - and the engine refuses the rest

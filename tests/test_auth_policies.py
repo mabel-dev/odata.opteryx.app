@@ -124,6 +124,9 @@ def test_role_allows_read_covers_read_capable_roles():
 # from is part of its shape, not a fact about who may reach it, and the engine
 # gates each row on READ of the dataset in this workspace - so a reader holds
 # exactly the rows for the datasets they can already see.
+#
+# `maintenance` sits here because the engine does not gate it: one row saying
+# whether the workspace is kept compacted, naming no principal.
 SHAPE_TABLES = [
     "tables",
     "columns",
@@ -132,6 +135,7 @@ SHAPE_TABLES = [
     "schemata",
     "listeners",
     "forks",
+    "maintenance",
 ]
 OWNER_TABLES = ["triggers", "tasks", "grants", "secrets"]
 

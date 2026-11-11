@@ -1,0 +1,108 @@
+name: Deploy
+
+# Every change to main is deployed by this workflow, and only by it (it replaces the
+# `odata-opteryx` Cloud Build trigger, whose build steps lived in GCP rather than here):
+#
+#   tests ─► build + push (x86_64) ─► deploy to Cloud Run
+#
+# The image is built on x86_64 because that is what Cloud Run runs, so it installs the
+# x86_64 cp314 opteryx-core wheel from Artifact Registry.
+#
+# A new opteryx-core reaches odata as a commit that bumps its exact pin in pyproject.toml,
+# to a version worker.opteryx's canary has already passed, so it goes through this same path.
+#
+# The revision's own startup gate is `app.preflight` (see Dockerfile CMD): if it cannot
+# reach a dependency the revision fails and traffic stays on the one already serving.
+
+on:
+  push:
+    branches: [main]
+  # Re-run a deploy without a commit (e.g. after fixing the deploy identity's access).
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+# One deploy at a time, never cancelled part-way. A newer push waits; if several queue,
+# only the newest runs.
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+env:
+  PROJECT_ID: mabeldev
+  REGION: us-east1
+  IMAGE: us-east1-docker.pkg.dev/mabeldev/cloud-run-source-deploy/odata.opteryx.app/odata-opteryx-app-git
+  CLOUD_RUN_SERVICE: odata-opteryx-app-git
+  WORKLOAD_IDENTITY_PROVIDER: projects/762690895289/locations/global/workloadIdentityPools/github/providers/github
+  DEPLOY_SERVICE_ACCOUNT: gh-deploy@mabeldev.iam.gserviceaccount.com
+
+jobs:
+  tests:
+    uses: ./.github/workflows/ci.yml
+
+  deploy:
+    name: Build, push, deploy
+    needs: tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Before the build: opteryx-core is installed from Artifact Registry (pyproject.toml).
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.DEPLOY_SERVICE_ACCOUNT }}
+          token_format: access_token
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Build image
+        # The token goes in as a BuildKit secret: never in a layer or the image's history.
+        env:
+          GAR_TOKEN: ${{ steps.auth.outputs.access_token }}
+        run: |
+          test "$(uname -m)" = "x86_64"
+          docker build --secret id=gar_token,env=GAR_TOKEN -t "$IMAGE:${GITHUB_SHA}" .
+
+      - name: Docker login to Artifact Registry
+        # Log in with the federated access token explicitly: the gcloud credential helper does
+        # not reliably pick up WIF tokens (same as jobs.opteryx and worker.opteryx).
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGION }}-docker.pkg.dev
+          username: oauth2accesstoken
+          password: ${{ steps.auth.outputs.access_token }}
+
+      - name: Push image
+        run: docker push "$IMAGE:${GITHUB_SHA}"
+
+      - name: Record what the service runs now
+        run: |
+          previous="$(gcloud run services describe "$CLOUD_RUN_SERVICE" \
+            --region="$REGION" --project="$PROJECT_ID" \
+            --format='value(spec.template.spec.containers[0].image)')"
+          {
+            echo "previous image: \`$previous\`"
+            echo ""
+            echo "roll back with:"
+            echo "\`gcloud run services update $CLOUD_RUN_SERVICE --region=$REGION --project=$PROJECT_ID --image=$previous\`"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Deploy to Cloud Run
+        # `services update --image` changes only the image; the service's other settings
+        # (scaling, VPC egress, service account, env) stay as they are.
+        run: |
+          gcloud run services update "$CLOUD_RUN_SERVICE" \
+            --image="$IMAGE:${GITHUB_SHA}" \
+            --region="$REGION" \
+            --project="$PROJECT_ID" \
+            --update-labels="managed-by=github-actions,commit-sha=${GITHUB_SHA}" \
+            --remove-labels="gcb-trigger-id,gcb-trigger-region,gcb-build-id" \
+            --quiet

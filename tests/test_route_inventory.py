@@ -38,9 +38,25 @@ FROZEN_ROUTES = [
 ]
 
 
+def _flattened(routes):
+    """Every route the app serves, with included routers expanded.
+
+    FastAPI 0.162 stopped copying an included router's routes into
+    `service.routes`; it keeps one entry per `include_router`, which yields the
+    routes it serves (full path, methods) from `effective_route_contexts()`.
+    Older FastAPI flattened them, and those entries are plain routes.
+    """
+    for route in routes:
+        expand = getattr(route, "effective_route_contexts", None)
+        if callable(expand):
+            yield from expand()
+        else:
+            yield route
+
+
 def _live_routes():
     rows = set()
-    for route in service.routes:
+    for route in _flattened(service.routes):
         path = getattr(route, "path", None)
         if path is None:
             continue

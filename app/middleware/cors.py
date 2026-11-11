@@ -114,13 +114,20 @@ class OriginSplitCORSMiddleware:
 
         # The same URL answers `*` here and an echoed origin for a trusted
         # site, so a cache must key on Origin or it could hand one site's
-        # answer to the other. The trusted policy already adds this.
+        # answer to the other. The trusted policy already adds this. Starlette
+        # 1.10+ appends `Origin` here too, without checking whether the route
+        # already varies on it, so rebuild the header with each value once.
         async def send_with_vary(message):
             if message["type"] == "http.response.start":
                 headers = MutableHeaders(scope=message)
-                vary = {v.strip().lower() for v in headers.get("vary", "").split(",")}
-                if "origin" not in vary:
-                    headers.add_vary_header("Origin")
+                values: dict[str, str] = {}
+                for header in headers.getlist("vary"):
+                    for value in header.split(","):
+                        value = value.strip()
+                        if value:
+                            values.setdefault(value.lower(), value)
+                values.setdefault("origin", "Origin")
+                headers["vary"] = ", ".join(values.values())
             await send(message)
 
         await self.public(scope, receive, send_with_vary)
