@@ -3,16 +3,30 @@ name: Deploy
 # Every change to main is deployed by this workflow, and only by it (it replaces the
 # `odata-opteryx` Cloud Build trigger, whose build steps lived in GCP rather than here):
 #
-#   tests ─► build + push (x86_64) ─► deploy to Cloud Run
+#   tests ─► build + push (x86_64) ─► canary revision ─► promote
 #
-# The image is built on x86_64 because that is what Cloud Run runs, so it installs the
-# x86_64 cp314 opteryx-core wheel from Artifact Registry.
+# 1. tests     The unit suite (ci.yml).
+# 2. build     The image, on x86_64 because that is what Cloud Run runs, so it installs the
+#              x86_64 cp314 opteryx-core wheel from Artifact Registry.
+# 3. canary    The image is deployed as a new revision that takes NO traffic, tagged `canary`,
+#              which gives it its own URL. Its startup gate (`app.preflight`, Dockerfile CMD)
+#              must pass for it to become ready at all. `scripts/canary_check.py` then calls it
+#              as an anonymous client would: /health (every dependency, from inside the new
+#              revision), the service document, $metadata, a real read and a filtered read
+#              through the engine, and the 404 path.
+# 4. promote   Only now does traffic move - all of it, to that exact revision, never a rebuild.
+#              The run summary records the revision that was serving and the command that
+#              puts traffic back on it.
+#
+# A failed canary leaves traffic where it was; the failed revision keeps the `canary` tag
+# for inspection until the next deploy reassigns it.
+#
+# Traffic is pinned to a named revision, not to LATEST: a revision created outside this
+# workflow (a console edit, a `gcloud run services update`) takes no traffic until it is
+# promoted, so nothing reaches users without passing the canary.
 #
 # A new opteryx-core reaches odata as a commit that bumps its exact pin in pyproject.toml,
 # to a version worker.opteryx's canary has already passed, so it goes through this same path.
-#
-# The revision's own startup gate is `app.preflight` (see Dockerfile CMD): if it cannot
-# reach a dependency the revision fails and traffic stays on the one already serving.
 
 on:
   push:
@@ -43,7 +57,7 @@ jobs:
     uses: ./.github/workflows/ci.yml
 
   deploy:
-    name: Build, push, deploy
+    name: Build, canary, promote
     needs: tests
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -84,25 +98,74 @@ jobs:
         run: docker push "$IMAGE:${GITHUB_SHA}"
 
       - name: Record what the service runs now
+        id: previous
         run: |
-          previous="$(gcloud run services describe "$CLOUD_RUN_SERVICE" \
-            --region="$REGION" --project="$PROJECT_ID" \
-            --format='value(spec.template.spec.containers[0].image)')"
+          serving="$(gcloud run services describe "$CLOUD_RUN_SERVICE" \
+            --region="$REGION" --project="$PROJECT_ID" --format=json \
+            | python3 -c 'import json, sys; t = json.load(sys.stdin)["status"]["traffic"]; print(",".join("%s=%s" % (e["revisionName"], e["percent"]) for e in t if e.get("percent")))')"
+          echo "traffic=$serving" >> "$GITHUB_OUTPUT"
           {
-            echo "previous image: \`$previous\`"
+            echo "serving before this deploy: \`$serving\`"
             echo ""
             echo "roll back with:"
-            echo "\`gcloud run services update $CLOUD_RUN_SERVICE --region=$REGION --project=$PROJECT_ID --image=$previous\`"
+            echo "\`gcloud run services update-traffic $CLOUD_RUN_SERVICE --region=$REGION --project=$PROJECT_ID --to-revisions=$serving\`"
           } | tee -a "$GITHUB_STEP_SUMMARY"
 
-      - name: Deploy to Cloud Run
+      - name: Deploy the canary revision (no traffic)
         # `services update --image` changes only the image; the service's other settings
-        # (scaling, VPC egress, service account, env) stay as they are.
+        # (scaling, VPC egress, service account, env) stay as they are. It waits for the
+        # revision to become ready, so a failed startup gate fails this step.
         run: |
           gcloud run services update "$CLOUD_RUN_SERVICE" \
             --image="$IMAGE:${GITHUB_SHA}" \
+            --no-traffic \
+            --tag=canary \
             --region="$REGION" \
             --project="$PROJECT_ID" \
             --update-labels="managed-by=github-actions,commit-sha=${GITHUB_SHA}" \
-            --remove-labels="gcb-trigger-id,gcb-trigger-region,gcb-build-id" \
             --quiet
+
+      - name: Find the canary revision
+        id: canary
+        # The revision the `canary` tag points at, and its URL - checked to be running this
+        # commit's image, so the canary can never pass on some other revision.
+        run: |
+          read -r revision url < <(gcloud run services describe "$CLOUD_RUN_SERVICE" \
+            --region="$REGION" --project="$PROJECT_ID" --format=json \
+            | python3 -c 'import json, sys; t = [e for e in json.load(sys.stdin)["status"]["traffic"] if e.get("tag") == "canary"]; assert len(t) == 1, t; print(t[0]["revisionName"], t[0]["url"])')
+          if [ -z "$revision" ] || [ -z "$url" ]; then
+            echo "::error::no revision carries the canary tag"
+            exit 1
+          fi
+          image="$(gcloud run revisions describe "$revision" \
+            --region="$REGION" --project="$PROJECT_ID" \
+            --format='value(spec.containers[0].image)')"
+          if [ "$image" != "$IMAGE:${GITHUB_SHA}" ]; then
+            echo "::error::canary tag points at $revision, which runs $image, not $IMAGE:${GITHUB_SHA}"
+            exit 1
+          fi
+          echo "revision=$revision" >> "$GITHUB_OUTPUT"
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          echo "canary: \`$revision\` at $url" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Canary check
+        run: python3 scripts/canary_check.py "${{ steps.canary.outputs.url }}"
+
+      - name: Promote
+        run: |
+          gcloud run services update-traffic "$CLOUD_RUN_SERVICE" \
+            --to-revisions="${{ steps.canary.outputs.revision }}=100" \
+            --remove-tags=canary \
+            --region="$REGION" \
+            --project="$PROJECT_ID" \
+            --quiet
+          echo "promoted: \`${{ steps.canary.outputs.revision }}\` now takes 100% of traffic" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Canary failed - traffic not moved
+        if: failure() && steps.canary.outputs.revision != ''
+        run: |
+          {
+            echo "**Canary failed.** Traffic stayed on \`${{ steps.previous.outputs.traffic }}\`."
+            echo ""
+            echo "The failed revision \`${{ steps.canary.outputs.revision }}\` keeps the \`canary\` tag at ${{ steps.canary.outputs.url }} for inspection."
+          } | tee -a "$GITHUB_STEP_SUMMARY"
