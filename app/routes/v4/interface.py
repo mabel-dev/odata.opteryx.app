@@ -846,8 +846,66 @@ class _MaterializedResult:
         return dict(self._columns)
 
 
+def _new_read_telemetry():
+    """A telemetry object for one row/schema execution, so what the binder
+    resolved -- which snapshot of the dataset, committed when -- can be read
+    back afterwards (see `_dataset_freshness`).
+
+    Registered under its own query id, exactly as `execute_logical_plan` would
+    make one when handed none: operators record onto the registry by that id.
+    """
+    import uuid
+
+    from opteryx.models import QueryTelemetry
+
+    query_id = uuid.uuid4().hex
+    return {"query_id": query_id, "telemetry": QueryTelemetry(query_id)}
+
+
+def _telemetry_kwargs(read_telemetry) -> dict:
+    return dict(read_telemetry) if read_telemetry else {}
+
+
+def _dataset_freshness(read_telemetry, table_name: str) -> tuple[int | None, Any]:
+    """(committed epoch ms, snapshot id) of `table_name` as the query read it.
+
+    Off the engine's own reading of the bound plan (`read_commits` and the
+    `read_sources` receipt), so it costs no catalog read and names the version
+    actually served -- `@previous` / `@{tag}` included. This is what lets a row
+    response carry `X-Dataset-LastModified` without the caller fetching the
+    per-dataset $metadata, which takes a second because of column statistics.
+
+    (None, None) when there is nothing to report: a view (its rows come from
+    base tables under other names, and $metadata's header for a view means the
+    definition's time, not the data's), a dataset with nothing committed, a
+    query answered without executing (an explicit-$select count), or an engine
+    that predates `read_commits` -- where `_reading` is a defaultdict(int), so
+    the attribute reads back as 0, hence the isinstance checks.
+    """
+    if not read_telemetry:
+        return None, None
+    telemetry = read_telemetry["telemetry"]
+    wanted = table_name.lower()
+
+    committed_at = None
+    commits = getattr(telemetry, "read_commits", None)
+    if isinstance(commits, dict):
+        for name, ms in commits.items():
+            if str(name).lower() == wanted and ms:
+                committed_at = int(ms)
+
+    snapshot_id = None
+    sources = getattr(telemetry, "read_sources", None)
+    if isinstance(sources, list):
+        for entry in sources:
+            if isinstance(entry, dict) and str(entry.get("dataset", "")).lower() == wanted:
+                snapshot_id = entry.get("snapshot-id")
+
+    return committed_at, snapshot_id
+
+
 def _materialize_logical_plan_result(
-    session, logical_plan, visibility_filters=None
+    session, logical_plan, visibility_filters=None, read_telemetry=None
 ) -> _MaterializedResult:
     """Execute a logical plan on a session and materialize the result as a table-alike.
 
@@ -859,7 +917,10 @@ def _materialize_logical_plan_result(
     from opteryx.constants import ResultType
 
     results_generator, result_type = session.execute_logical_plan(
-        logical_plan, connection=session, visibility_filters=visibility_filters
+        logical_plan,
+        connection=session,
+        visibility_filters=visibility_filters,
+        **_telemetry_kwargs(read_telemetry),
     )
 
     if result_type != ResultType.TABULAR:
@@ -944,7 +1005,7 @@ def rows_to_csv(value_bytes: bytes, col_names: list[str]) -> bytes:
 
 
 def _execute_and_serialize_rows(
-    session, logical_plan, top: int, fetch_top: int, visibility_filters=None
+    session, logical_plan, top: int, fetch_top: int, visibility_filters=None, read_telemetry=None
 ):
     """Execute a logical plan and serialize its rows straight from Draken
     Morsels to JSON bytes via rugo's native ``write_jsonl``, skipping Python
@@ -970,7 +1031,10 @@ def _execute_and_serialize_rows(
     from rugo.jsonl import write_jsonl
 
     results_generator, result_type = session.execute_logical_plan(
-        logical_plan, connection=session, visibility_filters=visibility_filters
+        logical_plan,
+        connection=session,
+        visibility_filters=visibility_filters,
+        **_telemetry_kwargs(read_telemetry),
     )
 
     if result_type != ResultType.TABULAR:
@@ -1220,6 +1284,8 @@ def execute_odata_query(
             - total_count: total count (if requested), None otherwise
             - has_more_rows: bool indicating if result was truncated (more rows exist)
             - took_ms: execution time in milliseconds
+            - committed_at: epoch ms the dataset version read was committed, or None
+            - snapshot_id: the snapshot id read, or None (see `_dataset_freshness`)
 
     Raises:
         ValueError: If OData query is invalid
@@ -1319,6 +1385,11 @@ def execute_odata_query(
             version_tag=version_tag,
         )
 
+    # What the row (or schema) query resolved, for the freshness headers. Not
+    # given to the count query: it runs concurrently over the same relation,
+    # and one execution's reading is the answer.
+    read_telemetry = _new_read_telemetry()
+
     try:
         if strategy == "schema_count_split":
             # Special optimization: top=0 with count_requested
@@ -1354,7 +1425,10 @@ def execute_odata_query(
                         compute_expr=compute_expr,
                     )
                     schema_table = _materialize_logical_plan_result(
-                        session, schema_plan, visibility_filters=visibility_filters
+                        session,
+                        schema_plan,
+                        visibility_filters=visibility_filters,
+                        read_telemetry=read_telemetry,
                     )
                     col_names = schema_table.column_names or []
                 except Exception as exc:
@@ -1371,7 +1445,12 @@ def execute_odata_query(
 
             try:
                 value_bytes, row_count, col_names, has_more_rows = _execute_and_serialize_rows(
-                    session, optimized_plan, top, fetch_top, visibility_filters=visibility_filters
+                    session,
+                    optimized_plan,
+                    top,
+                    fetch_top,
+                    visibility_filters=visibility_filters,
+                    read_telemetry=read_telemetry,
                 )
             except Exception as exc:
                 logger.error(
@@ -1394,6 +1473,7 @@ def execute_odata_query(
             count_pool.shutdown(wait=True)
 
     elapsed_ms = (time.time() - start_time) * 1000
+    committed_at, snapshot_id = _dataset_freshness(read_telemetry, table_name)
 
     return {
         "value_bytes": value_bytes,
@@ -1402,6 +1482,8 @@ def execute_odata_query(
         "total_count": total_count,
         "has_more_rows": has_more_rows,
         "took_ms": elapsed_ms,
+        "committed_at": committed_at,
+        "snapshot_id": snapshot_id,
     }
 
 
@@ -1842,11 +1924,20 @@ def read_dataset(
     total_count = result["total_count"]
     has_more_rows = result.get("has_more_rows", False)
 
+    # The same freshness headers the per-dataset $metadata sends (and CORS
+    # already exposes), for the version these rows came from -- so a client
+    # showing "updated 3 h ago" beside the rows needn't fetch $metadata too.
+    freshness_headers = {}
+    if result.get("committed_at"):
+        freshness_headers["X-Dataset-LastModified"] = str(result["committed_at"])
+    if result.get("snapshot_id") is not None:
+        freshness_headers["X-Dataset-Snapshot-Id"] = str(result["snapshot_id"])
+
     # All paging (LIMIT/OFFSET) should have been pushed down to SQL when
     # possible; no Python-side slicing is necessary.
 
     if csv_requested:
-        headers = {"OData-Version": "4.0", "Cache-Control": "private, max-age=60"}
+        headers = {"OData-Version": "4.0", "Cache-Control": "private, max-age=60", **freshness_headers}
         safe_name = f"{workstream}_{collection}_{dataset_name}".replace('"', "")
         headers["Content-Disposition"] = f'inline; filename="{safe_name}.csv"'
         if total_count is not None:
@@ -1924,7 +2015,7 @@ def read_dataset(
     return Response(
         content=b"".join(body_parts),
         media_type="application/json",
-        headers={"OData-Version": "4.0"},
+        headers={"OData-Version": "4.0", **freshness_headers},
     )
 
 
