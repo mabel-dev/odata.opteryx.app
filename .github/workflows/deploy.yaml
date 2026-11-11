@@ -95,7 +95,17 @@ jobs:
           password: ${{ steps.auth.outputs.access_token }}
 
       - name: Push image
-        run: docker push "$IMAGE:${GITHUB_SHA}"
+        id: push
+        # Then resolve the tag to the linux/amd64 image's digest (scripts/image_digest.py):
+        # the push is an index, Cloud Run records the platform image's digest on a revision,
+        # and deploying by that digest is what makes the revision provably this build.
+        env:
+          GAR_TOKEN: ${{ steps.auth.outputs.access_token }}
+        run: |
+          docker push "$IMAGE:${GITHUB_SHA}"
+          image="$(python3 scripts/image_digest.py "$IMAGE:${GITHUB_SHA}")"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          echo "built: \`$image\`" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Record what the service runs now
         id: previous
@@ -117,7 +127,7 @@ jobs:
         # revision to become ready, so a failed startup gate fails this step.
         run: |
           gcloud run services update "$CLOUD_RUN_SERVICE" \
-            --image="$IMAGE:${GITHUB_SHA}" \
+            --image="${{ steps.push.outputs.image }}" \
             --no-traffic \
             --tag=canary \
             --region="$REGION" \
@@ -140,8 +150,8 @@ jobs:
           image="$(gcloud run revisions describe "$revision" \
             --region="$REGION" --project="$PROJECT_ID" \
             --format='value(spec.containers[0].image)')"
-          if [ "$image" != "$IMAGE:${GITHUB_SHA}" ]; then
-            echo "::error::canary tag points at $revision, which runs $image, not $IMAGE:${GITHUB_SHA}"
+          if [ "$image" != "${{ steps.push.outputs.image }}" ]; then
+            echo "::error::canary tag points at $revision, which runs $image, not ${{ steps.push.outputs.image }}"
             exit 1
           fi
           echo "revision=$revision" >> "$GITHUB_OUTPUT"
