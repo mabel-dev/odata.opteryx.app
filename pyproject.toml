@@ -15,12 +15,7 @@ dependencies = [
     "google-cloud-secret-manager==2.32.0",
     "google-cloud-storage==3.17.1",
     "opteryx-shared-services[web,storage,secrets]>=0.3.0",
-    # From Artifact Registry, not PyPI - see [tool.uv.sources] below. Pinned EXACTLY: the
-    # image installs whatever this resolves to at build time, so with `>=` a new opteryx-core
-    # reached production on the next unrelated rebuild. A new version arrives as a commit that
-    # bumps this pin (to what worker.opteryx's canary has passed), and that commit is deployed
-    # through .github/workflows/deploy.yaml like any other.
-    "opteryx-core==0.9.198",
+    "opteryx-core==0.9.201",
     "opteryx-catalog[kms]>=0.4.180",
     "opteryx-access>=0.2.18",
     "opteryx-iceberg>=0.1.23",
