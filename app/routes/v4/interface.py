@@ -1224,7 +1224,7 @@ def _refuse_if_billing_blocked(billing_account: Optional[str], table_name: str) 
     reason = billing_block.check(
         billing_account,
         lambda: _get_firestore_client(
-            database=get_config("ACCOUNTS_FIRESTORE_DATABASE", "(default)")
+            database=get_config("CLIENTS_FIRESTORE_DATABASE", "(default)")
         ),
     )
     if reason:
