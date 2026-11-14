@@ -34,14 +34,11 @@ from opteryx_shared_services.preflight import gcs_list
 from opteryx_shared_services.preflight import secret_manager
 
 _SECRET_MANAGER = secret_manager()
-# `datasets` is what a $metadata request enumerates; the configuration
-# document shares the `(default)` database.
-_FIRESTORE_DATASETS = firestore_read("firestore-datasets", collection="datasets")
+# Datasets, which a $metadata request enumerates, live in the catalog database.
 _FIRESTORE_CATALOG = firestore_read(
     "firestore-catalog",
     collection="$catalog",
     database_key="FIRESTORE_DATABASE",
-    covered_by="firestore-datasets",
 )
 # This service holds no storage client of its own -- the bucket is handed to
 # the engine, which reads data out of it. Read, so LIST.
@@ -49,12 +46,12 @@ _GCS_DATA = gcs_list("gcs-data", bucket_key="GCS_BUCKET")
 
 preflight = Preflight(
     component="odata",
-    checks=(_SECRET_MANAGER, _FIRESTORE_DATASETS),
+    checks=(_SECRET_MANAGER, _FIRESTORE_CATALOG),
 )
 
 health_checks = Preflight(
     component="odata",
-    checks=(_SECRET_MANAGER, _FIRESTORE_DATASETS, _FIRESTORE_CATALOG, _GCS_DATA),
+    checks=(_SECRET_MANAGER, _FIRESTORE_CATALOG, _GCS_DATA),
 )
 
 __all__ = ["health_checks", "preflight"]
