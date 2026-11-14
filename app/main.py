@@ -12,6 +12,7 @@ from opteryx_shared_services.audit import AuditMiddleware
 from app.preflight import preflight
 from app.middleware.compression import CompressionMiddleware
 from app.middleware.cors import configure_cors
+from app.middleware.platform_mode import PlatformModeMiddleware
 from app.routes import router as routes_router
 from app.routes.v4.errors import ODataError
 from app.routes.v4.errors import generic_exception_handler
@@ -70,6 +71,11 @@ service.add_exception_handler(ODataError, odata_error_handler)
 service.add_exception_handler(HTTPException, http_exception_handler)
 service.add_exception_handler(RequestValidationError, request_validation_exception_handler)
 service.add_exception_handler(Exception, generic_exception_handler)
+
+# Innermost of the middlewares (each add_middleware wraps the ones before it), so
+# a maintenance 503 still carries CORS headers a browser client can read and is
+# still recorded by the audit middleware.
+service.add_middleware(PlatformModeMiddleware)
 
 configure_cors(service)
 

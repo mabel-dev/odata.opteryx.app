@@ -93,6 +93,56 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(skip)
 
 
+class FakePlatformModeFirestore:
+    """Stands in for Firestore under `platform_mode`: one config document, held in memory.
+
+    `platform_mode` is None for a document with no switch set (operational).
+    """
+
+    def __init__(self, platform_mode=None):
+        self.platform_mode = platform_mode
+        self.reads = 0
+
+    def collection(self, _name):
+        return self
+
+    def document(self, _name):
+        return self
+
+    def get(self, timeout=None):
+        from types import SimpleNamespace
+
+        self.reads += 1
+        data = {} if self.platform_mode is None else {"platform_mode": dict(self.platform_mode)}
+        return SimpleNamespace(exists=True, to_dict=lambda: data)
+
+
+@pytest.fixture(autouse=True)
+def platform_mode_store(monkeypatch):
+    """Every request through app.main consults the platform mode; never let it reach Firestore.
+
+    The shared module's default reader is replaced by one over an in-memory
+    document with no switch set, so the service is operational unless a test
+    sets `platform_mode_store.platform_mode`. No cache: a change is seen by the
+    very next request.
+    """
+    from opteryx_shared_services import platform_mode as pm
+
+    store = FakePlatformModeFirestore()
+    monkeypatch.delenv(pm.ENV_OVERRIDE, raising=False)
+    monkeypatch.setattr(
+        pm,
+        "_default",
+        pm.PlatformMode(
+            environment="test",
+            client_provider=lambda: store,
+            cache_ttl=0,
+            promoted=lambda key, value: False,
+        ),
+    )
+    return store
+
+
 @pytest.fixture(autouse=True)
 def _isolate_process_caches():
     """Empty the process-wide caches around every test.
