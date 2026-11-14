@@ -14,7 +14,7 @@ dependencies = [
     "google-cloud-firestore>=2.34.1",
     "google-cloud-secret-manager==2.32.0",
     "google-cloud-storage==3.17.1",
-    "opteryx-shared-services[web,storage,secrets]>=0.3.2",
+    "opteryx-shared-services[web,storage,secrets]==0.3.3",
     "opteryx-core==0.9.202",
     "opteryx-catalog[kms]>=0.4.180",
     "opteryx-access>=0.2.18",
