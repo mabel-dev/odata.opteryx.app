@@ -71,7 +71,16 @@ EXPOSE 8080
 # is a knob, not a fixed value: size it to the container's vCPU allocation. Keep it
 # modest relative to vCPUs, though -- opteryx-core spawns its own native worker
 # threads per query, and those multiply per uvicorn process too.
-ENV WEB_CONCURRENCY=2
+#
+# ONE worker, deliberately. opteryx-core sizes its memory budgets per PROCESS from
+# the whole container: the chunk cache (CHUNK_CACHE_MEMORY_PERCENT x container -
+# reserve, 9.4 GiB of 16 GiB), the slab pool's retained slots (4 GiB) and the IO
+# budget. Its cache gives way to query memory only in its OWN process, so two
+# workers each fill a near-container-sized cache and neither sees the other. The
+# 2026-11-14 ClickBench run OOM-killed a worker with one query in flight (224 MB
+# left, the killed worker ~11 GB); Q32-Q34 are ~12 GB GROUP BYs on their own.
+# Raise this only once opteryx-core divides its budgets by worker count.
+ENV WEB_CONCURRENCY=1
 # TEMPORARY - per-worker memory / OOM sampler, see app/worker_diagnostics.py.
 ENV WORKER_DIAGNOSTICS=1
 # `app.preflight` runs FIRST and short-circuits the `&&`: it probes every
