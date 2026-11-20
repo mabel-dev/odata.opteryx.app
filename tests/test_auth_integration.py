@@ -1,15 +1,11 @@
 """Integration tests for authentication and authorization."""
 
-import os
+import re
 
 import pytest
 from fastapi.testclient import TestClient
 
-# Set environment variables before importing the app
-os.environ["GCP_PROJECT_ID"] = "test-project"
-os.environ["FIRESTORE_DATABASE"] = "test-db"
-os.environ["GCS_BUCKET"] = "test-bucket"
-
+from app.auth.permissions import anonymous_may_read
 from app.main import service
 
 client = TestClient(service)
@@ -17,19 +13,6 @@ client = TestClient(service)
 
 class TestAuthentication:
     """Test authentication mechanisms."""
-
-    # Sends no Authorization header, which require_authentication deliberately
-    # admits as *anonymous* -- the endpoint itself does the rejecting, so the
-    # request reaches Firestore and 504s before it can 401 without credentials.
-    @pytest.mark.requires_catalog
-    def test_v4_endpoint_requires_auth(self):
-        """Test that v4 endpoints require authentication."""
-        response = client.get("/api/v4/")
-        assert response.status_code == 401
-        # Check OData error format
-        data = response.json()
-        assert "error" in data
-        assert data["error"]["code"] == "Unauthorized"
 
     def test_v4_bearer_token_invalid(self):
         """Test that invalid bearer token returns 401."""
@@ -66,23 +49,25 @@ class TestAuthentication:
 class TestPermissionFiltering:
     """Test permission-based dataset filtering."""
 
-    # Sends no Authorization header, which require_authentication deliberately
-    # admits as *anonymous* -- the endpoint itself does the rejecting, so the
-    # request reaches Firestore and 504s before it can 401 without credentials.
+    # No Authorization header is admitted as *anonymous* (require_authentication),
+    # so these list what opteryx-access lets anyone read, not a 401.
     @pytest.mark.requires_catalog
-    def test_service_document_requires_auth(self):
-        """Test that service document requires authentication."""
+    def test_anonymous_service_document_lists_only_anonymous_readable(self):
+        """An anonymous service document lists only relations an anonymous caller may read."""
         response = client.get("/api/v4/")
-        assert response.status_code == 401
+        assert response.status_code == 200
+        names = [entry["name"] for entry in response.json()["value"]]
+        assert names, "anonymous callers should see the demo datasets"
+        assert [name for name in names if not anonymous_may_read(name)] == []
 
-    # Sends no Authorization header, which require_authentication deliberately
-    # admits as *anonymous* -- the endpoint itself does the rejecting, so the
-    # request reaches Firestore and 504s before it can 401 without credentials.
     @pytest.mark.requires_catalog
-    def test_metadata_requires_auth(self):
-        """Test that $metadata endpoint requires authentication."""
+    def test_anonymous_metadata_describes_only_anonymous_readable(self):
+        """Anonymous $metadata describes only relations an anonymous caller may read."""
         response = client.get("/api/v4/$metadata")
-        assert response.status_code == 401
+        assert response.status_code == 200
+        names = re.findall(r'Term="Custom.Resource" String="([^"]+)"', response.text)
+        assert names, "anonymous callers should see the demo datasets"
+        assert [name for name in names if not anonymous_may_read(name)] == []
 
     def test_data_endpoint_requires_auth(self):
         """Test that data endpoints require authentication."""
@@ -93,13 +78,10 @@ class TestPermissionFiltering:
 class TestODataErrorFormat:
     """Test OData v4 error response format."""
 
-    # Sends no Authorization header, which require_authentication deliberately
-    # admits as *anonymous* -- the endpoint itself does the rejecting, so the
-    # request reaches Firestore and 504s before it can 401 without credentials.
-    @pytest.mark.requires_catalog
     def test_401_returns_odata_error(self):
         """Test that 401 errors return OData error format."""
-        response = client.get("/api/v4/")
+        # An anonymous read of a relation anonymous callers may not read.
+        response = client.get("/api/v4/public/demo/test")
         assert response.status_code == 401
         data = response.json()
         assert "error" in data

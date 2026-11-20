@@ -7,6 +7,9 @@ Tests cover:
 4. $count parameter accepts only "true"/"false"
 """
 
+from app.routes.v4.interface import _max_top
+
+
 class TestTopZeroAllowed:
     """Test that $top=0 is allowed unconditionally."""
 
@@ -37,8 +40,8 @@ class TestTopZeroAllowed:
         assert "$top" in data["error"]["message"] or "between" in data["error"]["message"]
 
     def test_top_exceeds_max_rejected(self, client):
-        """$top=25001 should be rejected with 400."""
-        response = client.get("/api/v4/public/demo/users?$top=25001")
+        """$top one past the configured ODATA_MAX_TOP should be rejected with 400."""
+        response = client.get(f"/api/v4/public/demo/users?$top={_max_top() + 1}")
         assert response.status_code == 400
         data = response.json()
         assert "error" in data

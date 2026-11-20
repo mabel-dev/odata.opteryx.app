@@ -10,8 +10,6 @@ from fastapi import HTTPException
 from fastapi import Request
 from fastapi import status
 from google.api_core import exceptions as gcp_exceptions
-from google.auth.transport import requests as google_auth_requests
-from google.oauth2 import id_token as google_id_token
 from jose import JWTError
 from jose import jwt as jose_jwt
 from opteryx_shared_services.logging import get_logger
@@ -107,7 +105,7 @@ def require_bearer_token(authorization: Optional[str] = Header(None)) -> Dict[st
     Returns the decoded claims on success.
 
     Deliberately sync, not async: this does blocking network I/O (secret-store
-    lookups, JWKS fetch/discovery, Google OIDC verification) via `requests`.
+    lookups, JWKS fetch/discovery) via `requests`.
     FastAPI runs sync dependencies in the thread pool, whereas an `async def`
     here would run directly on the event loop and a slow auth call would stall
     every other in-flight request on this worker for its duration.
@@ -139,19 +137,13 @@ def require_bearer_token(authorization: Optional[str] = Header(None)) -> Dict[st
         ) from exc
     iss = claims_unverified.get("iss")
     aud = claims_unverified.get("aud")
-    # Accept either the configured issuer (users/auth) OR Google OIDC issuer
-    google_issuers = ("https://accounts.google.com", "accounts.google.com")
-    if iss in google_issuers:
-        # defer audience validation to Google's verification below (TASKS_OIDC_AUDIENCE)
-        pass
-    else:
-        if iss != issuer or aud != audience:
-            logger.info(
-                f"token claims mismatch; iss={iss} aud={aud} expected_iss={issuer} expected_aud={audience}"
-            )
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token claims"
-            )
+    if iss != issuer or aud != audience:
+        logger.info(
+            f"token claims mismatch; iss={iss} aud={aud} expected_iss={issuer} expected_aud={audience}"
+        )
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token claims"
+        )
 
     # Best-effort: try fetching the public key via the secret store first
     try:
@@ -203,29 +195,8 @@ def require_bearer_token(authorization: Optional[str] = Header(None)) -> Dict[st
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token"
             ) from exc
-    # If we reach here, JWT signature verification via local key or JWKS failed.
-    # Fall through to try Google OIDC validation below if available.
 
-    # Accept Google-signed OIDC tokens (used by Cloud Tasks OIDC) if library is available
-    if not pub_key and iss in ("https://accounts.google.com", "accounts.google.com"):
-        # Use google_auth library to verify token and audience and issuer
-        expected_aud = get_config("TASKS_OIDC_AUDIENCE")
-        try:
-            google_claims = google_id_token.verify_oauth2_token(
-                token, google_auth_requests.Request(), audience=expected_aud
-            )
-        except Exception as exc:  # pragma: no cover - library dependent
-            logger.info(f"Google token verification failed: {exc}")
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid Google ID token"
-            ) from exc
-
-        # Optionally restrict to invoker SA
-        invoker_sa = get_config("TASKS_OIDC_SA")
-        if invoker_sa and google_claims.get("email") != invoker_sa:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden caller")
-        # Accept Google claims as valid
-        return _normalize_claims(google_claims)
+    raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
 
 
 def _verify_basic_auth(username: str, password: str) -> Dict[str, Any]:

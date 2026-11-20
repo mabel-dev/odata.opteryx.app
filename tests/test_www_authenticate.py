@@ -5,16 +5,10 @@ credentials, and Power Query (Power BI, Excel) has no scheme to suggest in its
 credentials dialog - the clients the Basic-auth path exists for.
 """
 
-import os
-
 import pytest
 from fastapi import FastAPI
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
-
-os.environ["GCP_PROJECT_ID"] = "test-project"
-os.environ["FIRESTORE_DATABASE"] = "test-db"
-os.environ["GCS_BUCKET"] = "test-bucket"
 
 from app.main import service
 from app.middleware.cors import configure_cors

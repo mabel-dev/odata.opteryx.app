@@ -40,6 +40,7 @@ _prepend(os.path.abspath(os.path.join(_root_dir, "..", "opteryx-catalog")))
 import pytest  # noqa: E402  (must follow the sys.path setup above)
 
 _CATALOG_AVAILABLE = None
+_CATALOG_PROJECT = None
 
 
 def _catalog_available() -> bool:
@@ -58,13 +59,13 @@ def _catalog_available() -> bool:
     credentials. Set NO_GCE_CHECK=false to allow the probe when actually running
     on a GCE instance.
     """
-    global _CATALOG_AVAILABLE
+    global _CATALOG_AVAILABLE, _CATALOG_PROJECT
     if _CATALOG_AVAILABLE is None:
         os.environ.setdefault("NO_GCE_CHECK", "true")
         try:
             import google.auth
 
-            google.auth.default()
+            _CATALOG_PROJECT = google.auth.default()[1]
             _CATALOG_AVAILABLE = True
         except Exception:
             _CATALOG_AVAILABLE = False
@@ -76,6 +77,13 @@ def pytest_configure(config):
         "markers",
         "requires_catalog: needs a live Firestore/GCS catalog; skipped without credentials",
     )
+    # Off Cloud Run there is no metadata server to name the environment, so the config
+    # client finds no document and FIRESTORE_DATABASE is None (the `(default)` database,
+    # which holds no catalogs). Name it as the deployed services do, before collection
+    # imports the app and the config client reads it.
+    if _catalog_available() and _CATALOG_PROJECT:
+        os.environ.setdefault("OPTERYX_ENVIRONMENT", _CATALOG_PROJECT)
+        os.environ.setdefault("CONFIG_DATABASE", "config")
 
 
 def pytest_collection_modifyitems(config, items):

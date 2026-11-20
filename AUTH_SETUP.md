@@ -179,8 +179,6 @@ The bearer token validation uses these environment variables:
 - `AUTH_URL` - Authority issuing tokens (default: `https://authenticate.opteryx.app`)
 - `JWT_ISSUER` - Expected token issuer claim (default: value of `AUTH_URL`)
 - `DATA_AUDIENCE` - Expected token audience (default: `opteryx`)
-- `TASKS_OIDC_AUDIENCE` - For Google OIDC validation (optional)
-- `TASKS_OIDC_SA` - Service account to restrict to (optional)
 
 ## Migrating Existing Endpoints
 

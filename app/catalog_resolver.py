@@ -189,7 +189,10 @@ def resolve_workspace(workspace: str) -> Resolution:
     # from there, and plans without one when it is unset.
     if binding.kind == "postgres":
         config["gcs_bucket"] = get_config("GCS_BUCKET")
-    if binding.preserve_sql_case:
+    # Not for Iceberg: OpteryxConnector hands its config to the metastore, which
+    # has no use for it, and opteryx-iceberg (0.2.0) refuses any catalog property
+    # outside its allow-list - so passing it would fail every query.
+    if binding.preserve_sql_case and binding.kind != "iceberg":
         config["preserve_sql_case"] = True
 
     if binding.auth_mode == "stored":

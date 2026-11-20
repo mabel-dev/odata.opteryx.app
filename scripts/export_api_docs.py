@@ -30,7 +30,6 @@ import sys
 from pathlib import Path
 
 from fastapi.openapi.utils import get_openapi
-from fastapi.routing import APIRoute
 
 DOCS_PUBLIC_FLAG = "x-docs-public"
 
@@ -73,35 +72,32 @@ def _load_app(import_path: str):
     return app
 
 
-def _include_route_for_audience(route: object, audience: str) -> bool:
-    if audience == "all" or not isinstance(route, APIRoute):
-        return True
-
-    # FastAPI can hide routes from OpenAPI via include_in_schema=False.
-    if getattr(route, "include_in_schema", True) is False:
-        return False
-
-    openapi_extra = route.openapi_extra or {}
-    return openapi_extra.get(DOCS_PUBLIC_FLAG, True) is not False
-
-
 def _build_openapi(app, audience: str) -> dict:
-    routes = [route for route in app.routes if _include_route_for_audience(route, audience)]
+    # Filtered on the generated schema, not on `app.routes`: FastAPI now wraps an
+    # included router in a lazy `_IncludedRouter`, so a per-route filter saw one
+    # opaque entry and passed every non-public route through. FastAPI copies
+    # `openapi_extra` (and so the flag) into each operation, and already drops
+    # `include_in_schema=False` routes itself.
     schema = get_openapi(
         title=app.title,
         version=app.version,
         openapi_version=app.openapi_version,
         summary=getattr(app, "summary", None),
         description=app.description,
-        routes=routes,
+        routes=app.routes,
         tags=getattr(app, "openapi_tags", None),
         servers=getattr(app, "servers", None),
     )
 
-    for path_item in schema.get("paths", {}).values():
-        for operation in path_item.values():
-            if isinstance(operation, dict):
-                operation.pop(DOCS_PUBLIC_FLAG, None)
+    paths = schema.get("paths", {})
+    for path in list(paths):
+        path_item = paths[path]
+        for method in list(path_item):
+            operation = path_item[method]
+            if isinstance(operation, dict) and operation.pop(DOCS_PUBLIC_FLAG, True) is False and audience == "public":
+                del path_item[method]
+        if not any(isinstance(op, dict) for op in path_item.values()):
+            del paths[path]
 
     return schema
 
