@@ -63,6 +63,14 @@ STUB_MARKER = "external-catalog"
 TASK_SOURCE = "Task"
 TASKS_SUBCOLLECTION = "tasks"
 
+# A property graph -- SQL/PGQ, `{collection}/property_graphs/{name}` -- shares the
+# namespace too, and holds no rows either: it reads as its STRUCTURE, one row per
+# element table (PROPERTY_GRAPH_STRUCTURE_COLUMNS), served by the engine. Unlike
+# a task its document carries `workspace` and `collection`, so it is listed by
+# the same collection-group query as datasets and views.
+PROPERTY_GRAPH_SOURCE = "PropertyGraph"
+PROPERTY_GRAPHS_SUBCOLLECTION = "property_graphs"
+
 
 def _source_type_from_doc(data, collection: str) -> str:
     """Source label for a catalog document: View, MaterializedView or Table.
@@ -75,6 +83,8 @@ def _source_type_from_doc(data, collection: str) -> str:
     """
     if collection == "views":
         return "View"
+    if collection == PROPERTY_GRAPHS_SUBCOLLECTION:
+        return PROPERTY_GRAPH_SOURCE
     if isinstance(data, dict) and data.get(STUB_MARKER):
         return EXTERNAL_TABLE_SOURCE
     if isinstance(data, dict) and data.get("dataset-type") == MATERIALIZED_VIEW_DATASET_TYPE:
@@ -621,7 +631,7 @@ def _get_workspace_datasets(
         )
         for workspace_id in workspace_ids:
             # Query both datasets and views collection groups
-            for coll in ("datasets", "views"):
+            for coll in ("datasets", "views", PROPERTY_GRAPHS_SUBCOLLECTION):
                 datasets = _query_collection_group(
                     db,
                     coll,
@@ -687,8 +697,9 @@ def get_service_document(
           catalog), "Task" (a statement the platform runs on its own, listed here
           because it shares the workspace.collection.<object> namespace with the
           rest, and readable as the single row of its own definition) or
-          "Virtual" (synthetic, e.g. information_schema.tables) indicating
-          dataset type
+          "PropertyGraph" (a SQL/PGQ graph over catalog tables, readable as its
+          structure -- one row per vertex or edge table) or "Virtual"
+          (synthetic, e.g. information_schema.tables) indicating dataset type
         * role: user's permission level (reader, writer, admin, owner)
         * policy: access-control policy that grants permission
         * ordered: whether the underlying storage has a configured physical sort order

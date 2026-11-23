@@ -96,11 +96,11 @@ TABLE_DOC = {
 
 
 def test_both_subcollections_are_queried():
-    db = FakeFirestore({"datasets": [], "views": []})
+    db = FakeFirestore({"datasets": [], "views": [], "property_graphs": []})
 
     metadata._get_workspace_datasets(db, {"public"})
 
-    assert sorted(db.queried) == ["datasets", "views"]
+    assert sorted(db.queried) == ["datasets", "property_graphs", "views"]
 
 
 def test_a_view_is_listed_and_labelled_as_one():

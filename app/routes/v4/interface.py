@@ -93,6 +93,8 @@ from app.odata.edm_types import ORIGINAL_TYPE_TERM
 from app.odata.edm_types import RESOURCE_TERM
 from app.odata.edm_types import edm_property
 from opteryx_catalog.catalog.dataset import _stored_type_display
+from app.odata.virtual_datasets import PROPERTY_GRAPH_DESCRIPTION
+from app.odata.virtual_datasets import PROPERTY_GRAPH_STRUCTURE_COLUMNS
 from app.odata.virtual_datasets import TASK_DEFINITION_COLUMNS
 from app.odata.virtual_datasets import TASK_DESCRIPTION
 from app.odata.virtual_datasets import VIRTUAL_INFORMATION_SCHEMA_DESCRIPTIONS
@@ -709,6 +711,37 @@ def _task_record(workspace, collection: str, dataset: str) -> dict | None:
         if type(exc).__name__ != "TaskNotFound":
             logger.warning(
                 "task metadata unavailable for %s.%s: %s: %s",
+                collection,
+                dataset,
+                type(exc).__name__,
+                exc,
+            )
+        return None
+
+
+# A property graph (SQL/PGQ) is the other rowless object in the namespace. It
+# reads as its STRUCTURE -- one row per vertex or edge table, served by the
+# engine -- so its columns are fixed (PROPERTY_GRAPH_STRUCTURE_COLUMNS) and its
+# document is mostly its definition.
+PROPERTY_GRAPH_SOURCE = "PropertyGraph"
+
+
+def _property_graph_record(workspace, collection: str, dataset: str) -> dict | None:
+    """A property graph's stored record, or None if this name is not a graph.
+
+    The last rung, after dataset, view and task have all missed -- the same
+    placement and the same None-for-"not one, or an older catalog" contract as
+    `_task_record`, for the same reasons.
+    """
+    loader = getattr(workspace, "load_property_graph", None)
+    if loader is None:
+        return None
+    try:
+        return loader((collection, dataset))
+    except Exception as exc:  # noqa: BLE001 - catalog boundary
+        if type(exc).__name__ != "PropertyGraphNotFound":
+            logger.warning(
+                "property graph metadata unavailable for %s.%s: %s: %s",
                 collection,
                 dataset,
                 type(exc).__name__,
@@ -2489,6 +2522,8 @@ def dataset_metadata(
     # beside `ds` and for exactly the same reason: the annotation block below
     # reads it, and a branch that never bound it would raise NameError there.
     task = None
+    # A property graph's stored record, likewise.
+    graph = None
     # Snapshot tags held by this dataset, newest catalog wheels only. Empty for
     # anything that cannot hold one (a view, a virtual table, an external
     # projection) as well as for a table that simply has none -- the
@@ -2622,7 +2657,8 @@ def dataset_metadata(
                 gcs_bucket=_bucket_name(),
             )
 
-            # Try to load as a dataset first, then as a view, then as a task.
+            # Try to load as a dataset first, then as a view, then as a task,
+            # then as a property graph.
             ds = None
             task = None
             source_type = "Table"
@@ -2644,16 +2680,24 @@ def dataset_metadata(
                     # therefore no `ds`.
                     task = _task_record(workspace, collection, dataset)
                     if task is None:
+                        graph = _property_graph_record(workspace, collection, dataset)
+                    if task is None and graph is None:
                         logger.error(
-                            f"Failed to load dataset/view/task from catalog for {table_name}: {exc}"
+                            f"Failed to load dataset/view/task/property graph from catalog for {table_name}: {exc}"
                         )
                         raise HTTPException(
                             status_code=404, detail="dataset not found in catalog"
                         ) from exc
-                    source_type = TASK_SOURCE
                     # Fixed, and known without a schema document: a task reads
-                    # as the single row of its own definition.
-                    for column in TASK_DEFINITION_COLUMNS:
+                    # as the single row of its own definition, a property graph
+                    # as its structure.
+                    if task is not None:
+                        source_type = TASK_SOURCE
+                        fixed_columns = TASK_DEFINITION_COLUMNS
+                    else:
+                        source_type = PROPERTY_GRAPH_SOURCE
+                        fixed_columns = PROPERTY_GRAPH_STRUCTURE_COLUMNS
+                    for column in fixed_columns:
                         col_names.append(column.name)
                         col_types.append(column.type)
                         col_metadata[column.name] = {
@@ -2825,7 +2869,7 @@ def dataset_metadata(
                 # structurally valid (an EntitySet's EntityType needs a key).
                 # Custom.MaterializedView.Materialized, emitted below, is what tells
                 # a client those columns are a placeholder and not the real schema.
-                if source_type == TASK_SOURCE:
+                if source_type in (TASK_SOURCE, PROPERTY_GRAPH_SOURCE):
                     # Expected, and not a placeholder: a task has no schema
                     # document because it has no rows, and its columns were
                     # filled in from TASK_DEFINITION_COLUMNS when it was
@@ -3613,6 +3657,18 @@ def dataset_metadata(
             },
         )
 
+    # A property graph's description: its own, else the fixed sentence saying
+    # what a graph is and how its rows read -- the same treatment a task gets.
+    if source_type == PROPERTY_GRAPH_SOURCE:
+        ET.SubElement(
+            entity_set,
+            f"{{{NS_EDM}}}Annotation",
+            attrib={
+                "Term": "Custom.Description",
+                "String": str((graph or {}).get("description") or PROPERTY_GRAPH_DESCRIPTION),
+            },
+        )
+
     # Virtual datasets have no catalog-backed metadata, so give them a fixed description
     # rather than leaving Custom.Description absent.
     if source_type == "Virtual":
@@ -3782,6 +3838,24 @@ def dataset_metadata(
     # is that record. A task with no rows and no schema is almost entirely
     # description, so these annotations are the document rather than a garnish
     # on it.
+    # A property graph's canonical CREATE PROPERTY GRAPH statement, under the
+    # term views, materialized views and tasks already use for their defining
+    # text. The structure itself is the graph's ROWS, not an annotation here:
+    # this document says what the object is, the read says what it holds.
+    if source_type == PROPERTY_GRAPH_SOURCE and graph is not None:
+        if graph.get("statement"):
+            ET.SubElement(
+                entity_set,
+                f"{{{NS_EDM}}}Annotation",
+                attrib={"Term": "Custom.Definition", "String": str(graph["statement"])},
+            )
+        if graph.get("author"):
+            ET.SubElement(
+                entity_set,
+                f"{{{NS_EDM}}}Annotation",
+                attrib={"Term": "Custom.PropertyGraph.Author", "String": str(graph["author"])},
+            )
+
     if source_type == TASK_SOURCE and task is not None:
         # Custom.Definition is the term views and materialized views already use
         # for their defining SQL; a task's statement is the same kind of thing

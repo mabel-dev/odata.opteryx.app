@@ -125,7 +125,11 @@ def test_a_name_in_both_datasets_and_views_is_listed_once_as_the_dataset(monkeyp
         name="recent",
         source="View",
     )
-    by_collection = {"datasets": [materialized], "views": [leftover_view, other_view]}
+    by_collection = {
+        "datasets": [materialized],
+        "views": [leftover_view, other_view],
+        "property_graphs": [],
+    }
     monkeypatch.setattr(sd, "_drop_unlistable_workspaces", lambda db, ids, **_kw: ids)
     monkeypatch.setattr(
         sd, "_query_collection_group", lambda db, coll, workspace_filter=None, limit=1000: list(by_collection[coll])

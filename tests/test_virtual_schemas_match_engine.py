@@ -48,3 +48,13 @@ def test_virtual_schema_matches_the_engine(name):
         f"  missing here: {[c for c in engine if c not in mirrored]}\n"
         f"  not in engine: {[c for c in mirrored if c not in engine]}"
     )
+
+
+def test_property_graph_structure_matches_the_engine():
+    """A property graph reads as its structure, and the rows are the engine's; the
+    columns `$metadata` publishes for it must be the ones the engine serves."""
+    from opteryx.connectors.property_graph_structure import STRUCTURE_COLUMNS
+
+    from app.odata.virtual_datasets import PROPERTY_GRAPH_STRUCTURE_COLUMNS
+
+    assert [column.name for column in PROPERTY_GRAPH_STRUCTURE_COLUMNS] == list(STRUCTURE_COLUMNS)

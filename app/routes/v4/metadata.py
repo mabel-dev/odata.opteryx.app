@@ -26,6 +26,7 @@ from app.odata.content_negotiation import MEDIA_XML, require_acceptable
 from app.odata.edm_types import ORIGINAL_TYPE_TERM, RESOURCE_TERM, EdmProperty, edm_property
 from app.odata.xml_safety import sanitize_xml_tree
 from app.odata.virtual_datasets import (
+    PROPERTY_GRAPH_STRUCTURE_COLUMNS,
     TASK_DEFINITION_COLUMNS,
     VIRTUAL_INFORMATION_SCHEMA_TABLES,
     is_virtual_information_schema,
@@ -94,6 +95,14 @@ STUB_MARKER = "external-catalog"
 TASK_SOURCE = "Task"
 TASKS_SUBCOLLECTION = "tasks"
 
+# A property graph -- SQL/PGQ, `{collection}/property_graphs/{name}` -- shares the
+# namespace too, and holds no rows either: it reads as its STRUCTURE, one row per
+# element table (PROPERTY_GRAPH_STRUCTURE_COLUMNS), served by the engine. Unlike
+# a task its document carries `workspace` and `collection`, so it is listed by
+# the same collection-group query as datasets and views.
+PROPERTY_GRAPH_SOURCE = "PropertyGraph"
+PROPERTY_GRAPHS_SUBCOLLECTION = "property_graphs"
+
 
 def _source_type_from_doc(data, collection: str) -> str:
     """Source label for a catalog document: View, MaterializedView or Table.
@@ -106,6 +115,8 @@ def _source_type_from_doc(data, collection: str) -> str:
     """
     if collection == "views":
         return "View"
+    if collection == PROPERTY_GRAPHS_SUBCOLLECTION:
+        return PROPERTY_GRAPH_SOURCE
     if isinstance(data, dict) and data.get(STUB_MARKER):
         return EXTERNAL_TABLE_SOURCE
     if isinstance(data, dict) and data.get("dataset-type") == MATERIALIZED_VIEW_DATASET_TYPE:
@@ -467,7 +478,7 @@ def _get_workspace_datasets(db, workspace_ids: set[str]) -> list[DatasetInfo]:
     queries = [
         (workspace_id, subcollection)
         for workspace_id in sorted(workspace_ids)
-        for subcollection in ("datasets", "views")
+        for subcollection in ("datasets", "views", PROPERTY_GRAPHS_SUBCOLLECTION)
     ]
     if not queries:
         return results
@@ -691,6 +702,17 @@ def _facts_for(db, datasets: list[DatasetInfo]) -> dict[str, _DatasetFacts]:
             facts[dataset.resource] = _DatasetFacts(
                 columns=TASK_DEFINITION_COLUMNS,
                 last_modified_ms=None,
+            )
+            continue
+
+        if dataset.source == PROPERTY_GRAPH_SOURCE:
+            # Nor a property graph: it reads as its structure, one row per
+            # element table, and those columns are fixed. `timestamp-ms` on its
+            # document IS when the definition last changed -- it is replaced
+            # whole -- so unlike a task's it is reported.
+            facts[dataset.resource] = _DatasetFacts(
+                columns=PROPERTY_GRAPH_STRUCTURE_COLUMNS,
+                last_modified_ms=dataset.last_modified_ms,
             )
             continue
 

@@ -284,6 +284,41 @@ TASK_DESCRIPTION = (
     "so it reads as the one row describing itself."
 )
 
+# A property graph holds no rows either -- its vertices and edges are the rows of
+# the tables it names, queried with GQL. Its name answers to a read with its
+# STRUCTURE: one row per element table, which is what a client needs to draw the
+# graph, and never the contents of those tables. The rows come from the engine
+# (opteryx-core `connectors/property_graph_structure.py`, `STRUCTURE_COLUMNS`);
+# this is the mirror of that column list, checked against it by
+# tests/test_virtual_schemas_match_engine.py.
+#
+# Lists are comma-separated, as `information_schema.tasks.writes` is. A property
+# whose name differs from its column reads `column AS name`. The four
+# `source_*`/`destination_*` columns are null on a vertex row.
+PROPERTY_GRAPH_STRUCTURE_COLUMNS: list[EdmProperty] = [
+    _col("element_kind", "VARCHAR"),  # 'vertex' | 'edge'
+    _col("element_name", "VARCHAR"),
+    _col("label", "VARCHAR"),
+    _col("table_name", "VARCHAR"),
+    _col("key_columns", "VARCHAR"),
+    _col("properties", "VARCHAR"),
+    _col("source_vertex", "VARCHAR"),
+    _col("source_key", "VARCHAR"),
+    _col("source_references", "VARCHAR"),
+    _col("destination_vertex", "VARCHAR"),
+    _col("destination_key", "VARCHAR"),
+    _col("destination_references", "VARCHAR"),
+]
+
+PROPERTY_GRAPH_DESCRIPTION = (
+    "A **property graph** over tables in the catalog. It holds no rows of its own, "
+    "so it reads as its structure: one row per vertex or edge table.\n"
+    "\n"
+    "- `element_kind` is `vertex` or `edge`; an edge row names its "
+    "`source_vertex` and `destination_vertex` by their `element_name`\n"
+    "- Query the graph's contents with GQL, or read its tables directly"
+)
+
 
 # Default Custom.Description annotation per virtual dataset, used where the real
 # catalog would otherwise supply a description/comment. The UI renders these
